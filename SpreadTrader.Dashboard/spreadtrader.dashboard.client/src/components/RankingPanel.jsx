@@ -37,7 +37,17 @@ export default function RankingPanel({ ranking }) {
       key: 'spreadPercent',
       render: (v) => <span style={{ color: v >= 0 ? '#3ddc84' : '#ff5c5c', fontWeight: 600 }}>{v.toFixed(2)}%</span>,
     },
-    { title: 'Direction', dataIndex: 'direction', key: 'direction', render: (v) => DIRECTION_LABELS[v] ?? v },
+    {
+      title: 'Direction',
+      dataIndex: 'direction',
+      key: 'direction',
+      render: (v) => {
+        const pending = v.endsWith('(bid pending)')
+        const base = pending ? v.replace(' (bid pending)', '') : v
+        const label = DIRECTION_LABELS[base] ?? base
+        return pending ? `${label} (bid pending, using ask)` : label
+      },
+    },
     { title: 'Updated', dataIndex: 'updatedAt', key: 'updatedAt', render: (v) => new Date(v).toLocaleTimeString() },
   ]
 

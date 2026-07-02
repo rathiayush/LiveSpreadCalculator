@@ -64,7 +64,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
             return;
         }
 
-        var legs = BuildLegs(rule, spread, triggerEvent.SpreadValueAtTrigger);
+        var legs = BuildLegs(rule, spread, triggerEvent.Direction);
         if (legs.Count == 0)
         {
             _logger.LogWarning("Rule {RuleId} fired but has no leg actions configured - nothing to place", rule.Id);
@@ -110,10 +110,10 @@ public sealed class OrderDispatchHostedService : BackgroundService
         }
     }
 
-    private static List<OrderLegRequest> BuildLegs(TriggerRule rule, SpreadDefinition spread, decimal spreadValueAtTrigger)
+    private static List<OrderLegRequest> BuildLegs(TriggerRule rule, SpreadDefinition spread, string direction)
     {
         var (nearAction, farAction) = rule.AutoDirectionFromSpreadSign
-            ? ResolveAutoDirection(spreadValueAtTrigger)
+            ? ResolveAutoDirection(direction)
             : (rule.NearLegAction, rule.FarLegAction);
 
         var legs = new List<OrderLegRequest>();
@@ -151,16 +151,18 @@ public sealed class OrderDispatchHostedService : BackgroundService
     }
 
     /// <summary>
-    /// The calendar-spread carry rule: if the spread (far - near) is negative, the current month
-    /// leg is relatively expensive and the next month leg relatively cheap, so buy current /
-    /// sell next; if positive, do the opposite - sell current / buy next. Flat (exactly zero) is
-    /// treated as "nothing to do" since there's no direction to take a position in.
+    /// The calendar-spread arbitrage rule, decided by SpreadCalculationHostedService and carried
+    /// here verbatim via TriggerEvent.Direction (never re-derived from SpreadValueAtTrigger's
+    /// sign - see the comment on TriggerEvent for why that would be unsafe): if the current
+    /// (near) month is in premium, sell it and buy the next (far) month; if it's at a discount,
+    /// buy it and sell the far month. "Flat" (or a direction string this switch doesn't
+    /// recognize) is treated as "nothing to do" since there's no direction to take a position in.
     /// </summary>
-    private static (TriggerLegAction Near, TriggerLegAction Far) ResolveAutoDirection(decimal spreadValueAtTrigger) =>
-        spreadValueAtTrigger switch
+    private static (TriggerLegAction Near, TriggerLegAction Far) ResolveAutoDirection(string direction) =>
+        direction switch
         {
-            < 0 => (TriggerLegAction.Buy, TriggerLegAction.Sell),
-            > 0 => (TriggerLegAction.Sell, TriggerLegAction.Buy),
+            "BuyNear/SellFar" or "BuyNear/SellFar (bid pending)" => (TriggerLegAction.Buy, TriggerLegAction.Sell),
+            "SellNear/BuyFar" or "SellNear/BuyFar (bid pending)" => (TriggerLegAction.Sell, TriggerLegAction.Buy),
             _ => (TriggerLegAction.None, TriggerLegAction.None),
         };
 

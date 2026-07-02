@@ -1,7 +1,17 @@
 namespace SpreadTrader.Core.Models;
 
+/// <summary>
+/// Direction is carried through from the SpreadSnapshot that crossed the threshold (see
+/// SpreadCalculationHostedService) rather than re-derived from SpreadValueAtTrigger's sign at
+/// dispatch time - deliberately, since the direction decision and the executable spread value
+/// use different price sources (ask-vs-ask for direction, bid/ask-per-leg for the value) and
+/// aren't guaranteed to agree at the margins when bid/ask spreads are wide. Re-deriving from
+/// sign would risk placing an order in the opposite direction from the one actually implied by
+/// the premium/discount call - carrying the explicit Direction avoids that entirely.
+/// </summary>
 public readonly record struct TriggerEvent(
     string RuleId,
     string SpreadId,
     decimal SpreadValueAtTrigger,
+    string Direction,
     DateTimeOffset TriggeredAt);
