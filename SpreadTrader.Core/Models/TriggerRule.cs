@@ -38,15 +38,17 @@ public sealed class TriggerRule
     public TriggerLegAction FarLegAction { get; set; } = TriggerLegAction.None;
 
     /// <summary>
-    /// The calendar-spread carry rule: when true, NearLegAction/FarLegAction above are ignored
-    /// and instead computed at fire time from the sign of the spread value that actually crossed
-    /// the threshold - see SpreadCalculationHostedService.RunCycleAsync for exactly how that
-    /// value is priced (the leg you'd buy at its ask, the leg you'd sell at its bid, not a flat
-    /// ask-vs-ask comparison):
-    ///   - spread value negative -> buy the near (current month) leg, sell the far (next month) leg
-    ///   - spread value positive -> sell the near (current month) leg, buy the far (next month) leg
-    /// This is the default for rules created from the trigger-creation page, since most users
-    /// want "fire off the sign of the move", not a fixed direction baked in ahead of time.
+    /// The calendar-spread arbitrage rule: when true, NearLegAction/FarLegAction above are
+    /// ignored and instead taken from the Direction that SpreadCalculationHostedService already
+    /// decided when it computed the snapshot that crossed the threshold (carried through via
+    /// TriggerEvent.Direction, not re-derived from the spread value's sign - see the comment on
+    /// TriggerEvent for why):
+    ///   - near (current month) leg in premium -> sell the near leg, buy the far (next month) leg
+    ///   - near (current month) leg at a discount -> buy the near leg, sell the far leg
+    /// i.e. sell whichever leg is trading rich and buy whichever leg is trading cheap, so the
+    /// position profits as the spread converges. This is the default for rules created from the
+    /// trigger-creation page, since most users want "fire off which leg is rich/cheap", not a
+    /// fixed direction baked in ahead of time.
     /// </summary>
     public bool AutoDirectionFromSpreadSign { get; set; } = true;
 

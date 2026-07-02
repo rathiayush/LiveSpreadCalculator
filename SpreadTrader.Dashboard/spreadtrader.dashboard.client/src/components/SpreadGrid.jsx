@@ -17,6 +17,16 @@ export default function SpreadGrid({ definitions, liveValues }) {
     Flat: 'Flat',
   }
 
+  // direction is either a plain "BuyNear/SellFar" / "SellNear/BuyFar" / "Flat", or one of the
+  // first two with " (bid pending)" appended - the backend falls back to that leg's ask when
+  // the bid it would need to price a sell hasn't arrived yet, rather than hiding the row.
+  const describeDirection = (direction) => {
+    const pending = direction.endsWith('(bid pending)')
+    const base = pending ? direction.replace(' (bid pending)', '') : direction
+    const label = DIRECTION_LABELS[base] ?? base
+    return pending ? `${label} (bid pending, using ask)` : label
+  }
+
   const columns = [
     { title: 'Underlying', dataIndex: 'underlying', key: 'underlying', fixed: 'left' },
     { title: 'Near leg', key: 'near', render: (_, r) => r.nearLeg.tradingSymbol },
@@ -24,12 +34,20 @@ export default function SpreadGrid({ definitions, liveValues }) {
     {
       title: 'Near price',
       key: 'nearPrice',
-      render: (_, r) => r.live ? `${r.live.nearPrice.toFixed(2)} (${r.live.direction === 'SellNear/BuyFar' ? 'bid' : 'ask'})` : '—',
+      render: (_, r) => {
+        if (!r.live) return '—'
+        const usesBid = r.live.direction === 'SellNear/BuyFar'
+        return `${r.live.nearPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`
+      },
     },
     {
       title: 'Far price',
       key: 'farPrice',
-      render: (_, r) => r.live ? `${r.live.farPrice.toFixed(2)} (${r.live.direction === 'BuyNear/SellFar' ? 'bid' : 'ask'})` : '—',
+      render: (_, r) => {
+        if (!r.live) return '—'
+        const usesBid = r.live.direction === 'BuyNear/SellFar'
+        return `${r.live.farPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`
+      },
     },
     {
       title: 'Spread',
@@ -40,7 +58,7 @@ export default function SpreadGrid({ definitions, liveValues }) {
         </span>
       ) : '—',
     },
-    { title: 'Direction', key: 'direction', render: (_, r) => r.live ? (DIRECTION_LABELS[r.live.direction] ?? r.live.direction) : '—' },
+    { title: 'Direction', key: 'direction', render: (_, r) => r.live ? describeDirection(r.live.direction) : '—' },
     { title: 'Updated', key: 'updated', render: (_, r) => r.live ? new Date(r.live.updatedAt).toLocaleTimeString() : '—' },
   ]
 

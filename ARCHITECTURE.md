@@ -117,18 +117,27 @@ Four `BackgroundService`s, registered as singletons, running for the life of the
    per event (direction resolved per §6), and dispatches each sequentially through
    `IOrderGateway`, which internally paces itself under Kite's order-placement rate limit.
 
-## 5. Why ask price, not last traded price
+## 5. Why bid/ask depth, not last traded price
 
-Trigger thresholds are judged against each leg's **best ask price**, taken from live market
-depth, not LTP. LTP only updates when a trade actually happens and can be stale between prints;
-ask price reflects what you'd actually pay to buy right now, which is what matters for deciding
-whether a spread is worth acting on. Kite only includes market depth in **`"full"`** ticker mode
-(`Kite:TickerMode` in `appsettings.json`) - `"quote"`/`"ltp"` modes carry LTP/OHLC but no
-bid/ask at all. `KiteTickPacketParser` reads the first bid/offer entries out of the 184-byte
-full-mode packet (bytes 68-72 and 128-132 respectively) into `Tick.BestBidPrice` /
-`Tick.BestAskPrice`. Full mode costs more bandwidth/CPU than quote mode (depth changes push
-extra ticks) - an acceptable tradeoff at ~100-200 instruments, worth reconsidering if the
-instrument count grows much further.
+Trigger thresholds are judged against live market depth, never last traded price (LTP) - LTP
+only updates when a trade actually happens and can be stale between prints. But it's also not a
+flat ask-vs-ask comparison: `SpreadCalculationHostedService.RunCycleAsync` first compares the two
+legs' **ask** prices to decide direction (near month in premium -> you'd sell it; at a discount
+-> you'd buy it - see §6), then prices each leg on the side you'd actually trade it - the leg
+you'd **buy** at its **ask** (what you'd pay), the leg you'd **sell** at its **bid** (what you'd
+receive). This makes `SpreadValue` the realistically executable spread, not an optimistic number
+that ignores the bid/ask cost of actually putting the trade on. If the bid needed to price a sell
+leg hasn't arrived yet (bid depth updates lag ask depth, especially on far-month contracts), the
+service falls back to that leg's ask rather than hiding the spread entirely - `Direction` on the
+snapshot is suffixed `"(bid pending)"` in that case so the UI can show it's a provisional value.
+
+Kite only includes market depth in **`"full"`** ticker mode (`Kite:TickerMode` in
+`appsettings.json`) - `"quote"`/`"ltp"` modes carry LTP/OHLC but no bid/ask at all.
+`KiteTickPacketParser` reads the first bid/offer entries out of the 184-byte full-mode packet
+(bytes 68-72 and 128-132 respectively) into `Tick.BestBidPrice` / `Tick.BestAskPrice`. Full mode
+costs more bandwidth/CPU than quote mode (depth changes push extra ticks) - an acceptable
+tradeoff at ~100-200 instruments, worth reconsidering if the instrument count grows much
+further.
 
 ## 6. Trigger evaluation and order direction
 
@@ -143,15 +152,23 @@ extra pieces of state make repeated firing safe:
   arming, as a last-resort guard against a burst of duplicate orders off one noisy price move.
 
 **Order direction** defaults to `AutoDirectionFromSpreadSign = true`: at fire time, the engine
-looks at the sign of the spread value that actually crossed the threshold and buys the cheaper
-leg / sells the richer one -
+sells whichever leg is trading rich and buys whichever leg is trading cheap (classic
+calendar-spread arbitrage - the position profits as the spread converges back toward fair
+value) -
 
-- spread value **negative** (near leg pricier than far) -> **buy near, sell far**
-- spread value **positive** (far leg pricier than near) -> **sell near, buy far**
+- near (current month) leg **in premium** (near ask > far ask) -> **sell near, buy far**
+- near (current month) leg **at a discount** (near ask < far ask) -> **buy near, sell far**
 
-This is the calendar-spread carry trade: whichever leg is "cheap" relative to the other gets
-bought. Set `AutoDirectionFromSpreadSign = false` on a rule to instead pin fixed
-`NearLegAction`/`FarLegAction` values that ignore the spread's sign.
+This direction is decided once, by `SpreadCalculationHostedService`, at the same moment it
+computes the snapshot (see §5 - the leg being bought is priced at its ask, the leg being sold at
+its bid) and carried through verbatim on `TriggerEvent.Direction` all the way to
+`OrderDispatchHostedService`. It is deliberately **not** re-derived from `SpreadValue`'s sign at
+dispatch time: because the sell leg is priced at its bid rather than its ask, `SpreadValue` can
+occasionally narrow or even flip sign relative to the ask-ask comparison that decided direction
+(when a leg's bid/ask spread is wide) - carrying the explicit direction avoids any chance of
+placing an order in the wrong direction from the one actually implied by the premium/discount
+call. Set `AutoDirectionFromSpreadSign = false` on a rule to instead pin fixed
+`NearLegAction`/`FarLegAction` values that ignore direction entirely.
 
 Every rule mutation (fired, re-armed, enabled/disabled) calls `ITriggerRuleStore.Upsert(rule)`
 again, which is what keeps the CSV file (§7) in sync with runtime state, not just rule

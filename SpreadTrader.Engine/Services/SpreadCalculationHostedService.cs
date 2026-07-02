@@ -12,13 +12,14 @@ namespace SpreadTrader.Engine.Services;
 /// publishes only the spreads that actually changed since the last cycle, and evaluates trigger
 /// rules against the fresh values inline. Never uses last traded price - LTP can be stale
 /// between trades. Instead each leg is priced on whichever side you'd actually trade it: the
-/// ask-ask difference decides direction (near pricier -> buy near/sell far; far pricier -> sell
-/// near/buy far), then the leg being bought is priced at its ask and the leg being sold at its
-/// bid - see the direction comment inside RunCycleAsync for the full reasoning. This requires
-/// the ticker to run in "full" mode (see KiteOptions.TickerMode) since only full-mode packets
-/// carry market depth (both bid and ask). A single timer loop is simpler and cheap enough at
-/// ~100-200 instruments / ~100 spreads; it avoids extra channel plumbing between tick arrival
-/// and trigger evaluation.
+/// ask-ask difference decides direction using the classic calendar-spread arbitrage rule (near
+/// month in premium -> sell near/buy far; near month at a discount -> buy near/sell far), then
+/// the leg being bought is priced at its ask and the leg being sold at its bid - see the
+/// direction comment inside RunCycleAsync for the full reasoning. This requires the ticker to
+/// run in "full" mode (see KiteOptions.TickerMode) since only full-mode packets carry market
+/// depth (both bid and ask). A single timer loop is simpler and cheap enough at ~100-200
+/// instruments / ~100 spreads; it avoids extra channel plumbing between tick arrival and
+/// trigger evaluation.
 /// </summary>
 public sealed class SpreadCalculationHostedService : BackgroundService
 {
@@ -87,35 +88,42 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             // then this spread is simply skipped rather than published with a wrong (zero) value.
             if (nearTick.BestAskPrice == 0 || farTick.BestAskPrice == 0) continue;
 
-            // Decide direction from the ask-ask difference (same rule
-            // OrderDispatchHostedService.ResolveAutoDirection uses at fire time, so the direction
-            // implied by the displayed spread always matches the direction an order would
-            // actually take): if the near leg is pricier, you'd buy near / sell far; if the far
-            // leg is pricier, you'd sell near / buy far. Then price each leg on the side you'd
-            // actually trade it - ask for the leg you're buying, bid for the leg you're selling -
+            // Decide direction from the ask-ask difference: this is the classic calendar-spread
+            // arbitrage rule - sell whichever leg is trading rich, buy whichever leg is trading
+            // cheap, so the position profits as the spread converges back toward fair value.
+            //   - current (near) month in PREMIUM (near ask > far ask): SELL near, BUY far.
+            //   - current (near) month in DISCOUNT (near ask < far ask): BUY near, SELL far.
+            // Then price each leg on the side you'd actually trade it - ask for the leg you're
+            // buying (what you'd pay), bid for the leg you're selling (what you'd receive) -
             // instead of comparing ask to ask, which overstates how good the spread really is
-            // since it ignores the bid/ask cost of actually executing it.
+            // since it ignores the bid/ask cost of actually executing it. This exact Direction
+            // string is carried through to OrderDispatchHostedService via TriggerEvent.Direction
+            // rather than re-derived from SpreadValue's sign there, since pricing the sell leg at
+            // its (lower) bid can occasionally narrow or even flip the sign of SpreadValue versus
+            // the ask-ask call that decided direction - the direction decided here is always the
+            // one that's actually used, with no risk of the two disagreeing.
             var askAskDiff = farTick.BestAskPrice - nearTick.BestAskPrice;
             decimal nearPrice, farPrice;
             string direction;
 
             if (askAskDiff < 0)
             {
-                // near is pricier -> buy near (pay ask), sell far (receive bid). The far leg's
-                // bid tends to arrive later than its ask (fewer depth updates on far-month
-                // contracts) - rather than blacking the whole row out until it shows up, fall
-                // back to that leg's ask so the row still shows a (slightly optimistic) value.
-                nearPrice = nearTick.BestAskPrice;
-                farPrice = farTick.BestBidPrice != 0 ? farTick.BestBidPrice : farTick.BestAskPrice;
-                direction = farTick.BestBidPrice != 0 ? "BuyNear/SellFar" : "BuyNear/SellFar (bid pending)";
-            }
-            else if (askAskDiff > 0)
-            {
-                // far is pricier -> sell near (receive bid), buy far (pay ask) - same fallback
-                // as above if the near leg's bid hasn't arrived yet.
+                // near is pricier (premium) -> sell near (receive bid), buy far (pay ask). The
+                // near leg's bid tends to arrive later than its ask (fewer depth updates than a
+                // heavily-quoted ask side) - rather than blacking the whole row out until it
+                // shows up, fall back to that leg's ask so the row still shows a (slightly
+                // optimistic) value in the meantime.
                 nearPrice = nearTick.BestBidPrice != 0 ? nearTick.BestBidPrice : nearTick.BestAskPrice;
                 farPrice = farTick.BestAskPrice;
                 direction = nearTick.BestBidPrice != 0 ? "SellNear/BuyFar" : "SellNear/BuyFar (bid pending)";
+            }
+            else if (askAskDiff > 0)
+            {
+                // far is pricier, i.e. near is at a discount -> buy near (pay ask), sell far
+                // (receive bid) - same fallback as above if the far leg's bid hasn't arrived yet.
+                nearPrice = nearTick.BestAskPrice;
+                farPrice = farTick.BestBidPrice != 0 ? farTick.BestBidPrice : farTick.BestAskPrice;
+                direction = farTick.BestBidPrice != 0 ? "BuyNear/SellFar" : "BuyNear/SellFar (bid pending)";
             }
             else
             {
@@ -190,8 +198,9 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             if (rule.OneShot) rule.Enabled = false;
             _ruleStore.Upsert(rule); // persist fired/disabled state so a restart doesn't re-fire it
 
-            var triggerEvent = new TriggerEvent(rule.Id, spread.Id, snapshot.SpreadValue, DateTimeOffset.UtcNow);
-            _logger.LogInformation("Trigger fired: rule={RuleId} spread={SpreadId} value={Value}", rule.Id, spread.Id, snapshot.SpreadValue);
+            var triggerEvent = new TriggerEvent(rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow);
+            _logger.LogInformation("Trigger fired: rule={RuleId} spread={SpreadId} value={Value} direction={Direction}",
+                rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction);
 
             await _triggerSink.PublishAsync(triggerEvent, stoppingToken);
             await _triggerChannel.Writer.WriteAsync(triggerEvent, stoppingToken);

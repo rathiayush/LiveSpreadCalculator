@@ -16,7 +16,9 @@ namespace SpreadTrader.Engine.Services;
 /// SpreadCalculationHostedService: that one runs every SpreadRecalculationIntervalMs (e.g.
 /// 300ms) and only publishes spreads whose value changed, which is the right cadence for a live
 /// tick feed but the wrong cadence for "what should I look at right now" - re-sorting the whole
-/// list every 300ms would just flicker.
+/// list every 300ms would just flicker. On startup (see WarmUpAsync) it retries every 5 seconds
+/// until the first non-empty ranking is available, rather than waiting a full
+/// RankingIntervalMinutes for data that's usually ready within seconds.
 /// </summary>
 public sealed class SpreadRankingHostedService : BackgroundService
 {
@@ -43,12 +45,10 @@ public sealed class SpreadRankingHostedService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var interval = TimeSpan.FromMinutes(Math.Max(0.1, _options.RankingIntervalMinutes));
+
+        await WarmUpAsync(stoppingToken);
+
         using var timer = new PeriodicTimer(interval);
-
-        // Publish once immediately on startup too, so the dashboard has a ranking to show
-        // straight away rather than waiting a full interval after the process starts.
-        await RunCycleAsync(stoppingToken);
-
         while (await timer.WaitForNextTickAsync(stoppingToken))
         {
             try
@@ -62,7 +62,47 @@ public sealed class SpreadRankingHostedService : BackgroundService
         }
     }
 
-    private async Task RunCycleAsync(CancellationToken stoppingToken)
+    /// <summary>
+    /// Right after startup (or right after a fresh universe build) ISpreadSnapshotCache is
+    /// empty - no ticks have arrived yet - so the very first cycle publishes nothing. Without
+    /// this, the next attempt wouldn't happen until a full RankingIntervalMinutes later (default
+    /// 3 minutes), even though real snapshot data is usually ready within a few seconds. Instead,
+    /// retry every 5 seconds until the first non-empty ranking is produced, capped at 2 minutes
+    /// so a genuinely quiet period (market closed, nothing subscribed yet) doesn't spin forever -
+    /// the normal timer loop picks it up from there regardless.
+    /// </summary>
+    private async Task WarmUpAsync(CancellationToken stoppingToken)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddMinutes(2);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            bool published;
+            try
+            {
+                published = await RunCycleAsync(stoppingToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Spread ranking warm-up cycle failed");
+                published = false;
+            }
+
+            if (published || DateTimeOffset.UtcNow >= deadline)
+                return;
+
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+        }
+    }
+
+    private async Task<bool> RunCycleAsync(CancellationToken stoppingToken)
     {
         var ranked = _snapshotCache.GetAll()
             .OrderByDescending(s => Math.Abs(s.SpreadPercent))
@@ -84,5 +124,7 @@ public sealed class SpreadRankingHostedService : BackgroundService
             await _publisher.PublishRankingAsync(ranked, stoppingToken);
 
         _logger.LogDebug("Published spread ranking ({Count} spreads)", ranked.Length);
+
+        return ranked.Length > 0;
     }
 }
