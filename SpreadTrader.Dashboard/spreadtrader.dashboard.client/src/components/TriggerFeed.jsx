@@ -1,37 +1,31 @@
-import { Card, List, Typography } from 'antd'
-
-const DIRECTION_LABELS = {
-  'BuyNear/SellFar': 'Buy near / Sell far',
-  'SellNear/BuyFar': 'Sell near / Buy far',
-  Flat: 'Flat',
-}
-
-function describeDirection(direction) {
-  if (!direction) return null
-  const pending = direction.endsWith('(bid pending)')
-  const base = pending ? direction.replace(' (bid pending)', '') : direction
-  const label = DIRECTION_LABELS[base] ?? base
-  return pending ? `${label} (bid pending, used ask)` : label
-}
+import { Card, List, Typography, Space } from 'antd'
+import { ThunderboltOutlined } from '@ant-design/icons'
+import DirectionTag from './DirectionTag'
 
 export default function TriggerFeed({ events }) {
   return (
-    <Card title="Recent trigger fires" style={{ marginBottom: 16 }}>
+    <Card title={<Space><ThunderboltOutlined style={{ color: '#f5a623' }} /> Recent trigger fires</Space>} style={{ marginBottom: 16 }}>
       {events.length === 0 ? (
         <Typography.Text type="secondary">No triggers fired yet.</Typography.Text>
       ) : (
         <List
           size="small"
           dataSource={events}
-          style={{ maxHeight: 280, overflowY: 'auto' }}
+          style={{ maxHeight: 320, overflowY: 'auto' }}
           renderItem={(e, i) => (
             <List.Item key={`${e.ruleId}-${e.triggeredAt}-${i}`}>
-              <Typography.Text>
-                <strong>{e.ruleId}</strong> on {e.spreadId} at {e.spreadValueAtTrigger.toFixed(2)}
-                {e.direction && <> ({describeDirection(e.direction)})</>}
-                {' — '}
-                <Typography.Text type="secondary">{new Date(e.triggeredAt).toLocaleTimeString()}</Typography.Text>
-              </Typography.Text>
+              <Space wrap size="small">
+                <ThunderboltOutlined style={{ color: '#f5a623' }} />
+                <strong>{e.ruleId}</strong>
+                <Typography.Text type="secondary">on</Typography.Text>
+                <span>{e.spreadId}</span>
+                <Typography.Text type="secondary">at</Typography.Text>
+                <span>{e.spreadValueAtTrigger.toFixed(2)}</span>
+                {e.direction && <DirectionTag direction={e.direction} />}
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {new Date(e.triggeredAt).toLocaleTimeString()}
+                </Typography.Text>
+              </Space>
             </List.Item>
           )}
         />

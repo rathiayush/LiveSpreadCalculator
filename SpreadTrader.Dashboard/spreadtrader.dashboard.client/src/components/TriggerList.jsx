@@ -1,4 +1,13 @@
 import { Card, Table, Button, Popconfirm, Tag, Typography, Space } from 'antd'
+import {
+  ThunderboltOutlined,
+  CheckCircleOutlined,
+  ClockCircleOutlined,
+  StopOutlined,
+  PoweroffOutlined,
+  DeleteOutlined,
+  AimOutlined,
+} from '@ant-design/icons'
 import { api } from '../api'
 
 export default function TriggerList({ triggers, onChanged }) {
@@ -10,6 +19,11 @@ export default function TriggerList({ triggers, onChanged }) {
 
   const remove = async (id) => {
     await api.deleteTrigger(id)
+    onChanged()
+  }
+
+  const removeAll = async () => {
+    await api.deleteAllTriggers()
     onChanged()
   }
 
@@ -25,7 +39,7 @@ export default function TriggerList({ triggers, onChanged }) {
       title: 'Legs',
       key: 'legs',
       render: (_, t) => t.autoDirectionFromSpreadSign ? (
-        <Tag color="blue">auto (by spread sign)</Tag>
+        <Tag icon={<AimOutlined />} color="blue">auto (by spread sign)</Tag>
       ) : (
         <>
           {t.nearLegAction !== 'None' && `near ${t.nearLegAction}`}
@@ -39,8 +53,10 @@ export default function TriggerList({ triggers, onChanged }) {
       title: 'Status',
       key: 'status',
       render: (_, t) => {
-        if (!t.enabled) return <Tag>disabled</Tag>
-        return t.isArmed ? <Tag color="success">armed</Tag> : <Tag color="warning">fired</Tag>
+        if (!t.enabled) return <Tag icon={<StopOutlined />}>disabled</Tag>
+        return t.isArmed
+          ? <Tag icon={<CheckCircleOutlined />} color="success">armed</Tag>
+          : <Tag icon={<ClockCircleOutlined />} color="warning">fired</Tag>
       },
     },
     {
@@ -48,11 +64,11 @@ export default function TriggerList({ triggers, onChanged }) {
       key: 'actions',
       render: (_, t) => (
         <Space size="small">
-          <Button type="link" size="small" onClick={() => toggle(t)}>
+          <Button type="link" size="small" icon={<PoweroffOutlined />} onClick={() => toggle(t)}>
             {t.enabled ? 'Disable' : 'Enable'}
           </Button>
           <Popconfirm title={`Remove trigger "${t.id}"?`} onConfirm={() => remove(t.id)} okText="Remove" okButtonProps={{ danger: true }}>
-            <Button type="link" danger size="small">Remove</Button>
+            <Button type="link" danger size="small" icon={<DeleteOutlined />}>Remove</Button>
           </Popconfirm>
         </Space>
       ),
@@ -60,7 +76,21 @@ export default function TriggerList({ triggers, onChanged }) {
   ]
 
   return (
-    <Card title={`Configured triggers (${triggers.length})`} style={{ marginBottom: 16 }}>
+    <Card
+      title={<Space><ThunderboltOutlined style={{ color: '#f5a623' }} /> Configured triggers ({triggers.length})</Space>}
+      extra={triggers.length > 0 && (
+        <Popconfirm
+          title={`Delete all ${triggers.length} triggers?`}
+          description="This removes every trigger rule, not just the ones shown on this page. Cannot be undone."
+          onConfirm={removeAll}
+          okText="Delete all"
+          okButtonProps={{ danger: true }}
+        >
+          <Button danger size="small" icon={<DeleteOutlined />}>Delete all</Button>
+        </Popconfirm>
+      )}
+      style={{ marginBottom: 16 }}
+    >
       {triggers.length === 0 ? (
         <Typography.Text type="secondary">
           None yet - add one below. Saved to a CSV file on the server, so these survive a restart.

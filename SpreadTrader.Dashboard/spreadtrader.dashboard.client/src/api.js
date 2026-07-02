@@ -26,6 +26,7 @@ export const api = {
   createTrigger: (rule) =>
     fetch('/api/triggers', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(rule) }).then(handle),
   deleteTrigger: (id) => fetch(`/api/triggers/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
+  deleteAllTriggers: () => fetch('/api/triggers', { method: 'DELETE' }).then(handle),
   enableTrigger: (id) => fetch(`/api/triggers/${encodeURIComponent(id)}/enable`, { method: 'POST' }).then(handle),
   disableTrigger: (id) => fetch(`/api/triggers/${encodeURIComponent(id)}/disable`, { method: 'POST' }).then(handle),
   // Applies one threshold/quantity/product template across many spreads at once (e.g. the whole

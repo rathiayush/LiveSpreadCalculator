@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
+using System.Threading;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 
@@ -46,6 +47,15 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
         return removed;
     }
 
+    public int RemoveAll()
+    {
+        var count = _rules.Count;
+        if (count == 0) return 0;
+        _rules.Clear();
+        Save();
+        return count;
+    }
+
     public IReadOnlyList<TriggerRule> GetAll() => _rules.Values.ToArray();
 
     public IReadOnlyList<TriggerRule> GetForSpread(string spreadId) =>
@@ -57,6 +67,16 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
     {
         lock (_fileLock)
         {
+            // A leftover ".tmp" here means a previous Save() wrote the temp copy successfully
+            // but failed to move it into place (e.g. the destination was transiently locked by
+            // an antivirus scanner, search indexer, or a sync client) - see Save()/WithRetry.
+            // It's never authoritative, so just clear it out rather than let it linger.
+            var staleTempPath = _filePath + ".tmp";
+            if (File.Exists(staleTempPath))
+            {
+                try { File.Delete(staleTempPath); } catch { /* best-effort cleanup */ }
+            }
+
             if (!File.Exists(_filePath))
             {
                 EnsureDirectory();
@@ -84,10 +104,50 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
                 sb.AppendLine(FormatLine(rule));
 
             // Write to a temp file then move over the real one, so a crash mid-write can't
-            // leave a half-written / corrupt CSV behind.
+            // leave a half-written / corrupt CSV behind. Both steps are retried a few times
+            // with a short backoff: on Windows the CSV or its temp copy can be transiently
+            // locked by an antivirus scanner, a sync client (OneDrive/Dropbox), the search
+            // indexer, or an editor that happens to have the file open - none of which are
+            // under this process's control, and all of which normally clear within a second
+            // or two. Without the retry, that transient lock surfaces as an
+            // UnauthorizedAccessException all the way up to the caller (e.g. "add trigger").
             var tempPath = _filePath + ".tmp";
-            File.WriteAllText(tempPath, sb.ToString());
-            File.Move(tempPath, _filePath, overwrite: true);
+            var content = sb.ToString();
+            WithRetry(() =>
+            {
+                ClearReadOnlyIfSet(tempPath);
+                File.WriteAllText(tempPath, content);
+            });
+            WithRetry(() =>
+            {
+                ClearReadOnlyIfSet(_filePath);
+                File.Move(tempPath, _filePath, overwrite: true);
+            });
+        }
+    }
+
+    private static void ClearReadOnlyIfSet(string path)
+    {
+        if (!File.Exists(path)) return;
+        var attributes = File.GetAttributes(path);
+        if ((attributes & FileAttributes.ReadOnly) == FileAttributes.ReadOnly)
+            File.SetAttributes(path, attributes & ~FileAttributes.ReadOnly);
+    }
+
+    private static void WithRetry(Action action)
+    {
+        const int maxAttempts = 6;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                action();
+                return;
+            }
+            catch (Exception ex) when ((ex is IOException || ex is UnauthorizedAccessException) && attempt < maxAttempts)
+            {
+                Thread.Sleep(150 * attempt);
+            }
         }
     }
 
