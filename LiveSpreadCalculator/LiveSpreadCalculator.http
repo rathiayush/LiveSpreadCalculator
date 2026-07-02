@@ -1,0 +1,6 @@
+@LiveSpreadCalculator_HostAddress = http://localhost:5159
+
+GET {{LiveSpreadCalculator_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

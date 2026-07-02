@@ -1,0 +1,3 @@
+/* Unused - styling now comes from Ant Design components (see App.jsx's ConfigProvider theme)
+   plus inline styles on individual components. Kept as a harmless no-op rather than deleted (no
+   delete tool available) - safe to remove by hand. */

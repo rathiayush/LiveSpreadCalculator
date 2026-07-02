@@ -1,0 +1,31 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: LiveSpreadCalculator/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      # Fill these in (or pass via `docker compose --env-file`, a .env file next to this
+      # compose file, or your platform's secrets manager) - never commit real values.
+      Kite__ApiKey: ${KITE_API_KEY:-}
+      Kite__ApiSecret: ${KITE_API_SECRET:-}
+      Kite__AccessToken: ${KITE_ACCESS_TOKEN:-}
+      # Must match wherever the web container / reverse proxy is publicly reachable, so the
+      # Kite login callback redirects the browser back to the right place and CORS allows it.
+      Dashboard__BaseUrl: ${DASHBOARD_BASE_URL:-http://localhost:8081}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+  web:
+    build:
+      context: SpreadTrader.Dashboard/spreadtrader.dashboard.client
+    ports:
+      - "8081:80"
+    depends_on:
+      - api
