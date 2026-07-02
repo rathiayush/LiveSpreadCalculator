@@ -1,19 +1,12 @@
-/* Page chrome now comes from Ant Design's ConfigProvider (see App.jsx, darkAlgorithm) - these
-   are just the bare html/body resets so there's no light-mode flash before antd's own styles
-   apply. Font/color tokens below are unused by any component but kept in case something outside
-   antd (e.g. plain <code>) still wants them. */
+/* Page chrome comes from Ant Design's ConfigProvider (see App.jsx, darkAlgorithm + custom
+   tokens) - this file is just resets and the handful of things antd doesn't own. Deliberately
+   does NOT style h1/h2/etc. - antd's <Typography.Title> renders those tags itself and already
+   has sensible sizing; a global override here would fight it. */
 :root {
-  --text: #9ca3af;
-  --text-h: #f3f4f6;
-  --bg: #16171d;
-  --border: #2e303a;
-  --code-bg: #1f2028;
-
-  --sans: system-ui, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, Consolas, monospace;
+  --bg: #0b0d12;
+  --mono: ui-monospace, 'SFMono-Regular', Consolas, Menlo, monospace;
 
   color-scheme: dark;
-  color: var(--text);
   background: var(--bg);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
@@ -21,59 +14,55 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+* {
+  box-sizing: border-box;
+}
+
+html,
 body {
   margin: 0;
+  padding: 0;
   background: var(--bg);
 }
 
 #root {
   width: 100%;
   min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  box-sizing: border-box;
-}
-
-h1,
-h2 {
-  font-family: var(--sans);
-  font-weight: 500;
-  color: var(--text-h);
-}
-
-h1 {
-  font-size: 56px;
-  letter-spacing: -1.68px;
-  margin: 32px 0;
-  @media (max-width: 1024px) {
-    font-size: 36px;
-    margin: 20px 0;
-  }
-}
-h2 {
-  font-size: 24px;
-  line-height: 118%;
-  letter-spacing: -0.24px;
-  margin: 0 0 8px;
-  @media (max-width: 1024px) {
-    font-size: 20px;
-  }
-}
-p {
-  margin: 0;
-}
-
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
 }
 
 code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+/* Slightly tightens up antd's default card padding/heading rhythm for a denser, more
+   "trading terminal" feel without touching component internals. */
+.ant-card-head-title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.ant-table-small .ant-table-thead > tr > th {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a2d38;
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #383c4a;
 }

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Card, Row, Col, InputNumber, Select, Switch, Button, Alert, Typography, Space } from 'antd'
+import { ThunderboltOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
 const emptyForm = {
@@ -12,10 +13,10 @@ const emptyForm = {
 }
 
 // Configures one trigger for however many spreads are currently defined (e.g. the whole
-// top-150 universe after a build) instead of adding 150+ rules by hand. Creates two rules per
+// built universe) instead of adding rules by hand one at a time. Creates two rules per
 // spread - fires when the spread % deviates thresholdPercent above OR below zero - both with
-// auto-direction, so the calendar-spread carry rule (buy current/sell next when negative, sell
-// current/buy next when positive) applies uniformly. See BulkTriggerTemplateService.
+// auto-direction, so the calendar-spread arbitrage rule (sell the premium leg, buy the discount
+// leg) applies uniformly. See BulkTriggerTemplateService.
 export default function BulkTriggerForm({ spreadCount, onCreated }) {
   const [form, setForm] = useState(emptyForm)
   const [busy, setBusy] = useState(false)
@@ -48,7 +49,7 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
   }
 
   return (
-    <Card title="Bulk trigger template" style={{ marginBottom: 16 }}>
+    <Card title={<Space><ThunderboltOutlined style={{ color: '#f5a623' }} /> Bulk trigger template</Space>} style={{ marginBottom: 16 }}>
       <form onSubmit={submit}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <Typography.Text type="secondary">
@@ -108,7 +109,7 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
           </Row>
 
           {error && <Alert type="error" message={error} showIcon />}
-          <Button type="primary" htmlType="submit" loading={busy} disabled={spreadCount === 0}>
+          <Button type="primary" icon={<ThunderboltOutlined />} htmlType="submit" loading={busy} disabled={spreadCount === 0}>
             Apply to all {spreadCount} spreads
           </Button>
           {result && (

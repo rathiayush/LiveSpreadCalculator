@@ -55,8 +55,32 @@ public sealed class TriggersController : ControllerBase
             RearmBuffer = request.RearmBuffer,
         };
 
-        _ruleStore.Upsert(rule);
+        if (!TryUpsert(rule, out var problem)) return problem!;
         return Ok(rule);
+    }
+
+    /// <summary>Wraps ITriggerRuleStore.Upsert so a locked CSV file (antivirus scan, sync
+    /// client, search indexer, or an editor with the file open) surfaces as a clear 503 instead
+    /// of an unhandled UnauthorizedAccessException/IOException stack trace. CsvTriggerRuleStore
+    /// already retries transient locks internally - this only fires if all retries fail.</summary>
+    private bool TryUpsert(TriggerRule rule, out ActionResult? problem)
+    {
+        try
+        {
+            _ruleStore.Upsert(rule);
+            problem = null;
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+        {
+            problem = Problem(
+                title: "Could not save trigger to disk",
+                detail: "The trigger's CSV file (App_Data/triggers.csv) is locked by another process " +
+                    "- an antivirus scan, a sync client (OneDrive/Dropbox), the search indexer, or " +
+                    "an editor/Excel that has it open. Close anything that might have it open and try again.",
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+            return false;
+        }
     }
 
     /// <summary>Applies one threshold/quantity/product template across many spreads at once
@@ -89,7 +113,8 @@ public sealed class TriggersController : ControllerBase
         var rule = _ruleStore.Get(id);
         if (rule is null) return NotFound();
         rule.Enabled = false;
-        _ruleStore.Upsert(rule); // re-persist (CsvTriggerRuleStore rewrites the file on Upsert)
+        // re-persist (CsvTriggerRuleStore rewrites the file on Upsert)
+        if (!TryUpsert(rule, out var problem)) return problem!;
         return Ok(rule);
     }
 
@@ -100,10 +125,19 @@ public sealed class TriggersController : ControllerBase
         if (rule is null) return NotFound();
         rule.Enabled = true;
         rule.IsArmed = true;
-        _ruleStore.Upsert(rule);
+        if (!TryUpsert(rule, out var problem)) return problem!;
         return Ok(rule);
     }
 
     [HttpDelete("{id}")]
     public IActionResult Delete(string id) => _ruleStore.Remove(id) ? NoContent() : NotFound();
+
+    /// <summary>Removes every trigger rule in one call - e.g. to clear out a bulk-template run
+    /// before re-applying it with different parameters, instead of removing rules one by one.</summary>
+    [HttpDelete]
+    public ActionResult<int> DeleteAll()
+    {
+        var removed = _ruleStore.RemoveAll();
+        return Ok(removed);
+    }
 }

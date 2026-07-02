@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Card, Button, Alert, Typography, Space, InputNumber } from 'antd'
+import { GlobalOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
 // One button that builds the futures universe straight from Kite's live instrument master -
@@ -31,7 +32,7 @@ export default function UniversePanel({ onSpreadsChanged }) {
   }
 
   return (
-    <Card title="Futures universe builder" style={{ marginBottom: 16 }}>
+    <Card title={<Space><GlobalOutlined style={{ color: '#4da3ff' }} /> Futures universe builder</Space>} style={{ marginBottom: 16 }}>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Typography.Text type="secondary">
           Fetches every stock Kite currently lists NFO futures for (no manual list to maintain),
@@ -47,7 +48,7 @@ export default function UniversePanel({ onSpreadsChanged }) {
             addonBefore="Limit to first"
             addonAfter="symbols"
           />
-          <Button type="primary" onClick={build} loading={busy}>
+          <Button type="primary" icon={<ThunderboltOutlined />} onClick={build} loading={busy}>
             Build universe from Kite
           </Button>
         </Space>

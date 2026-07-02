@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Card, Row, Col, Input, InputNumber, Select, Switch, Button, Alert, Typography, Space } from 'antd'
+import { PlusCircleOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
 const LEG_ACTIONS = ['None', 'Buy', 'Sell']
@@ -54,7 +55,7 @@ export default function TriggerForm({ spreads, onCreated }) {
   }
 
   return (
-    <Card title="Add trigger" style={{ marginBottom: 16 }}>
+    <Card title={<Space><PlusCircleOutlined style={{ color: '#3ddc84' }} /> Add trigger</Space>} style={{ marginBottom: 16 }}>
       <form onSubmit={submit}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <Typography.Text type="secondary">
@@ -108,9 +109,9 @@ export default function TriggerForm({ spreads, onCreated }) {
 
           {form.autoDirectionFromSpreadSign ? (
             <Typography.Text type="secondary">
-              When the spread value that crosses the threshold is negative, the engine buys the near
-              (current month) leg and sells the far (next month) leg. When it's positive, it does the
-              opposite - sells near, buys far.
+              Classic calendar-spread arbitrage: when the near (current month) leg is trading at a
+              premium to the far leg, the engine sells near and buys far. When near is at a
+              discount, it does the opposite - buys near, sells far.
             </Typography.Text>
           ) : (
             <Row gutter={[12, 12]}>

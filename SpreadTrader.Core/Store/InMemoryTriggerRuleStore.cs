@@ -12,6 +12,13 @@ public sealed class InMemoryTriggerRuleStore : ITriggerRuleStore
 
     public bool Remove(string ruleId) => _rules.TryRemove(ruleId, out _);
 
+    public int RemoveAll()
+    {
+        var count = _rules.Count;
+        _rules.Clear();
+        return count;
+    }
+
     public IReadOnlyList<TriggerRule> GetAll() => _rules.Values.ToArray();
 
     public IReadOnlyList<TriggerRule> GetForSpread(string spreadId) =>
