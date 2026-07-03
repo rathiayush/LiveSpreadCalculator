@@ -1,9 +1,31 @@
-/* Page chrome comes from Ant Design's ConfigProvider (see App.jsx, darkAlgorithm + custom
-   tokens) - this file is just resets and the handful of things antd doesn't own. Deliberately
-   does NOT style h1/h2/etc. - antd's <Typography.Title> renders those tags itself and already
-   has sensible sizing; a global override here would fight it. */
-:root {
-  --bg: #0b0d12;
+/* Page chrome comes from Ant Design's ConfigProvider (see App.jsx, dark/defaultAlgorithm switched
+   by the light/dark toggle + custom tokens) - this file is just resets and the handful of things
+   antd doesn't own. Deliberately does NOT style h1/h2/etc. - antd's <Typography.Title> renders
+   those tags itself and already has sensible sizing; a global override here would fight it.
+
+   Theme switching: App.jsx sets <html data-theme="dark|light">. Everything antd owns follows the
+   ConfigProvider algorithm automatically; everything hand-styled here (page background, card
+   fill, table stripes, scrollbar, a few raw-hex text colors in StatCard/RankingPanel) reads the
+   --* variables below, which are redefined in the [data-theme="light"] block further down. */
+:root,
+html[data-theme='dark'] {
+  --bg: #0a0b10;
+  --bg-elevated: #12141c;
+  --border-soft: rgba(255, 255, 255, 0.07);
+  --text-strong: #f3f4f6;
+  --text-soft: rgba(255, 255, 255, 0.55);
+  --card-overlay: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0) 40%);
+  --row-stripe: rgba(255, 255, 255, 0.015);
+  --row-border: rgba(255, 255, 255, 0.045);
+  --row-hover: rgba(77, 163, 255, 0.07);
+  --scrollbar-thumb: #2a2d38;
+  --scrollbar-thumb-hover: #383c4a;
+  --page-bg-image:
+    radial-gradient(1400px 560px at 50% -12%, rgba(77, 163, 255, 0.07), transparent 65%),
+    linear-gradient(180deg, #0d0f15 0%, #0a0b10 40%, #08090d 100%);
+
+  --accent-blue: #4da3ff;
+  --accent-purple: #a78bfa;
   --mono: ui-monospace, 'SFMono-Regular', Consolas, Menlo, monospace;
 
   color-scheme: dark;
@@ -14,15 +36,46 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Light theme: soft off-white surfaces (not pure white) with the same layout/shadows, so the UI
+   reads as a proper light professional dashboard rather than a dark theme with colors inverted. */
+html[data-theme='light'] {
+  --bg: #f4f6f9;
+  --bg-elevated: #ffffff;
+  --border-soft: rgba(15, 23, 42, 0.08);
+  --text-strong: #0f172a;
+  --text-soft: rgba(15, 23, 42, 0.55);
+  --card-overlay: linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0) 40%);
+  --row-stripe: rgba(15, 23, 42, 0.025);
+  --row-border: rgba(15, 23, 42, 0.07);
+  --row-hover: rgba(77, 163, 255, 0.09);
+  --scrollbar-thumb: #cbd5e1;
+  --scrollbar-thumb-hover: #a8b6c8;
+  --page-bg-image:
+    radial-gradient(1400px 560px at 50% -12%, rgba(77, 163, 255, 0.08), transparent 65%),
+    linear-gradient(180deg, #f8fafc 0%, #f1f4f8 45%, #eef1f6 100%);
+
+  color-scheme: light;
+  background: var(--bg);
+}
+
 * {
   box-sizing: border-box;
 }
 
+/* Professional/institutional background: a single restrained tonal gradient plus one faint,
+   single-color highlight behind the header - no multi-color glows and no grid texture, which
+   read as consumer-SaaS marketing pages rather than a trading terminal. Swaps tone via
+   --page-bg-image above depending on --data-theme, so it stays out of the way of the red/green
+   data in the tables in either mode. */
 html,
 body {
   margin: 0;
   padding: 0;
-  background: var(--bg);
+  min-height: 100%;
+  background-color: var(--bg);
+  background-image: var(--page-bg-image);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
 }
 
 #root {
@@ -35,6 +88,52 @@ code {
   font-size: 0.9em;
 }
 
+/* Main content area (see App.jsx's <Content className="app-content">) - padding is defined here
+   instead of as an inline style so it can shrink on phone-width viewports instead of eating a
+   quarter of the screen on both sides. */
+.app-content {
+  padding: 24px;
+}
+
+@media (max-width: 768px) {
+  .app-content {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-content {
+    padding: 12px 10px 20px;
+  }
+}
+
+/* Mobile responsiveness for antd Card headers: the default header is a single flex row of
+   title + extra (search boxes, buttons, "re-sorted every N minutes" hints) that just overflows
+   on a ~360-400px phone instead of wrapping. Below 640px, let it wrap onto its own line and make
+   whatever's in "extra" (mostly Input.Search) stretch full width instead of clipping. */
+@media (max-width: 640px) {
+  .ant-card-head-wrapper {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .ant-card-head {
+    height: auto !important;
+    padding-block: 12px !important;
+  }
+
+  .ant-card-extra {
+    margin-inline-start: 0 !important;
+    width: 100%;
+  }
+
+  .ant-card-extra .ant-input-search,
+  .ant-card-extra .ant-input-affix-wrapper,
+  .ant-card-extra .ant-input-group-wrapper {
+    width: 100% !important;
+  }
+}
+
 /* Slightly tightens up antd's default card padding/heading rhythm for a denser, more
    "trading terminal" feel without touching component internals. */
 .ant-card-head-title {
@@ -42,11 +141,62 @@ code {
   letter-spacing: -0.01em;
 }
 
+/* Lift cards off the layered page background with a real border + soft shadow instead of the
+   default flat fill - this is what stops the UI from reading as one undifferentiated slab. */
+.ant-card {
+  border: 1px solid var(--border-soft) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 8px 24px rgba(0, 0, 0, 0.28);
+  background: var(--card-overlay), var(--bg-elevated);
+}
+
+html[data-theme='light'] .ant-card {
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px rgba(15, 23, 42, 0.07);
+}
+
+.ant-card-head {
+  border-bottom: 1px solid var(--border-soft) !important;
+}
+
 .ant-table-small .ant-table-thead > tr > th {
   font-weight: 600;
   text-transform: uppercase;
   font-size: 11px;
   letter-spacing: 0.04em;
+}
+
+/* Table polish: subtle row hover + zebra striping so a dense 200+ row ranking table is easier
+   to scan, plus a border under the header that matches the card border rather than antd's
+   default (which was barely visible against the old flat background). */
+.ant-table {
+  background: transparent !important;
+}
+
+.ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--row-border) !important;
+}
+
+.ant-table-tbody > tr:nth-child(even) > td {
+  background: var(--row-stripe);
+}
+
+.ant-table-tbody > tr:hover > td {
+  background: var(--row-hover) !important;
+}
+
+.ant-menu-dark.ant-menu-inline .ant-menu-item-selected {
+  background: linear-gradient(90deg, rgba(77, 163, 255, 0.22), rgba(77, 163, 255, 0.04)) !important;
+  box-shadow: inset 2px 0 0 var(--accent-blue);
+}
+
+/* KPI tiles (see components/StatCard.jsx) lift slightly on hover so the dashboard's top strip
+   feels interactive rather than static. */
+.stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.22), 0 14px 32px rgba(0, 0, 0, 0.32) !important;
+}
+
+html[data-theme='light'] .stat-card:hover {
+  box-shadow: 0 4px 8px rgba(15, 23, 42, 0.06), 0 14px 32px rgba(15, 23, 42, 0.1) !important;
 }
 
 ::-webkit-scrollbar {
@@ -59,10 +209,38 @@ code {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #2a2d38;
+  background: var(--scrollbar-thumb);
   border-radius: 6px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #383c4a;
+  background: var(--scrollbar-thumb-hover);
+}
+
+/* Brief highlight on any live price/spread cell when its value changes - see
+   components/FlashValue.jsx. Runs as a background-color animation (not a layout-affecting
+   property) so it can't cause reflow/jank in a table re-rendering several times a second. */
+@keyframes flash-up-anim {
+  0% { background-color: rgba(61, 220, 132, 0.38); }
+  100% { background-color: rgba(61, 220, 132, 0); }
+}
+
+@keyframes flash-down-anim {
+  0% { background-color: rgba(255, 92, 92, 0.38); }
+  100% { background-color: rgba(255, 92, 92, 0); }
+}
+
+.flash-value {
+  display: inline-block;
+  border-radius: 4px;
+  padding: 0 4px;
+  margin: 0 -4px;
+}
+
+.flash-value.flash-up {
+  animation: flash-up-anim 900ms ease-out;
+}
+
+.flash-value.flash-down {
+  animation: flash-down-anim 900ms ease-out;
 }

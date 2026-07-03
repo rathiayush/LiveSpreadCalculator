@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Card, Table, Typography, Input, Space } from 'antd'
 import { LineChartOutlined } from '@ant-design/icons'
 import DirectionTag from './DirectionTag'
+import FlashValue from './FlashValue'
 
 // Live per-spread grid with a name search (underlying / near / far tradingsymbol) and real
 // pagination - lives on its own "Live Spreads" page since with a 150-200+ symbol universe a
@@ -38,7 +39,7 @@ export default function SpreadGrid({ definitions, liveValues }) {
       render: (_, r) => {
         if (!r.live) return '—'
         const usesBid = r.live.direction === 'SellNear/BuyFar'
-        return `${r.live.nearPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`
+        return <FlashValue value={r.live.nearPrice}>{`${r.live.nearPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`}</FlashValue>
       },
     },
     {
@@ -47,7 +48,7 @@ export default function SpreadGrid({ definitions, liveValues }) {
       render: (_, r) => {
         if (!r.live) return '—'
         const usesBid = r.live.direction === 'BuyNear/SellFar'
-        return `${r.live.farPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`
+        return <FlashValue value={r.live.farPrice}>{`${r.live.farPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`}</FlashValue>
       },
     },
     {
@@ -55,10 +56,35 @@ export default function SpreadGrid({ definitions, liveValues }) {
       key: 'spread',
       sorter: (a, b) => (a.live?.spreadValue ?? 0) - (b.live?.spreadValue ?? 0),
       render: (_, r) => r.live ? (
-        <span style={{ color: r.live.spreadValue >= 0 ? '#3ddc84' : '#ff5c5c', fontWeight: 600 }}>
-          {r.live.spreadValue.toFixed(2)}
-        </span>
+        <FlashValue value={r.live.spreadValue}>
+          <span style={{ color: r.live.spreadValue >= 0 ? '#3ddc84' : '#ff5c5c', fontWeight: 600 }}>
+            {r.live.spreadValue.toFixed(2)}
+          </span>
+        </FlashValue>
       ) : '—',
+    },
+    {
+      // Same |spread %| the Dashboard ranks by (spreadValue as a percentage of the near leg
+      // price) - computed here rather than read off the live snapshot since the per-tick
+      // spreadUpdate payload doesn't carry a percent field, only the ranking snapshot does.
+      title: 'Spread %',
+      key: 'spreadPercent',
+      sorter: (a, b) => {
+        const pctA = a.live?.nearPrice ? (a.live.spreadValue / a.live.nearPrice) * 100 : 0
+        const pctB = b.live?.nearPrice ? (b.live.spreadValue / b.live.nearPrice) * 100 : 0
+        return pctA - pctB
+      },
+      render: (_, r) => {
+        if (!r.live || !r.live.nearPrice) return '—'
+        const pct = (r.live.spreadValue / r.live.nearPrice) * 100
+        return (
+          <FlashValue value={pct}>
+            <span style={{ color: pct >= 0 ? '#3ddc84' : '#ff5c5c', fontWeight: 600 }}>
+              {pct.toFixed(2)}%
+            </span>
+          </FlashValue>
+        )
+      },
     },
     { title: 'Direction', key: 'direction', render: (_, r) => r.live ? <DirectionTag direction={r.live.direction} /> : '—' },
     { title: 'Updated', key: 'updated', render: (_, r) => r.live ? new Date(r.live.updatedAt).toLocaleTimeString() : '—' },

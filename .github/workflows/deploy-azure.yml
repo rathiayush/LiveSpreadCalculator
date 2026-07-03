@@ -1,0 +1,66 @@
+name: Deploy to Azure
+
+# See DEPLOYMENT.md for the one-time setup this depends on (ACR, the Web App + api sidecar,
+# app settings, and the AZURE_CREDENTIALS/ACR_NAME/AZURE_RESOURCE_GROUP/AZURE_WEBAPP_NAME repo
+# secrets). This workflow only ever changes which image tags are running - config/secrets on the
+# Azure resource itself are managed separately (az cli / Portal), not here.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  ACR_NAME: ${{ secrets.ACR_NAME }}
+  RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  WEBAPP_NAME: ${{ secrets.AZURE_WEBAPP_NAME }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Log in to ACR
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Build and push api image
+        run: |
+          IMAGE="$ACR_NAME.azurecr.io/spreadtrader/api:${{ github.sha }}"
+          docker build -f LiveSpreadCalculator/Dockerfile -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "API_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Build and push web image
+        run: |
+          IMAGE="$ACR_NAME.azurecr.io/spreadtrader/web:${{ github.sha }}"
+          docker build -f SpreadTrader.Dashboard/spreadtrader.dashboard.client/Dockerfile \
+            -t "$IMAGE" SpreadTrader.Dashboard/spreadtrader.dashboard.client
+          docker push "$IMAGE"
+          echo "WEB_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      # Main container - the Web App's own deployment image.
+      - name: Update web (main) container
+        run: |
+          az webapp config container set \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$WEBAPP_NAME" \
+            --container-image-name "$WEB_IMAGE"
+
+      # api sidecar - see DEPLOYMENT.md step 6 for how this was first created. `sitecontainers
+      # update` here assumes it already exists; this workflow doesn't create it from scratch.
+      - name: Update api (sidecar) container
+        run: |
+          az webapp sitecontainers update \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$WEBAPP_NAME" \
+            --container-name api \
+            --image "$API_IMAGE"
+
+      - name: Restart Web App
+        run: az webapp restart --resource-group "$RESOURCE_GROUP" --name "$WEBAPP_NAME"

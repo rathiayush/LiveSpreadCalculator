@@ -1,15 +1,22 @@
 import { useMemo } from 'react'
 import { Row, Col } from 'antd'
 import { AppstoreOutlined, FireOutlined, PercentageOutlined, SwapOutlined } from '@ant-design/icons'
+import { useSpreadRanking } from '../hooks/spreadHub'
 import StatCard from '../components/StatCard'
 import RankingPanel from '../components/RankingPanel'
 
-// At-a-glance landing page: a colored KPI strip plus the full ranking (no pagination - it's the
-// "what's moving" view, you want to see everything at once). Recent trigger fires live on their
-// own "Trigger Activity" page (see TriggerActivityPage) and the per-spread live grid with
-// search/pagination lives on its own page too (see SpreadsPage), since neither fits the same
-// "glance at everything" purpose once the universe is 150-200+ symbols.
-export default function DashboardPage({ ranking }) {
+// At-a-glance landing page: a colored KPI strip (computed from the whole universe) plus the top
+// 50 movers by |spread %| - the full ranking can be 150-200+ rows once the universe is fully
+// built, which is more than a "glance at what's moving" view needs. Recent trigger fires live on
+// their own "Trigger Activity" page (see TriggerActivityPage) and the per-spread live grid with
+// search/pagination/the complete list lives on its own page too (see SpreadsPage).
+//
+// Reads ranking directly from the shared store (see hooks/spreadHub.js) instead of receiving it
+// as a prop from App.jsx - so this page only re-renders on the (infrequent, ~every few minutes)
+// rankingUpdate push while it's actually mounted, and App.jsx never has to touch this data at all.
+export default function DashboardPage() {
+  const ranking = useSpreadRanking()
+
   const stats = useMemo(() => {
     if (ranking.length === 0) return null
     const top = ranking[0]
@@ -58,7 +65,7 @@ export default function DashboardPage({ ranking }) {
         </Row>
       )}
 
-      <RankingPanel ranking={ranking} />
+      <RankingPanel ranking={ranking} limit={50} />
     </>
   )
 }

@@ -152,6 +152,7 @@ public sealed class InstrumentMasterService
         config.Expiry = match.Expiry;
         config.Underlying ??= match.Name;
         config.LotSize = match.LotSize;
+        config.TickSize = match.TickSize;
     }
 
     private static List<KiteInstrument> ParseCsv(Stream stream)
@@ -172,6 +173,7 @@ public sealed class InstrumentMasterService
 
             DateOnly? expiry = DateOnly.TryParse(fields[5], out var exp) ? exp : null;
             var lotSize = int.TryParse(fields[8], out var lot) ? lot : 0;
+            var tickSize = decimal.TryParse(fields[7], NumberStyles.Number, CultureInfo.InvariantCulture, out var tick) ? tick : 0m;
 
             result.Add(new KiteInstrument(
                 InstrumentToken: token,
@@ -181,7 +183,8 @@ public sealed class InstrumentMasterService
                 Segment: fields[10],
                 InstrumentType: fields[9],
                 Expiry: expiry,
-                LotSize: lotSize));
+                LotSize: lotSize,
+                TickSize: tickSize));
         }
 
         return result;

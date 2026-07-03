@@ -90,6 +90,7 @@ public sealed class UniverseBuilderService
                     Underlying = symbol,
                     Expiry = near.Expiry,
                     LotSize = near.LotSize,
+                    TickSize = near.TickSize,
                 },
                 FarLeg = new InstrumentConfig
                 {
@@ -99,6 +100,7 @@ public sealed class UniverseBuilderService
                     Underlying = symbol,
                     Expiry = far.Expiry,
                     LotSize = far.LotSize,
+                    TickSize = far.TickSize,
                 },
                 Enabled = true,
             };

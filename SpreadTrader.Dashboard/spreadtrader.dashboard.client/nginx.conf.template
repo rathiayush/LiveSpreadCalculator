@@ -1,0 +1,40 @@
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # REST endpoints - forwarded to the LiveSpreadCalculator Api process.
+    #
+    # ${API_UPSTREAM_HOST} is substituted at container start (see Dockerfile's CMD) rather than
+    # hardcoded, because "how do I reach the api container" differs by environment:
+    #   - Local docker-compose: containers get per-service DNS names, so this is "api" (the
+    #     compose service name in docker-compose.yml) - the Dockerfile's default.
+    #   - Azure App Service sidecar containers: all containers in one App Service share a single
+    #     network namespace and talk over loopback instead of DNS, so this must be "localhost" -
+    #     set as an app setting on the main (this) container. See DEPLOYMENT.md.
+    location /api/ {
+        proxy_pass http://${API_UPSTREAM_HOST}:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # SignalR hub - needs the WebSocket upgrade headers in addition to the above.
+    location /hubs/ {
+        proxy_pass http://${API_UPSTREAM_HOST}:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_read_timeout 86400s; # keep long-lived SignalR connections open
+    }
+
+    # Static SPA - fall back to index.html for client-side routing.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

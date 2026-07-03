@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom'
-import { ConfigProvider, Layout, Menu, Space, Tag, Button, Typography, message, theme } from 'antd'
+import { ConfigProvider, Layout, Menu, Space, Tag, Button, Typography, Drawer, Grid, message, theme } from 'antd'
 import {
   DashboardOutlined,
   LineChartOutlined,
@@ -10,9 +10,12 @@ import {
   RiseOutlined,
   WifiOutlined,
   HistoryOutlined,
+  SunOutlined,
+  MoonOutlined,
+  MenuOutlined,
 } from '@ant-design/icons'
 import { api } from './api'
-import { useSpreadHub } from './hooks/useSpreadHub'
+import { useSpreadHubConnectionState } from './hooks/spreadHub'
 import DashboardPage from './pages/DashboardPage'
 import SpreadsPage from './pages/SpreadsPage'
 import SymbolsPage from './pages/SymbolsPage'
@@ -21,6 +24,27 @@ import TriggersPage from './pages/TriggersPage'
 import TriggerActivityPage from './pages/TriggerActivityPage'
 
 const { Header, Content, Sider } = Layout
+
+const THEME_STORAGE_KEY = 'spreadtrader-theme-mode'
+
+// Per-mode token overrides layered on top of antd's dark/default algorithm. The algorithm does
+// the heavy lifting (text colors, hover states, etc. across every component); these just pin the
+// surface colors to the same palette used in index.css's CSS variables so the hand-styled chrome
+// (Sidebar/TopBar/cards) and antd's own components agree on what "background" and "border" mean.
+const THEME_TOKENS = {
+  dark: {
+    colorBgBase: '#0b0d12',
+    colorBgContainer: '#12141b',
+    colorBgElevated: '#171a24',
+    colorBorderSecondary: 'rgba(255,255,255,0.07)',
+  },
+  light: {
+    colorBgBase: '#f4f6f9',
+    colorBgContainer: '#ffffff',
+    colorBgElevated: '#ffffff',
+    colorBorderSecondary: 'rgba(15,23,42,0.08)',
+  },
+}
 
 const NAV_ITEMS = [
   { key: '/', label: 'Dashboard', icon: <DashboardOutlined />, subtitle: 'Ranked movers across the whole universe' },
@@ -39,73 +63,126 @@ function useActiveNavItem() {
   )
 }
 
-function Sidebar() {
-  const active = useActiveNavItem()
-
+// Logo + product name, shared by the desktop rail and the mobile drawer so the two navs stay
+// visually identical instead of drifting apart as separate copies.
+function BrandLockup() {
   return (
-    <Sider
-      width={232}
+    <div
       style={{
-        background: '#0d0f14',
-        borderRight: '1px solid rgba(255,255,255,0.06)',
-        position: 'sticky',
-        top: 0,
-        height: '100vh',
-        overflow: 'auto',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '20px 20px 16px',
+        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        marginBottom: 8,
       }}
     >
       <div
         style={{
+          width: 34,
+          height: 34,
+          borderRadius: 9,
+          background: 'linear-gradient(135deg, #63b3ff, #4da3ff 45%, #7c6df0)',
+          boxShadow: '0 4px 14px rgba(77,163,255,0.35)',
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
-          padding: '20px 20px 16px',
+          justifyContent: 'center',
+          flexShrink: 0,
         }}
       >
-        <div
-          style={{
-            width: 32,
-            height: 32,
-            borderRadius: 8,
-            background: 'linear-gradient(135deg, #4da3ff, #2f6fd6)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}
-        >
-          <RiseOutlined style={{ color: '#fff', fontSize: 16 }} />
-        </div>
-        <div style={{ lineHeight: 1.15 }}>
-          <div style={{ color: '#fff', fontWeight: 700, fontSize: 16, letterSpacing: '-0.01em' }}>SpreadTrader</div>
-          <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>Calendar spread desk</div>
-        </div>
+        <RiseOutlined style={{ color: '#fff', fontSize: 16 }} />
       </div>
+      <div style={{ lineHeight: 1.15 }}>
+        <div style={{ color: '#fff', fontWeight: 700, fontSize: 16, letterSpacing: '-0.01em' }}>SpreadTrader</div>
+        <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 11 }}>Calendar spread desk</div>
+      </div>
+    </div>
+  )
+}
 
-      <Menu
-        theme="dark"
-        mode="inline"
-        selectedKeys={[active.key]}
-        style={{ background: 'transparent', borderInlineEnd: 'none', padding: '4px 8px' }}
-        items={NAV_ITEMS.map((item) => ({
-          key: item.key,
-          icon: item.icon,
-          label: <Link to={item.key}>{item.label}</Link>,
-        }))}
-      />
+// `onNavigate` fires on every menu click - used to close the mobile drawer after picking a page
+// (the desktop rail just passes a no-op since there's nothing to close).
+function NavMenu({ onNavigate }) {
+  const active = useActiveNavItem()
+
+  return (
+    <Menu
+      theme="dark"
+      mode="inline"
+      selectedKeys={[active.key]}
+      onClick={onNavigate}
+      style={{ background: 'transparent', borderInlineEnd: 'none', padding: '4px 10px' }}
+      items={NAV_ITEMS.map((item) => ({
+        key: item.key,
+        icon: item.icon,
+        label: <Link to={item.key}>{item.label}</Link>,
+      }))}
+    />
+  )
+}
+
+// Desktop/tablet (lg+ breakpoint, >=992px): a permanent 232px rail down the left side.
+function Sidebar() {
+  return (
+    <Sider
+      width={232}
+      style={{
+        background: 'linear-gradient(180deg, #10121a 0%, #0d0f16 55%, #0b0c12 100%)',
+        borderRight: '1px solid rgba(255,255,255,0.07)',
+        boxShadow: '4px 0 24px rgba(0,0,0,0.35)',
+        position: 'sticky',
+        top: 0,
+        height: '100vh',
+        overflow: 'auto',
+        zIndex: 5,
+      }}
+    >
+      <BrandLockup />
+      <NavMenu onNavigate={() => {}} />
     </Sider>
   )
 }
 
-function TopBar({ connectionState, authStatus, onLogin }) {
+// Below lg (phones and narrow tablets): the rail would eat 60%+ of a 375px-wide screen, so
+// instead nothing is docked and this drawer - opened via the hamburger button in TopBar - covers
+// the same brand+menu content on demand. Closes itself as soon as a nav item is picked.
+function MobileNavDrawer({ open, onClose }) {
+  return (
+    <Drawer
+      placement="left"
+      open={open}
+      onClose={onClose}
+      closable={false}
+      width={264}
+      styles={{
+        body: { padding: 0 },
+        content: { background: 'linear-gradient(180deg, #10121a 0%, #0d0f16 55%, #0b0c12 100%)' },
+        header: { display: 'none' },
+      }}
+    >
+      <BrandLockup />
+      <NavMenu onNavigate={onClose} />
+    </Drawer>
+  )
+}
+
+function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenuButton }) {
   const active = useActiveNavItem()
+  const isLight = mode === 'light'
+  // Only this hook re-renders on connection state flips (rare - connect/reconnect/disconnect),
+  // not on every spread tick, so it's read directly here rather than threaded down from AppShell.
+  const connectionState = useSpreadHubConnectionState()
 
   return (
     <Header
       style={{
-        background: 'rgba(13,15,20,0.85)',
-        backdropFilter: 'blur(6px)',
-        borderBottom: '1px solid rgba(255,255,255,0.06)',
+        background: isLight ? 'rgba(255,255,255,0.75)' : 'rgba(15,17,23,0.72)',
+        backdropFilter: 'blur(10px) saturate(140%)',
+        WebkitBackdropFilter: 'blur(10px) saturate(140%)',
+        borderBottom: isLight ? '1px solid rgba(15,23,42,0.08)' : '1px solid rgba(255,255,255,0.07)',
+        boxShadow: isLight
+          ? '0 1px 0 rgba(255,255,255,0.6), 0 6px 20px rgba(15,23,42,0.06)'
+          : '0 1px 0 rgba(255,255,255,0.03), 0 6px 20px rgba(0,0,0,0.25)',
         position: 'sticky',
         top: 0,
         zIndex: 10,
@@ -113,15 +190,31 @@ function TopBar({ connectionState, authStatus, onLogin }) {
         alignItems: 'center',
         justifyContent: 'space-between',
         gap: 16,
-        paddingInline: 24,
+        paddingInline: showMenuButton ? 12 : 24,
         height: 'auto',
         paddingBlock: 14,
         flexWrap: 'wrap',
       }}
     >
-      <div>
-        <Typography.Title level={4} style={{ margin: 0, color: '#f3f4f6' }}>{active.label}</Typography.Title>
-        <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>{active.subtitle}</Typography.Text>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+        {showMenuButton && (
+          <Button
+            shape="circle"
+            icon={<MenuOutlined />}
+            onClick={onMenuClick}
+            aria-label="Open navigation"
+            style={{ flexShrink: 0 }}
+          />
+        )}
+        <div style={{ minWidth: 0 }}>
+          <Typography.Title level={4} style={{ margin: 0 }}>{active.label}</Typography.Title>
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: 12.5, display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+          >
+            {active.subtitle}
+          </Typography.Text>
+        </div>
       </div>
 
       <Space wrap size="small">
@@ -134,15 +227,30 @@ function TopBar({ connectionState, authStatus, onLogin }) {
         {authStatus && !authStatus.isAuthenticated && (
           <Button size="small" type="primary" onClick={onLogin}>Login to Kite</Button>
         )}
+        <Button
+          size="small"
+          shape="circle"
+          icon={isLight ? <MoonOutlined /> : <SunOutlined />}
+          onClick={onToggleMode}
+          title={isLight ? 'Switch to dark theme' : 'Switch to light theme'}
+        />
       </Space>
     </Header>
   )
 }
 
-function AppShell() {
+function AppShell({ mode, onToggleMode }) {
   const [spreads, setSpreads] = useState([])
   const [authStatus, setAuthStatus] = useState(null)
-  const { spreads: liveValues, ranking, triggerEvents, connectionState } = useSpreadHub()
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  // Note: live spread ticks, ranking, and trigger events are deliberately *not* read here - see
+  // hooks/spreadHub.js. Each page/component that needs one of those slices calls its own hook,
+  // so AppShell (and unrelated pages) no longer re-render on every ~250-300ms spread tick.
+
+  // antd's own responsive breakpoints (lg = 992px). Below that the permanent 232px rail would
+  // take up well over half of a phone's width, so it's swapped for a drawer opened from TopBar.
+  const screens = Grid.useBreakpoint()
+  const isDesktopNav = screens.lg ?? true
 
   const loadSpreads = useCallback(() => {
     api.getSpreads().then(setSpreads).catch(() => {})
@@ -187,18 +295,28 @@ function AppShell() {
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      <Sidebar />
+      {isDesktopNav && <Sidebar />}
       <Layout>
-        <TopBar connectionState={connectionState} authStatus={authStatus} onLogin={handleLogin} />
-        <Content style={{ padding: 24, maxWidth: 1560, width: '100%', margin: '0 auto' }}>
+        <TopBar
+          authStatus={authStatus}
+          onLogin={handleLogin}
+          mode={mode}
+          onToggleMode={onToggleMode}
+          showMenuButton={!isDesktopNav}
+          onMenuClick={() => setDrawerOpen(true)}
+        />
+        <Content
+          className="app-content"
+          style={{ maxWidth: 1560, width: '100%', margin: '0 auto' }}
+        >
           <Routes>
             <Route
               path="/"
-              element={<DashboardPage ranking={ranking} />}
+              element={<DashboardPage />}
             />
             <Route
               path="/spreads"
-              element={<SpreadsPage spreads={spreads} liveValues={liveValues} />}
+              element={<SpreadsPage spreads={spreads} />}
             />
             <Route
               path="/symbols"
@@ -214,25 +332,44 @@ function AppShell() {
             />
             <Route
               path="/trigger-activity"
-              element={<TriggerActivityPage triggerEvents={triggerEvents} />}
+              element={<TriggerActivityPage />}
             />
           </Routes>
         </Content>
       </Layout>
+      {!isDesktopNav && <MobileNavDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />}
     </Layout>
   )
 }
 
 function App() {
+  const [mode, setMode] = useState(() => {
+    if (typeof window === 'undefined') return 'dark'
+    return window.localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark'
+  })
+
+  // Mirrors the mode onto <html data-theme="..."> so index.css can flip the hand-written CSS
+  // variables (page background, card fill, table stripes, scrollbar) that live outside antd's
+  // token system - ConfigProvider only reaches antd's own components.
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', mode)
+    window.localStorage.setItem(THEME_STORAGE_KEY, mode)
+  }, [mode])
+
+  const toggleMode = useCallback(() => {
+    setMode((m) => (m === 'dark' ? 'light' : 'dark'))
+  }, [])
+
   const themeConfig = useMemo(() => ({
-    algorithm: theme.darkAlgorithm,
+    algorithm: mode === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm,
     token: {
       colorPrimary: '#4da3ff',
-      colorBgBase: '#0b0d12',
-      colorBgContainer: '#12141b',
-      colorBgLayout: '#0b0d12',
-      colorBorderSecondary: 'rgba(255,255,255,0.06)',
-      borderRadius: 8,
+      ...THEME_TOKENS[mode],
+      // Transparent so the body's layered gradient (see index.css) shows through the main
+      // content area instead of being painted over by a flat Layout background. Sider/Header
+      // still set their own opaque/blurred backgrounds inline, so hierarchy is unaffected.
+      colorBgLayout: 'transparent',
+      borderRadius: 10,
       fontFamily: "system-ui, 'Segoe UI', Roboto, sans-serif",
     },
     components: {
@@ -242,18 +379,19 @@ function App() {
       },
       Layout: {
         headerBg: 'transparent',
-        bodyBg: '#0b0d12',
+        bodyBg: 'transparent',
       },
       Table: {
-        headerBg: '#171a22',
+        headerBg: mode === 'dark' ? '#171a22' : '#f4f6f9',
+        headerColor: mode === 'dark' ? 'rgba(255,255,255,0.75)' : 'rgba(15,23,42,0.75)',
       },
     },
-  }), [])
+  }), [mode])
 
   return (
     <ConfigProvider theme={themeConfig}>
       <BrowserRouter>
-        <AppShell />
+        <AppShell mode={mode} onToggleMode={toggleMode} />
       </BrowserRouter>
     </ConfigProvider>
   )

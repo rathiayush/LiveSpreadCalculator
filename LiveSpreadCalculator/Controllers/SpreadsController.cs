@@ -61,5 +61,13 @@ public sealed class SpreadsController : ControllerBase
     }
 
     [HttpDelete("{id}")]
-    public IActionResult Delete(string id) => _spreadStore.Remove(id) ? NoContent() : NotFound();
+    public IActionResult Delete(string id)
+    {
+        var removed = _spreadStore.Remove(id);
+        // Also drop it from the snapshot cache - otherwise a deleted spread keeps appearing in
+        // GET /api/spreads/snapshot and in the ranking forever, since nothing else ever prunes
+        // that cache (see ISpreadSnapshotCache.Remove).
+        _snapshotCache.Remove(id);
+        return removed ? NoContent() : NotFound();
+    }
 }

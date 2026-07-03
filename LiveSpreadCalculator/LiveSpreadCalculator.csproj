@@ -6,6 +6,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>f9ebb550-15c1-429a-b17c-088c74a666f5</UserSecretsId>
     <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
+    <!-- This app is a handful of low-concurrency background timers (spread recalculation every
+         ~250-300ms across the live universe, ranking every few minutes), not a high-throughput
+         web server - it doesn't need Server GC's per-core heaps, which favor throughput by
+         deliberately retaining committed memory and returning it to the OS only reluctantly.
+         Under Server GC (the ASP.NET Core default), the frequent small allocations from every
+         recalculation cycle make Task Manager's working set climb for a long time before it
+         plateaus, which reads as a leak even when it isn't one. Workstation GC (with
+         background/concurrent collection still on) collects more eagerly and gives memory back
+         to the OS sooner, which better matches this workload. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
   </PropertyGroup>
 
   <ItemGroup>

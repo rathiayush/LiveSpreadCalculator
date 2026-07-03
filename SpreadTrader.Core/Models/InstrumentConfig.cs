@@ -17,4 +17,11 @@ public sealed class InstrumentConfig
     /// trigger template into an actual order quantity per stock (lot sizes vary a lot across the
     /// F&amp;O universe, so a single flat quantity across 100 different stocks isn't meaningful).</summary>
     public int LotSize { get; set; }
+
+    /// <summary>Minimum price increment for this contract, resolved alongside InstrumentToken.
+    /// LIMIT order prices must be an exact multiple of this or Kite rejects the order ("Tick
+    /// size for this script is X") - commonly 0.05 for NSE F&amp;O but genuinely varies by
+    /// instrument, so it's tracked per-contract rather than assumed. 0 until resolved - see
+    /// OrderDispatchHostedService.ApplyMarketProtection for the fallback used in that case.</summary>
+    public decimal TickSize { get; set; }
 }
