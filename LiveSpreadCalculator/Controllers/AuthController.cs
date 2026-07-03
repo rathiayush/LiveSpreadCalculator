@@ -1,3 +1,6 @@
+using LiveSpreadCalculator.Auth;
+using LiveSpreadCalculator.Contracts;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SpreadTrader.KiteIntegration;
 using SpreadTrader.KiteIntegration.Auth;
@@ -12,13 +15,41 @@ public sealed class AuthController : ControllerBase
     private readonly KiteSession _session;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AuthController> _logger;
+    private readonly CsvUserStore _userStore;
+    private readonly JwtTokenService _tokenService;
 
-    public AuthController(KiteAuthService authService, KiteSession session, IConfiguration configuration, ILogger<AuthController> logger)
+    public AuthController(
+        KiteAuthService authService,
+        KiteSession session,
+        IConfiguration configuration,
+        ILogger<AuthController> logger,
+        CsvUserStore userStore,
+        JwtTokenService tokenService)
     {
         _authService = authService;
         _session = session;
         _configuration = configuration;
         _logger = logger;
+        _userStore = userStore;
+        _tokenService = tokenService;
+    }
+
+    /// <summary>App login. Validates email/password against App_Data/users.csv and, on success,
+    /// returns a JWT the client must send as `Authorization: Bearer &lt;token&gt;` on every other
+    /// API call and as ?access_token= on the SignalR hub. This is the only unauthenticated way in -
+    /// everything else on the server requires the token this endpoint hands out.</summary>
+    [AllowAnonymous]
+    [HttpPost("token")]
+    public ActionResult<object> Login([FromBody] UserLoginRequest request)
+    {
+        if (!_userStore.ValidateCredentials(request.Email, request.Password))
+        {
+            _logger.LogWarning("Failed login attempt for {Email}", request.Email);
+            return Unauthorized(new { error = "Invalid email or password." });
+        }
+
+        var (token, expiresUtc) = _tokenService.CreateToken(request.Email.Trim());
+        return Ok(new { token, expiresUtc, email = request.Email.Trim() });
     }
 
     /// <summary>Returns the Kite login URL the frontend should redirect the browser to.
@@ -31,7 +62,10 @@ public sealed class AuthController : ControllerBase
     public ActionResult<object> GetStatus() => Ok(new { isAuthenticated = !string.IsNullOrEmpty(_session.AccessToken) });
 
     /// <summary>Kite redirects the browser here with request_token after a successful login.
-    /// Exchanges it for an access_token, then bounces the browser back to the dashboard.</summary>
+    /// Exchanges it for an access_token, then bounces the browser back to the dashboard. Must be
+    /// anonymous: it's an external redirect from Kite's servers, which can't attach our Bearer
+    /// token. The request_token itself is the short-lived secret Kite vouches for here.</summary>
+    [AllowAnonymous]
     [HttpGet("callback")]
     public async Task<IActionResult> Callback([FromQuery(Name = "request_token")] string? requestToken, [FromQuery] string? status, CancellationToken cancellationToken)
     {

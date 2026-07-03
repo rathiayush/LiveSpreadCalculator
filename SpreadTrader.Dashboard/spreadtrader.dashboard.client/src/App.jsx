@@ -14,9 +14,12 @@ import {
   MoonOutlined,
   MenuOutlined,
   SettingOutlined,
+  LogoutOutlined,
 } from '@ant-design/icons'
 import { api } from './api'
-import { useSpreadHubConnectionState, useKiteAuthInvalidated, clearKiteAuthInvalidated } from './hooks/spreadHub'
+import { useAuth, clearSession } from './auth'
+import { useSpreadHubConnectionState, useKiteAuthInvalidated, clearKiteAuthInvalidated, stopConnection } from './hooks/spreadHub'
+import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import SpreadsPage from './pages/SpreadsPage'
 import SymbolsPage from './pages/SymbolsPage'
@@ -196,7 +199,7 @@ function MobileNavDrawer({ open, onClose }) {
   )
 }
 
-function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenuButton }) {
+function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenuButton, userEmail, onLogout }) {
   const active = useActiveNavItem()
   const isLight = mode === 'light'
   // Only this hook re-renders on connection state flips (rare - connect/reconnect/disconnect),
@@ -287,12 +290,21 @@ function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenu
           onClick={onToggleMode}
           title={isLight ? 'Switch to dark theme' : 'Switch to light theme'}
         />
+        {compact ? (
+          <Tooltip title={userEmail ? `Signed in as ${userEmail} - log out` : 'Log out'}>
+            <Button size="small" shape="circle" icon={<LogoutOutlined />} onClick={onLogout} aria-label="Log out" />
+          </Tooltip>
+        ) : (
+          <Button size="small" icon={<LogoutOutlined />} onClick={onLogout} title={userEmail ? `Signed in as ${userEmail}` : undefined}>
+            Log out
+          </Button>
+        )}
       </Space>
     </Header>
   )
 }
 
-function AppShell({ mode, onToggleMode }) {
+function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
   const [spreads, setSpreads] = useState([])
   const [authStatus, setAuthStatus] = useState(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -372,6 +384,8 @@ function AppShell({ mode, onToggleMode }) {
           onToggleMode={onToggleMode}
           showMenuButton={!isDesktopNav}
           onMenuClick={() => setDrawerOpen(true)}
+          userEmail={userEmail}
+          onLogout={onLogout}
         />
         <Content
           className="app-content"
@@ -428,6 +442,15 @@ function App() {
     setMode((m) => (m === 'dark' ? 'light' : 'dark'))
   }, [])
 
+  // App-login gate. Until there's a valid JWT the whole dashboard is replaced by the login screen -
+  // there's no point mounting AppShell (and opening the SignalR hub) since every call would 401.
+  const { isAuthenticated, email } = useAuth()
+
+  const handleLogout = useCallback(() => {
+    stopConnection() // drop the hub authenticated as this user before the token goes away
+    clearSession()
+  }, [])
+
   const themeConfig = useMemo(() => ({
     algorithm: mode === 'dark' ? theme.darkAlgorithm : theme.defaultAlgorithm,
     token: {
@@ -458,9 +481,13 @@ function App() {
 
   return (
     <ConfigProvider theme={themeConfig}>
-      <BrowserRouter>
-        <AppShell mode={mode} onToggleMode={toggleMode} />
-      </BrowserRouter>
+      {isAuthenticated ? (
+        <BrowserRouter>
+          <AppShell mode={mode} onToggleMode={toggleMode} userEmail={email} onLogout={handleLogout} />
+        </BrowserRouter>
+      ) : (
+        <LoginPage />
+      )}
     </ConfigProvider>
   )
 }

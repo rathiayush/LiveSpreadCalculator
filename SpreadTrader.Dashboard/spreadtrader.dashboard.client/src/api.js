@@ -1,4 +1,26 @@
+import { getToken, clearSession } from './auth'
+
 const jsonHeaders = { 'Content-Type': 'application/json' }
+
+// Merges the Authorization: Bearer <jwt> header (when logged in) into whatever headers a call
+// already sets. Every API call now goes through fetch wrappers below that spread this in, so the
+// token rides along on all of them - the backend rejects anything without it.
+function authHeaders(extra) {
+  const token = getToken()
+  return token ? { ...extra, Authorization: `Bearer ${token}` } : { ...extra }
+}
+
+// Wraps window.fetch to attach the token and to treat a 401 as "session gone" - clears the stored
+// token so App.jsx flips back to the login screen instead of leaving the user staring at a dead UI
+// (this is exactly what happens when a token hits its 3-day expiry mid-use).
+async function authFetch(url, options = {}) {
+  const response = await fetch(url, { ...options, headers: authHeaders(options.headers) })
+  if (response.status === 401) {
+    clearSession()
+    throw new Error('Your session has expired. Please log in again.')
+  }
+  return response
+}
 
 async function handle(response) {
   if (!response.ok) {
@@ -9,40 +31,60 @@ async function handle(response) {
   return response.json()
 }
 
+// Exchanges email/password for a JWT. The only call that doesn't need an existing token; on success
+// the caller stores the returned session via auth.setSession. Uses plain fetch (not authFetch) so a
+// wrong password surfaces its own 401 message instead of being swallowed as "session expired".
+export async function login(email, password) {
+  const response = await fetch('/api/auth/token', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ email, password }),
+  })
+  if (!response.ok) {
+    let msg = 'Invalid email or password.'
+    try {
+      const body = await response.json()
+      if (body?.error) msg = body.error
+    } catch { /* keep default message */ }
+    throw new Error(msg)
+  }
+  return response.json() // { token, expiresUtc, email }
+}
+
 // All calls use relative paths - see vite.config.js for the dev proxy to the Api project.
 export const api = {
-  getSpreads: () => fetch('/api/spreads').then(handle),
+  getSpreads: () => authFetch('/api/spreads').then(handle),
   // Latest known value for every spread (seeds the dashboard before the first SignalR push).
-  getSpreadSnapshot: () => fetch('/api/spreads/snapshot').then(handle),
+  getSpreadSnapshot: () => authFetch('/api/spreads/snapshot').then(handle),
   // Most recent ranking (spreads sorted by |spread %| descending) - see
   // Engine:RankingIntervalMinutes and SpreadRankingHostedService.
-  getSpreadRanking: () => fetch('/api/spreads/ranking').then(handle),
+  getSpreadRanking: () => authFetch('/api/spreads/ranking').then(handle),
   createSpread: (spread) =>
-    fetch('/api/spreads', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(spread) }).then(handle),
-  deleteSpread: (id) => fetch(`/api/spreads/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
+    authFetch('/api/spreads', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(spread) }).then(handle),
+  deleteSpread: (id) => authFetch(`/api/spreads/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
 
   getTriggers: (spreadId) =>
-    fetch(`/api/triggers${spreadId ? `?spreadId=${encodeURIComponent(spreadId)}` : ''}`).then(handle),
+    authFetch(`/api/triggers${spreadId ? `?spreadId=${encodeURIComponent(spreadId)}` : ''}`).then(handle),
   // Recent fired triggers + execution outcomes, newest first - seeds the Trigger Activity feed
   // before the first SignalR push, same idea as getSpreadSnapshot for Live Spreads. Held in
   // memory server-side (see ITriggerActivityStore) until the backend restarts.
-  getTriggerActivity: () => fetch('/api/triggers/activity').then(handle),
+  getTriggerActivity: () => authFetch('/api/triggers/activity').then(handle),
   createTrigger: (rule) =>
-    fetch('/api/triggers', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(rule) }).then(handle),
+    authFetch('/api/triggers', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(rule) }).then(handle),
   // Patches an existing rule in place (quantity/threshold/thresholdIsPercent etc.) rather than
   // delete+recreate, so its id, enabled/armed state, and fire history are untouched - works on a
   // trigger whether it's currently armed, fired, or disabled. Needs a matching
   // PUT /api/triggers/{id} on the backend - see TriggerList's "Edit" action.
   updateTrigger: (id, patch) =>
-    fetch(`/api/triggers/${encodeURIComponent(id)}`, { method: 'PUT', headers: jsonHeaders, body: JSON.stringify(patch) }).then(handle),
-  deleteTrigger: (id) => fetch(`/api/triggers/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
-  deleteAllTriggers: () => fetch('/api/triggers', { method: 'DELETE' }).then(handle),
-  enableTrigger: (id) => fetch(`/api/triggers/${encodeURIComponent(id)}/enable`, { method: 'POST' }).then(handle),
-  disableTrigger: (id) => fetch(`/api/triggers/${encodeURIComponent(id)}/disable`, { method: 'POST' }).then(handle),
+    authFetch(`/api/triggers/${encodeURIComponent(id)}`, { method: 'PUT', headers: jsonHeaders, body: JSON.stringify(patch) }).then(handle),
+  deleteTrigger: (id) => authFetch(`/api/triggers/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
+  deleteAllTriggers: () => authFetch('/api/triggers', { method: 'DELETE' }).then(handle),
+  enableTrigger: (id) => authFetch(`/api/triggers/${encodeURIComponent(id)}/enable`, { method: 'POST' }).then(handle),
+  disableTrigger: (id) => authFetch(`/api/triggers/${encodeURIComponent(id)}/disable`, { method: 'POST' }).then(handle),
   // Applies one threshold/quantity/product template across many spreads at once (e.g. the whole
   // built universe) instead of configuring each one by hand - see BulkTriggerTemplateService.
   applyBulkTemplate: (template) =>
-    fetch('/api/triggers/bulk', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(template) }).then(handle),
+    authFetch('/api/triggers/bulk', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(template) }).then(handle),
 
   // Builds the futures universe from Kite's live instrument master - every stock currently
   // listed for NFO futures, not a hand-maintained list. Resolves each symbol's near/far month
@@ -51,17 +93,17 @@ export const api = {
   // symbols (alphabetically); omit it to build every futures-listed symbol on the exchange
   // (roughly 200-220 as of mid-2026 - that's the whole exchange, not a limit in this code).
   buildUniverse: (maxSymbols) =>
-    fetch(`/api/universe/build${maxSymbols ? `?maxSymbols=${encodeURIComponent(maxSymbols)}` : ''}`, { method: 'POST' }).then(handle),
+    authFetch(`/api/universe/build${maxSymbols ? `?maxSymbols=${encodeURIComponent(maxSymbols)}` : ''}`, { method: 'POST' }).then(handle),
 
   getFutures: (underlying, exchange = 'NFO') =>
-    fetch(`/api/instruments/futures?underlying=${encodeURIComponent(underlying)}&exchange=${encodeURIComponent(exchange)}`).then(handle),
+    authFetch(`/api/instruments/futures?underlying=${encodeURIComponent(underlying)}&exchange=${encodeURIComponent(exchange)}`).then(handle),
   // Downloads the full instrument master and writes every futures contract (no options) to
   // the futures CSV file on the server - see Storage:FuturesCsvPath in appsettings.json.
   fetchAllFutures: (exchange) =>
-    fetch(`/api/instruments/futures/fetch-all${exchange ? `?exchange=${encodeURIComponent(exchange)}` : ''}`, { method: 'POST' }).then(handle),
+    authFetch(`/api/instruments/futures/fetch-all${exchange ? `?exchange=${encodeURIComponent(exchange)}` : ''}`, { method: 'POST' }).then(handle),
   getAllFutures: (exchange) =>
-    fetch(`/api/instruments/futures/all${exchange ? `?exchange=${encodeURIComponent(exchange)}` : ''}`).then(handle),
+    authFetch(`/api/instruments/futures/all${exchange ? `?exchange=${encodeURIComponent(exchange)}` : ''}`).then(handle),
 
-  getAuthStatus: () => fetch('/api/auth/status').then(handle),
-  getLoginUrl: () => fetch('/api/auth/login-url').then(handle),
+  getAuthStatus: () => authFetch('/api/auth/status').then(handle),
+  getLoginUrl: () => authFetch('/api/auth/login-url').then(handle),
 }
