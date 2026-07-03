@@ -38,10 +38,14 @@ var universeCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:UniverseCsvPath"] ?? "App_Data/universe_futures.csv");
 
 builder.Services.AddSingleton<ITickStore, InMemoryTickStore>();
-builder.Services.AddSingleton<ITriggerRuleStore>(_ => new CsvTriggerRuleStore(triggersCsvPath));
+builder.Services.AddSingleton<ITriggerRuleStore>(sp =>
+    new CsvTriggerRuleStore(triggersCsvPath, sp.GetRequiredService<ILogger<CsvTriggerRuleStore>>()));
 builder.Services.AddSingleton<ISpreadDefinitionStore, InMemorySpreadDefinitionStore>();
 builder.Services.AddSingleton<ISpreadSnapshotCache, InMemorySpreadSnapshotCache>();
 builder.Services.AddSingleton<ISpreadRankingStore, InMemorySpreadRankingStore>();
+// Rolling in-memory history of fired triggers/execution outcomes, so GET /api/triggers/activity
+// can reseed the Trigger Activity feed after a browser refresh - see TriggerActivityEntry.
+builder.Services.AddSingleton<ITriggerActivityStore, InMemoryTriggerActivityStore>();
 
 // ---- Kite integration -----------------------------------------------------------------------
 builder.Services.AddHttpClient();
@@ -59,11 +63,19 @@ builder.Services.AddSingleton(sp => new KiteAuthService(
     sp.GetRequiredService<IOptions<KiteOptions>>(),
     sp.GetRequiredService<KiteSession>()));
 
+// Detects Kite's TokenException (access token invalid/expired) at every call site that hits
+// Kite's REST API, clears KiteSession immediately, and pushes IKiteAuthNotifier (below) so
+// connected dashboards flip to "not logged in" the instant a real API call fails - not just on
+// next page load. See KiteAuthFailureHandler's own doc comment.
+builder.Services.AddSingleton<KiteAuthFailureHandler>();
+builder.Services.AddSingleton<IKiteAuthNotifier, SignalRKiteAuthNotifier>();
+
 builder.Services.AddSingleton(sp => new KiteOrderGateway(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KiteOrderGateway)),
     sp.GetRequiredService<IOptions<KiteOptions>>(),
     sp.GetRequiredService<KiteSession>(),
     sp.GetRequiredService<RateLimiter>(),
+    sp.GetRequiredService<KiteAuthFailureHandler>(),
     sp.GetRequiredService<ILogger<KiteOrderGateway>>()));
 builder.Services.AddSingleton<IOrderGateway>(sp => sp.GetRequiredService<KiteOrderGateway>());
 
@@ -71,6 +83,7 @@ builder.Services.AddSingleton(sp => new KiteMarginService(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KiteMarginService)),
     sp.GetRequiredService<IOptions<KiteOptions>>(),
     sp.GetRequiredService<KiteSession>(),
+    sp.GetRequiredService<KiteAuthFailureHandler>(),
     sp.GetRequiredService<ILogger<KiteMarginService>>()));
 
 builder.Services.AddSingleton<KiteTickerClient>();
