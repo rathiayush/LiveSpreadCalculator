@@ -19,9 +19,9 @@ export default function TriggersPage({ spreads }) {
 
   return (
     <>
-      <BulkTriggerForm spreadCount={spreads.length} onCreated={loadTriggers} />
       <TriggerList triggers={triggers} onChanged={loadTriggers} spreads={spreads} />
       <TriggerForm spreads={spreads} onCreated={loadTriggers} />
+      <BulkTriggerForm spreadCount={spreads.length} onCreated={loadTriggers} />
     </>
   )
 }

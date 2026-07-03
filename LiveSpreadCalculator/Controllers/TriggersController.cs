@@ -52,7 +52,11 @@ public sealed class TriggersController : ControllerBase
         {
             Id = request.Id,
             SpreadId = request.SpreadId,
-            Operator = request.Operator,
+            // Derived from the sign of Threshold, not taken from the client - see the comment on
+            // CreateTriggerRuleRequest.Threshold. Keeps this in permanent lockstep with the
+            // number the user actually typed instead of relying on a separately-set enum that
+            // could silently drift out of sync with it (see the same fix in Update below).
+            Operator = request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual,
             Threshold = request.Threshold,
             ThresholdIsPercent = request.ThresholdIsPercent,
             NearLegAction = request.NearLegAction,
@@ -117,6 +121,11 @@ public sealed class TriggersController : ControllerBase
         rule.Quantity = request.Lots * lotSize;
         rule.Threshold = request.Threshold;
         rule.ThresholdIsPercent = request.ThresholdIsPercent;
+        // Re-derive Operator from the (possibly just flipped) sign of the new Threshold. Before
+        // this, editing e.g. +2% down to -2% left Operator stuck at GreaterThanOrEqual, so the
+        // rule would silently misfire (or never fire) since the comparison direction no longer
+        // matched the sign the user had just typed in.
+        rule.Operator = request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual;
 
         if (!TryUpsert(rule, out var problem)) return problem!;
         return Ok(rule);

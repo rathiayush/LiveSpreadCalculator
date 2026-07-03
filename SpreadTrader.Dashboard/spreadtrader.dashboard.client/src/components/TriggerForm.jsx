@@ -1,15 +1,22 @@
 import { useState } from 'react'
-import { Card, Row, Col, Input, InputNumber, Select, Switch, Button, Alert, Typography, Space } from 'antd'
+import { Card, Row, Col, InputNumber, Select, Switch, Button, Alert, Typography, Space } from 'antd'
 import { PlusCircleOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
 const LEG_ACTIONS = ['None', 'Buy', 'Sell']
-const OPERATORS = ['GreaterThanOrEqual', 'LessThanOrEqual']
+
+// Rule id is an internal identifier only (used for CSV persistence, the Edit modal, and the
+// trigger-activity feed) - the user never types or reasons about it, so it's generated here
+// instead of collected as a form field. crypto.randomUUID() needs a secure context (https or
+// localhost), which is what this app already runs under (Kite's own OAuth redirect requires
+// https in production) - the Math.random fallback only matters for an odd plain-http dev setup.
+const generateRuleId = () =>
+  (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 
 const emptyForm = {
-  id: '',
   spreadId: '',
-  operator: 'GreaterThanOrEqual',
   threshold: '',
   thresholdIsPercent: false,
   autoDirectionFromSpreadSign: true,
@@ -28,7 +35,6 @@ export default function TriggerForm({ spreads, onCreated }) {
   const [error, setError] = useState(null)
 
   const set = (field) => (value) => setForm((f) => ({ ...f, [field]: value }))
-  const setFromEvent = (field) => (e) => set(field)(e.target.value)
 
   // Exchange lot size for whichever spread is selected - both legs of a calendar spread share
   // the same underlying, so near/far always have the same lot size once resolved; used only to
@@ -48,6 +54,7 @@ export default function TriggerForm({ spreads, onCreated }) {
     try {
       await api.createTrigger({
         ...form,
+        id: generateRuleId(),
         threshold: Number(form.threshold),
         lots: Number(form.lots),
         rearmBuffer: Number(form.rearmBuffer || 0),
@@ -70,10 +77,7 @@ export default function TriggerForm({ spreads, onCreated }) {
           </Typography.Text>
 
           <Row gutter={[12, 12]}>
-            <Col xs={24} sm={12}>
-              <Input placeholder="Rule id" value={form.id} onChange={setFromEvent('id')} />
-            </Col>
-            <Col xs={24} sm={12}>
+            <Col xs={24}>
               <Select
                 showSearch
                 placeholder="Select spread"
@@ -88,22 +92,20 @@ export default function TriggerForm({ spreads, onCreated }) {
           </Row>
 
           <Row gutter={[12, 12]}>
-            <Col xs={24} sm={12}>
-              <Select
-                value={form.operator}
-                onChange={set('operator')}
-                style={{ width: '100%' }}
-                options={OPERATORS.map((o) => ({ value: o, label: o === 'GreaterThanOrEqual' ? 'spread >=' : 'spread <=' }))}
-              />
-            </Col>
-            <Col xs={24} sm={12}>
+            <Col xs={24}>
               <InputNumber
                 step={0.05}
-                placeholder={form.thresholdIsPercent ? 'Spread % threshold' : 'Ask-price spread threshold'}
+                placeholder={form.thresholdIsPercent ? 'Signed spread % threshold' : 'Signed ask-price spread threshold'}
                 value={form.threshold === '' ? null : form.threshold}
                 onChange={(v) => set('threshold')(v ?? '')}
                 style={{ width: '100%' }}
               />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                Sign decides the direction, no separate operator to set - spread value is (far leg
+                − near leg): a positive number fires when the spread rises to/above it (far pricier,
+                near at a discount); a negative number fires when it falls to/below it (near
+                pricier, near at a premium).
+              </Typography.Text>
             </Col>
           </Row>
 

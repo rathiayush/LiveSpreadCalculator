@@ -20,7 +20,12 @@ public sealed class CreateTriggerRuleRequest
 {
     public required string Id { get; set; }
     public required string SpreadId { get; set; }
-    public TriggerOperator Operator { get; set; }
+
+    /// <summary>Signed threshold - positive fires when the spread rises to/above this value
+    /// (premium widening), negative fires when it falls to/below this value (discount widening).
+    /// TriggersController derives TriggerRule.Operator from this value's sign, so the client no
+    /// longer sends an operator separately - one fewer control to keep in sync with the sign the
+    /// user actually typed.</summary>
     public decimal Threshold { get; set; }
 
     /// <summary>When true, Threshold/RearmBuffer are a percentage of the near leg's ask price

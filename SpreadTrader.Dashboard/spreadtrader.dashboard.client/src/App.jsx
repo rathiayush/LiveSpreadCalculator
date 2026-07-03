@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom'
-import { ConfigProvider, Layout, Menu, Space, Tag, Button, Typography, Drawer, Grid, message, theme } from 'antd'
+import { ConfigProvider, Layout, Menu, Space, Tag, Button, Typography, Drawer, Grid, message, theme, Tooltip } from 'antd'
 import {
   DashboardOutlined,
   LineChartOutlined,
@@ -13,6 +13,7 @@ import {
   SunOutlined,
   MoonOutlined,
   MenuOutlined,
+  SettingOutlined,
 } from '@ant-design/icons'
 import { api } from './api'
 import { useSpreadHubConnectionState } from './hooks/spreadHub'
@@ -46,14 +47,21 @@ const THEME_TOKENS = {
   },
 }
 
+// `group: 'admin'` items are administrative/setup screens (symbol sync, spread definitions) that
+// most users only touch occasionally - they're tucked under the "Admin" submenu in NavMenu below
+// instead of sitting as top-level rail items next to the daily-use Triggers/Live Spreads pages.
+// This flat list stays the single source of truth for routing/TopBar lookups either way - only
+// NavMenu's rendering groups them differently.
 const NAV_ITEMS = [
   { key: '/', label: 'Dashboard', icon: <DashboardOutlined />, subtitle: 'Ranked movers across the whole universe' },
   { key: '/spreads', label: 'Live Spreads', icon: <LineChartOutlined />, subtitle: 'Search and drill into any configured spread' },
-  { key: '/symbols', label: 'Symbols', icon: <CloudSyncOutlined />, subtitle: 'Sync the F&O symbol list and build the tradeable universe' },
-  { key: '/configured-spreads', label: 'Configured Spreads', icon: <UnorderedListOutlined />, subtitle: 'Every spread definition currently streaming' },
   { key: '/triggers', label: 'Triggers', icon: <ThunderboltOutlined />, subtitle: 'Rules that fire baskets automatically' },
   { key: '/trigger-activity', label: 'Trigger Activity', icon: <HistoryOutlined />, subtitle: 'Live feed of trigger fires' },
+  { key: '/symbols', label: 'Symbols', icon: <CloudSyncOutlined />, subtitle: 'Sync the F&O symbol list and build the tradeable universe', group: 'admin' },
+  { key: '/configured-spreads', label: 'Configured Spreads', icon: <UnorderedListOutlined />, subtitle: 'Every spread definition currently streaming', group: 'admin' },
 ]
+
+const ADMIN_GROUP_KEY = 'admin-group'
 
 function useActiveNavItem() {
   const location = useLocation()
@@ -104,19 +112,41 @@ function BrandLockup() {
 // (the desktop rail just passes a no-op since there's nothing to close).
 function NavMenu({ onNavigate }) {
   const active = useActiveNavItem()
+  // Controlled openKeys (rather than defaultOpenKeys) because the active item - and therefore
+  // whether "Admin" should be expanded - changes on every navigation, not just on first mount.
+  const [openKeys, setOpenKeys] = useState(active.group === 'admin' ? [ADMIN_GROUP_KEY] : [])
+
+  useEffect(() => {
+    if (active.group === 'admin') {
+      setOpenKeys((keys) => (keys.includes(ADMIN_GROUP_KEY) ? keys : [...keys, ADMIN_GROUP_KEY]))
+    }
+  }, [active])
+
+  const topLevelItems = NAV_ITEMS.filter((item) => !item.group).map((item) => ({
+    key: item.key,
+    icon: item.icon,
+    label: <Link to={item.key}>{item.label}</Link>,
+  }))
+
+  const adminItems = NAV_ITEMS.filter((item) => item.group === 'admin').map((item) => ({
+    key: item.key,
+    icon: item.icon,
+    label: <Link to={item.key}>{item.label}</Link>,
+  }))
 
   return (
     <Menu
       theme="dark"
       mode="inline"
       selectedKeys={[active.key]}
+      openKeys={openKeys}
+      onOpenChange={setOpenKeys}
       onClick={onNavigate}
       style={{ background: 'transparent', borderInlineEnd: 'none', padding: '4px 10px' }}
-      items={NAV_ITEMS.map((item) => ({
-        key: item.key,
-        icon: item.icon,
-        label: <Link to={item.key}>{item.label}</Link>,
-      }))}
+      items={[
+        ...topLevelItems,
+        { key: ADMIN_GROUP_KEY, icon: <SettingOutlined />, label: 'Admin', children: adminItems },
+      ]}
     />
   )
 }
@@ -173,6 +203,13 @@ function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenu
   // not on every spread tick, so it's read directly here rather than threaded down from AppShell.
   const connectionState = useSpreadHubConnectionState()
 
+  // showMenuButton is only true below the lg breakpoint (see AppShell) - reused here as the
+  // "compact" signal so the header doesn't need its own separate breakpoint check. On mobile this
+  // drops the subtitle line and shrinks the status tags to icon+tooltip instead of icon+sentence,
+  // which is what was previously forcing three stacked rows (title+subtitle, tags, login/toggle)
+  // and eating a huge chunk of a phone's vertical space before any real content showed.
+  const compact = showMenuButton
+
   return (
     <Header
       style={{
@@ -189,17 +226,19 @@ function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenu
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        gap: 16,
-        paddingInline: showMenuButton ? 12 : 24,
+        gap: compact ? 8 : 16,
+        paddingInline: compact ? 10 : 24,
         height: 'auto',
-        paddingBlock: 14,
+        paddingBlock: compact ? 8 : 14,
         flexWrap: 'wrap',
+        rowGap: 6,
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
         {showMenuButton && (
           <Button
             shape="circle"
+            size={compact ? 'middle' : 'large'}
             icon={<MenuOutlined />}
             onClick={onMenuClick}
             aria-label="Open navigation"
@@ -207,23 +246,37 @@ function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenu
           />
         )}
         <div style={{ minWidth: 0 }}>
-          <Typography.Title level={4} style={{ margin: 0 }}>{active.label}</Typography.Title>
-          <Typography.Text
-            type="secondary"
-            style={{ fontSize: 12.5, display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-          >
-            {active.subtitle}
-          </Typography.Text>
+          <Typography.Title level={compact ? 5 : 4} style={{ margin: 0 }}>{active.label}</Typography.Title>
+          {!compact && (
+            <Typography.Text
+              type="secondary"
+              style={{ fontSize: 12.5, display: 'block', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+            >
+              {active.subtitle}
+            </Typography.Text>
+          )}
         </div>
       </div>
 
       <Space wrap size="small">
-        <Tag icon={<WifiOutlined />} color={connectionState === 'connected' ? 'success' : 'warning'} style={{ borderRadius: 999, paddingInline: 10 }}>
-          Live feed: {connectionState}
-        </Tag>
-        <Tag color={authStatus?.isAuthenticated ? 'success' : 'warning'} style={{ borderRadius: 999, paddingInline: 10 }}>
-          Kite: {authStatus?.isAuthenticated ? 'authenticated' : 'not logged in'}
-        </Tag>
+        {compact ? (
+          <Tooltip title={`Live feed: ${connectionState}`}>
+            <Tag icon={<WifiOutlined />} color={connectionState === 'connected' ? 'success' : 'warning'} style={{ borderRadius: 999, marginInlineEnd: 0 }} />
+          </Tooltip>
+        ) : (
+          <Tag icon={<WifiOutlined />} color={connectionState === 'connected' ? 'success' : 'warning'} style={{ borderRadius: 999, paddingInline: 10 }}>
+            Live feed: {connectionState}
+          </Tag>
+        )}
+        {compact ? (
+          <Tooltip title={`Kite: ${authStatus?.isAuthenticated ? 'authenticated' : 'not logged in'}`}>
+            <Tag color={authStatus?.isAuthenticated ? 'success' : 'warning'} style={{ borderRadius: 999, marginInlineEnd: 0 }}>K</Tag>
+          </Tooltip>
+        ) : (
+          <Tag color={authStatus?.isAuthenticated ? 'success' : 'warning'} style={{ borderRadius: 999, paddingInline: 10 }}>
+            Kite: {authStatus?.isAuthenticated ? 'authenticated' : 'not logged in'}
+          </Tag>
+        )}
         {authStatus && !authStatus.isAuthenticated && (
           <Button size="small" type="primary" onClick={onLogin}>Login to Kite</Button>
         )}
