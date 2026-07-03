@@ -1,2 +1,2 @@
 Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent
-2,KPITTECH-JUL-AUG,LessThanOrEqual,8,None,None,1550,NRML,MARKET,True,0,False,False,2026-07-03T05:39:38.1362642+00:00,True,False
+1a298de5-6bcf-4ca8-8fc7-e468a2ec32d4,KPITTECH-JUL-AUG,AbsoluteGreaterThanOrEqual,8,None,None,775,NRML,MARKET,True,0,False,False,2026-07-03T10:37:30.5285241+00:00,True,False

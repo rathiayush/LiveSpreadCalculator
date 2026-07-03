@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Models;
+using SpreadTrader.KiteIntegration.Auth;
 
 namespace SpreadTrader.KiteIntegration.Orders;
 
@@ -25,13 +26,20 @@ public sealed class KiteMarginService
     private readonly HttpClient _httpClient;
     private readonly KiteOptions _options;
     private readonly KiteSession _session;
+    private readonly KiteAuthFailureHandler _authFailureHandler;
     private readonly ILogger<KiteMarginService> _logger;
 
-    public KiteMarginService(HttpClient httpClient, IOptions<KiteOptions> options, KiteSession session, ILogger<KiteMarginService> logger)
+    public KiteMarginService(
+        HttpClient httpClient,
+        IOptions<KiteOptions> options,
+        KiteSession session,
+        KiteAuthFailureHandler authFailureHandler,
+        ILogger<KiteMarginService> logger)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _session = session;
+        _authFailureHandler = authFailureHandler;
         _logger = logger;
     }
 
@@ -71,6 +79,7 @@ public sealed class KiteMarginService
             if (!string.Equals(root.GetProperty("status").GetString(), "success", StringComparison.Ordinal))
             {
                 var message = root.TryGetProperty("message", out var m) ? m.GetString() : body;
+                await _authFailureHandler.HandleIfTokenExceptionAsync(root, "checking basket margin", cancellationToken);
                 return new BasketMarginResult(false, null, null, message);
             }
 
@@ -120,6 +129,7 @@ public sealed class KiteMarginService
             if (!string.Equals(root.GetProperty("status").GetString(), "success", StringComparison.Ordinal))
             {
                 var message = root.TryGetProperty("message", out var m) ? m.GetString() : body;
+                await _authFailureHandler.HandleIfTokenExceptionAsync(root, "checking available margin", cancellationToken);
                 return new AvailableMarginResult(false, null, message);
             }
 

@@ -26,11 +26,18 @@ let spreadsMap = {}
 let rankingList = []
 let triggerEventsList = []
 let connectionState = 'connecting'
+// Non-null once the backend has told us (via "kiteAuthInvalidated" - see
+// KiteAuthFailureHandler/SignalRKiteAuthNotifier) that a real Kite API call failed with a
+// TokenException mid-session. Distinct from the one-time GET /api/auth/status check App.jsx
+// does on load - this is how the app finds out *live*, without waiting for a page reload, that
+// the token died partway through the day.
+let kiteAuthInvalidReason = null
 
 const spreadsListeners = new Set()
 const rankingListeners = new Set()
 const triggerListeners = new Set()
 const connectionListeners = new Set()
+const kiteAuthListeners = new Set()
 
 function notify(listeners) {
   for (const listener of listeners) listener()
@@ -47,11 +54,13 @@ const subscribeSpreads = subscribe(spreadsListeners)
 const subscribeRanking = subscribe(rankingListeners)
 const subscribeTriggers = subscribe(triggerListeners)
 const subscribeConnection = subscribe(connectionListeners)
+const subscribeKiteAuth = subscribe(kiteAuthListeners)
 
 const getSpreadsSnapshot = () => spreadsMap
 const getRankingSnapshot = () => rankingList
 const getTriggersSnapshot = () => triggerEventsList
 const getConnectionSnapshot = () => connectionState
+const getKiteAuthSnapshot = () => kiteAuthInvalidReason
 
 let connection = null
 
@@ -82,6 +91,24 @@ function ensureConnection() {
       if (!initial) return
       rankingList = initial
       notify(rankingListeners)
+    })
+    .catch(() => {})
+
+  // Seeds the Trigger Activity feed from the server's in-memory history (see
+  // ITriggerActivityStore) so a browser refresh no longer loses everything since the page
+  // loaded - previously this list only ever grew from live "triggerFired"/"basketExecuted"
+  // pushes and started from empty on every reload, even though the fires themselves were real
+  // and already resolved server-side. Merges rather than overwrites, newest first: anything
+  // already here arrived via a live push in the brief window between connection.start() and
+  // this request resolving, so it's newer than the snapshot and kept in front; duplicates (the
+  // same fireId in both) are dropped from the seeded side, not the live one.
+  api.getTriggerActivity()
+    .then((initial) => {
+      if (!initial) return
+      const existingIds = new Set(triggerEventsList.map((e) => e.fireId))
+      const seeded = initial.filter((e) => !existingIds.has(e.fireId))
+      triggerEventsList = [...triggerEventsList, ...seeded].slice(0, 50)
+      notify(triggerListeners)
     })
     .catch(() => {})
 
@@ -132,6 +159,16 @@ function ensureConnection() {
       }
       : e))
     notify(triggerListeners)
+  })
+
+  // Pushed the instant KiteAuthFailureHandler sees a TokenException from any real Kite call
+  // (order placement, margin check, order status/cancel) - see that class on the backend. The
+  // session is already cleared server-side by the time this arrives, so GET /api/auth/status
+  // would report the same thing on next load anyway; this just means the UI doesn't have to
+  // wait for that reload to tell you your session died.
+  connection.on('kiteAuthInvalidated', (payload) => {
+    kiteAuthInvalidReason = payload?.reason || 'Your Kite session is no longer valid.'
+    notify(kiteAuthListeners)
   })
 
   connection.onreconnecting(() => {
@@ -186,4 +223,18 @@ export function clearTriggerEvents() {
 
 export function useSpreadHubConnectionState() {
   return useSyncExternalStore(subscribeConnection, getConnectionSnapshot)
+}
+
+// Null when the session is fine (or hasn't been checked yet); a reason string once the backend
+// has pushed "kiteAuthInvalidated". App.jsx uses this to flip the auth tag and prompt re-login
+// immediately, without waiting for a page reload.
+export function useKiteAuthInvalidated() {
+  return useSyncExternalStore(subscribeKiteAuth, getKiteAuthSnapshot)
+}
+
+// Called once the user re-completes the Kite login flow (see App.jsx's kiteLogin=success
+// handling), so a stale invalidation notice doesn't keep showing after they've already fixed it.
+export function clearKiteAuthInvalidated() {
+  kiteAuthInvalidReason = null
+  notify(kiteAuthListeners)
 }

@@ -19,6 +19,7 @@ const emptyForm = {
   spreadId: '',
   threshold: '',
   thresholdIsPercent: false,
+  watchBothSides: false,
   autoDirectionFromSpreadSign: true,
   nearLegAction: 'None',
   farLegAction: 'None',
@@ -36,6 +37,13 @@ export default function TriggerForm({ spreads, onCreated }) {
 
   const set = (field) => (value) => setForm((f) => ({ ...f, [field]: value }))
 
+  // WatchBothSides requires auto-direction (see TriggersController.Create) - a fixed manual leg
+  // action can't correctly handle a deviation that might fire from either side. Forcing
+  // autoDirectionFromSpreadSign back on here means the user can never end up in the invalid
+  // combination via the UI at all, rather than hitting the server's rejection after submitting.
+  const setWatchBothSides = (value) =>
+    setForm((f) => ({ ...f, watchBothSides: value, autoDirectionFromSpreadSign: value ? true : f.autoDirectionFromSpreadSign }))
+
   // Exchange lot size for whichever spread is selected - both legs of a calendar spread share
   // the same underlying, so near/far always have the same lot size once resolved; used only to
   // show "= N shares" below the Lots input, the actual lots -> quantity conversion happens
@@ -47,6 +55,10 @@ export default function TriggerForm({ spreads, onCreated }) {
     e.preventDefault()
     if (!form.autoDirectionFromSpreadSign && form.nearLegAction === 'None' && form.farLegAction === 'None') {
       setError('Pick a Buy/Sell action for at least one leg, or turn auto-direction back on.')
+      return
+    }
+    if (form.watchBothSides && Number(form.threshold) === 0) {
+      setError('Threshold must be non-zero when watching both sides.')
       return
     }
     setBusy(true)
@@ -95,16 +107,23 @@ export default function TriggerForm({ spreads, onCreated }) {
             <Col xs={24}>
               <InputNumber
                 step={0.05}
-                placeholder={form.thresholdIsPercent ? 'Signed spread % threshold' : 'Signed ask-price spread threshold'}
+                min={form.watchBothSides ? 0.01 : undefined}
+                placeholder={
+                  form.watchBothSides
+                    ? (form.thresholdIsPercent ? 'Spread % deviation magnitude (either direction)' : 'Ask-price spread deviation magnitude (either direction)')
+                    : (form.thresholdIsPercent ? 'Signed spread % threshold' : 'Signed ask-price spread threshold')
+                }
                 value={form.threshold === '' ? null : form.threshold}
                 onChange={(v) => set('threshold')(v ?? '')}
                 style={{ width: '100%' }}
               />
               <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
-                Sign decides the direction, no separate operator to set - spread value is (far leg
-                − near leg): a positive number fires when the spread rises to/above it (far pricier,
-                near at a discount); a negative number fires when it falls to/below it (near
-                pricier, near at a premium).
+                {form.watchBothSides
+                  ? "Enter a plain positive number - sign doesn't matter here. Fires when the spread deviates at least this much in EITHER direction; auto-direction (below) decides which leg to buy/sell live from the actual direction at that moment."
+                  : <>Sign decides the direction, no separate operator to set - spread value is (far leg
+                    − near leg): a positive number fires when the spread rises to/above it (far pricier,
+                    near at a discount); a negative number fires when it falls to/below it (near
+                    pricier, near at a premium).</>}
               </Typography.Text>
             </Col>
           </Row>
@@ -115,8 +134,19 @@ export default function TriggerForm({ spreads, onCreated }) {
           </Space>
 
           <Space>
-            <Switch checked={form.autoDirectionFromSpreadSign} onChange={set('autoDirectionFromSpreadSign')} />
-            <Typography.Text>Auto direction from spread sign</Typography.Text>
+            <Switch checked={form.watchBothSides} onChange={setWatchBothSides} />
+            <Typography.Text>Watch both sides (magnitude only - no sign to guess)</Typography.Text>
+          </Space>
+
+          <Space>
+            <Switch
+              checked={form.autoDirectionFromSpreadSign}
+              onChange={set('autoDirectionFromSpreadSign')}
+              disabled={form.watchBothSides}
+            />
+            <Typography.Text>
+              Auto direction from spread sign{form.watchBothSides ? ' (required while watching both sides)' : ''}
+            </Typography.Text>
           </Space>
 
           {form.autoDirectionFromSpreadSign ? (

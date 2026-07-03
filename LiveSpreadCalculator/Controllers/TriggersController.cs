@@ -13,17 +13,32 @@ public sealed class TriggersController : ControllerBase
     private readonly ITriggerRuleStore _ruleStore;
     private readonly ISpreadDefinitionStore _spreadStore;
     private readonly BulkTriggerTemplateService _bulkTemplate;
+    private readonly ITriggerActivityStore _activityStore;
 
-    public TriggersController(ITriggerRuleStore ruleStore, ISpreadDefinitionStore spreadStore, BulkTriggerTemplateService bulkTemplate)
+    public TriggersController(
+        ITriggerRuleStore ruleStore,
+        ISpreadDefinitionStore spreadStore,
+        BulkTriggerTemplateService bulkTemplate,
+        ITriggerActivityStore activityStore)
     {
         _ruleStore = ruleStore;
         _spreadStore = spreadStore;
         _bulkTemplate = bulkTemplate;
+        _activityStore = activityStore;
     }
 
     [HttpGet]
     public ActionResult<IReadOnlyList<TriggerRule>> GetAll([FromQuery] string? spreadId) =>
         Ok(string.IsNullOrEmpty(spreadId) ? _ruleStore.GetAll() : _ruleStore.GetForSpread(spreadId));
+
+    /// <summary>Seeds the Trigger Activity feed on page load (see hooks/spreadHub.js) - newest
+    /// first, same in-memory history that SignalRTriggerEventSink/SignalROrderExecutionSink feed
+    /// on every fire, so a browser refresh no longer loses everything since the page loaded.
+    /// Cleared only by a full backend restart (see InMemoryTriggerActivityStore) - deliberately
+    /// not persisted to disk, since this is a rolling activity log, not configuration.</summary>
+    [HttpGet("activity")]
+    public ActionResult<IReadOnlyList<TriggerActivityEntry>> GetActivity() =>
+        Ok(_activityStore.GetRecent());
 
     [HttpPost]
     public ActionResult<TriggerRule> Create([FromBody] CreateTriggerRuleRequest request)
@@ -35,6 +50,16 @@ public sealed class TriggersController : ControllerBase
         if (!request.AutoDirectionFromSpreadSign &&
             request.NearLegAction == TriggerLegAction.None && request.FarLegAction == TriggerLegAction.None)
             return BadRequest("At least one of NearLegAction / FarLegAction must be set when AutoDirectionFromSpreadSign is false - otherwise the rule would fire and place no orders.");
+
+        // WatchBothSides fires on whichever side of zero the spread happens to cross, so a fixed
+        // manual leg action would be wrong exactly half the time (it can't flip to match
+        // whichever side actually triggered) - only auto-direction, which decides the trade live
+        // from the real direction at fire time, makes sense here.
+        if (request.WatchBothSides && !request.AutoDirectionFromSpreadSign)
+            return BadRequest("WatchBothSides requires AutoDirectionFromSpreadSign - a fixed manual leg action can't correctly handle a deviation that might fire from either side.");
+
+        if (request.WatchBothSides && request.Threshold == 0)
+            return BadRequest("Threshold must be non-zero when WatchBothSides is true.");
 
         if (request.Lots <= 0)
             return BadRequest("Lots must be greater than zero.");
@@ -52,12 +77,17 @@ public sealed class TriggersController : ControllerBase
         {
             Id = request.Id,
             SpreadId = request.SpreadId,
-            // Derived from the sign of Threshold, not taken from the client - see the comment on
-            // CreateTriggerRuleRequest.Threshold. Keeps this in permanent lockstep with the
-            // number the user actually typed instead of relying on a separately-set enum that
-            // could silently drift out of sync with it (see the same fix in Update below).
-            Operator = request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual,
-            Threshold = request.Threshold,
+            // WatchBothSides -> AbsoluteGreaterThanOrEqual with Threshold forced positive (its
+            // sign is meaningless in this mode - see CreateTriggerRuleRequest.WatchBothSides).
+            // Otherwise, Operator is derived from the sign of Threshold, not taken from the
+            // client - see the comment on CreateTriggerRuleRequest.Threshold. Keeps this in
+            // permanent lockstep with the number the user actually typed instead of relying on
+            // a separately-set enum that could silently drift out of sync with it (see the same
+            // fix in Update below).
+            Operator = request.WatchBothSides
+                ? TriggerOperator.AbsoluteGreaterThanOrEqual
+                : request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual,
+            Threshold = request.WatchBothSides ? Math.Abs(request.Threshold) : request.Threshold,
             ThresholdIsPercent = request.ThresholdIsPercent,
             NearLegAction = request.NearLegAction,
             FarLegAction = request.FarLegAction,
@@ -119,13 +149,24 @@ public sealed class TriggersController : ControllerBase
             return BadRequest("Lot size not resolved yet for this spread - build/resolve the universe first.");
 
         rule.Quantity = request.Lots * lotSize;
-        rule.Threshold = request.Threshold;
         rule.ThresholdIsPercent = request.ThresholdIsPercent;
-        // Re-derive Operator from the (possibly just flipped) sign of the new Threshold. Before
-        // this, editing e.g. +2% down to -2% left Operator stuck at GreaterThanOrEqual, so the
-        // rule would silently misfire (or never fire) since the comparison direction no longer
-        // matched the sign the user had just typed in.
-        rule.Operator = request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual;
+
+        if (rule.Operator == TriggerOperator.AbsoluteGreaterThanOrEqual)
+        {
+            // Update doesn't expose a way to switch modes (same as it doesn't expose OrderType/
+            // Product), so a rule created as WatchBothSides stays in that mode here - just take
+            // the new magnitude, sign still ignored, same as Create.
+            rule.Threshold = Math.Abs(request.Threshold);
+        }
+        else
+        {
+            rule.Threshold = request.Threshold;
+            // Re-derive Operator from the (possibly just flipped) sign of the new Threshold.
+            // Before this, editing e.g. +2% down to -2% left Operator stuck at
+            // GreaterThanOrEqual, so the rule would silently misfire (or never fire) since the
+            // comparison direction no longer matched the sign the user had just typed in.
+            rule.Operator = request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual;
+        }
 
         if (!TryUpsert(rule, out var problem)) return problem!;
         return Ok(rule);

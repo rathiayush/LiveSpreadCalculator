@@ -12,12 +12,19 @@ namespace LiveSpreadCalculator.Realtime;
 public sealed class SignalROrderExecutionSink : IOrderExecutionSink
 {
     private readonly IHubContext<SpreadHub> _hub;
+    private readonly ITriggerActivityStore _activityStore;
 
-    public SignalROrderExecutionSink(IHubContext<SpreadHub> hub)
+    public SignalROrderExecutionSink(IHubContext<SpreadHub> hub, ITriggerActivityStore activityStore)
     {
         _hub = hub;
+        _activityStore = activityStore;
     }
 
-    public Task PublishAsync(BasketExecutionEvent executionEvent, CancellationToken cancellationToken) =>
-        _hub.Clients.All.SendAsync("basketExecuted", executionEvent, cancellationToken);
+    public Task PublishAsync(BasketExecutionEvent executionEvent, CancellationToken cancellationToken)
+    {
+        // Attaches this outcome to the matching "fired" entry recorded earlier by
+        // SignalRTriggerEventSink, correlated by FireId - see TriggerActivityEntry.
+        _activityStore.RecordExecuted(executionEvent);
+        return _hub.Clients.All.SendAsync("basketExecuted", executionEvent, cancellationToken);
+    }
 }

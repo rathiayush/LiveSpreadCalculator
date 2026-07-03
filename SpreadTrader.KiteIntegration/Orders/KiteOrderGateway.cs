@@ -6,6 +6,7 @@ using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 using SpreadTrader.KiteIntegration;
+using SpreadTrader.KiteIntegration.Auth;
 
 namespace SpreadTrader.KiteIntegration.Orders;
 
@@ -21,14 +22,22 @@ public sealed class KiteOrderGateway : IOrderGateway
     private readonly KiteOptions _options;
     private readonly KiteSession _session;
     private readonly RateLimiter _rateLimiter;
+    private readonly KiteAuthFailureHandler _authFailureHandler;
     private readonly ILogger<KiteOrderGateway> _logger;
 
-    public KiteOrderGateway(HttpClient httpClient, IOptions<KiteOptions> options, KiteSession session, RateLimiter rateLimiter, ILogger<KiteOrderGateway> logger)
+    public KiteOrderGateway(
+        HttpClient httpClient,
+        IOptions<KiteOptions> options,
+        KiteSession session,
+        RateLimiter rateLimiter,
+        KiteAuthFailureHandler authFailureHandler,
+        ILogger<KiteOrderGateway> logger)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _session = session;
         _logger = logger;
+        _authFailureHandler = authFailureHandler;
         // Injected as a singleton (see Program.cs) rather than constructed here, so pacing
         // state is shared even if this gateway is resolved as a fresh instance per call.
         _rateLimiter = rateLimiter;
@@ -90,6 +99,7 @@ public sealed class KiteOrderGateway : IOrderGateway
             if (!string.Equals(root.GetProperty("status").GetString(), "success", StringComparison.Ordinal))
             {
                 var message = root.TryGetProperty("message", out var m) ? m.GetString() : body;
+                await _authFailureHandler.HandleIfTokenExceptionAsync(root, $"placing order for {leg.TradingSymbol}", cancellationToken);
                 _logger.LogWarning("Order rejected: {Symbol} {Side} x{Qty} - {Message}",
                     leg.TradingSymbol, leg.TransactionType, leg.Quantity, message);
                 return new OrderResult { Success = false, ErrorMessage = message, Status = "REJECTED" };
@@ -136,7 +146,11 @@ public sealed class KiteOrderGateway : IOrderGateway
                 var root = doc.RootElement;
 
                 if (!string.Equals(root.GetProperty("status").GetString(), "success", StringComparison.Ordinal))
-                    continue; // transient API hiccup on the status check itself - retry
+                {
+                    if (await _authFailureHandler.HandleIfTokenExceptionAsync(root, $"polling status of order {orderId}", cancellationToken))
+                        break; // token's dead - further polls would just fail the same way, stop early
+                    continue; // otherwise a transient API hiccup on the status check itself - retry
+                }
 
                 // /orders/{order_id} returns the full status history for that order, oldest
                 // first - the last entry is its current/latest known status.
@@ -209,12 +223,16 @@ public sealed class KiteOrderGateway : IOrderGateway
             using var response = await _httpClient.SendAsync(request, cancellationToken);
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
             using var doc = JsonDocument.Parse(body);
-            var success = string.Equals(doc.RootElement.GetProperty("status").GetString(), "success", StringComparison.Ordinal);
+            var root = doc.RootElement;
+            var success = string.Equals(root.GetProperty("status").GetString(), "success", StringComparison.Ordinal);
 
             if (success)
                 _logger.LogWarning("Cancelled stray open order {OrderId} (status couldn't be confirmed as filled/rejected in time).", orderId);
             else
+            {
+                await _authFailureHandler.HandleIfTokenExceptionAsync(root, $"cancelling order {orderId}", cancellationToken);
                 _logger.LogError("Failed to cancel order {OrderId}: {Body}", orderId, body);
+            }
 
             return success;
         }

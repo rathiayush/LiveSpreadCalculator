@@ -90,7 +90,11 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
     {
       title: 'Condition',
       key: 'condition',
-      render: (_, t) => `${t.operator === 'GreaterThanOrEqual' ? '>=' : '<='} ${t.threshold}${t.thresholdIsPercent ? '%' : ''}`,
+      render: (_, t) => {
+        const unit = t.thresholdIsPercent ? '%' : ''
+        if (t.operator === 'AbsoluteGreaterThanOrEqual') return `|spread| >= ${t.threshold}${unit}`
+        return `${t.operator === 'GreaterThanOrEqual' ? '>=' : '<='} ${t.threshold}${unit}`
+      },
     },
     {
       title: 'Legs',
@@ -213,9 +217,11 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
                 style={{ width: '100%' }}
               />
               <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
-                Sign still decides direction (positive = fires on far-pricier/near-discount widening,
-                negative = fires on near-pricier/near-premium widening) - flipping the sign here now
-                correctly flips which side it watches, it no longer gets stuck on the old direction.
+                {editing?.operator === 'AbsoluteGreaterThanOrEqual'
+                  ? "This rule watches both sides (magnitude only) - enter a plain positive number, sign is ignored either way."
+                  : "Sign still decides direction (positive = fires on far-pricier/near-discount widening, " +
+                    "negative = fires on near-pricier/near-premium widening) - flipping the sign here now " +
+                    "correctly flips which side it watches, it no longer gets stuck on the old direction."}
               </Typography.Text>
             </div>
 

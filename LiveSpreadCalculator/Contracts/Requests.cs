@@ -21,16 +21,26 @@ public sealed class CreateTriggerRuleRequest
     public required string Id { get; set; }
     public required string SpreadId { get; set; }
 
-    /// <summary>Signed threshold - positive fires when the spread rises to/above this value
-    /// (premium widening), negative fires when it falls to/below this value (discount widening).
-    /// TriggersController derives TriggerRule.Operator from this value's sign, so the client no
-    /// longer sends an operator separately - one fewer control to keep in sync with the sign the
-    /// user actually typed.</summary>
+    /// <summary>Signed threshold when WatchBothSides is false (the default) - positive fires
+    /// when the spread rises to/above this value (premium widening), negative fires when it
+    /// falls to/below this value (discount widening). TriggersController derives
+    /// TriggerRule.Operator from this value's sign in that case, so the client doesn't send an
+    /// operator separately. When WatchBothSides is true, send this as a plain positive
+    /// magnitude instead (its sign is ignored - see WatchBothSides).</summary>
     public decimal Threshold { get; set; }
 
     /// <summary>When true, Threshold/RearmBuffer are a percentage of the near leg's ask price
     /// instead of an absolute rupee difference.</summary>
     public bool ThresholdIsPercent { get; set; }
+
+    /// <summary>When true, Threshold is treated as an unsigned magnitude and the rule fires
+    /// when the spread deviates that much in EITHER direction (TriggerOperator.
+    /// AbsoluteGreaterThanOrEqual) - no sign to guess at, since AutoDirectionFromSpreadSign
+    /// (required when this is true - see TriggersController.Create) decides which leg to buy/
+    /// sell live from the spread's actual direction at fire time regardless of which side
+    /// crossed the threshold. False (the default) keeps the one-sided signed-threshold
+    /// behavior.</summary>
+    public bool WatchBothSides { get; set; }
 
     public TriggerLegAction NearLegAction { get; set; } = TriggerLegAction.None;
     public TriggerLegAction FarLegAction { get; set; } = TriggerLegAction.None;

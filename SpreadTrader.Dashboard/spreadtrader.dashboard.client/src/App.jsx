@@ -16,7 +16,7 @@ import {
   SettingOutlined,
 } from '@ant-design/icons'
 import { api } from './api'
-import { useSpreadHubConnectionState } from './hooks/spreadHub'
+import { useSpreadHubConnectionState, useKiteAuthInvalidated, clearKiteAuthInvalidated } from './hooks/spreadHub'
 import DashboardPage from './pages/DashboardPage'
 import SpreadsPage from './pages/SpreadsPage'
 import SymbolsPage from './pages/SymbolsPage'
@@ -330,8 +330,23 @@ function AppShell({ mode, onToggleMode }) {
     if (params.get('kiteLogin')) {
       window.history.replaceState({}, '', window.location.pathname)
       loadAuthStatus()
+      // A fresh login means any earlier "your token died mid-session" notice no longer
+      // applies - clear it so it doesn't keep showing after the problem's already fixed.
+      clearKiteAuthInvalidated()
     }
   }, [loadSpreads, loadAuthStatus])
+
+  // Pushed live (see hooks/spreadHub.js's "kiteAuthInvalidated" handler) the instant a real Kite
+  // API call fails with TokenException - independent of, and much faster than, the one-time
+  // check above. The backend has already cleared its own session by the time this arrives; this
+  // just makes sure the UI doesn't sit there showing a stale "authenticated" tag (and silently
+  // failing orders) until the next full page reload.
+  const kiteAuthInvalidReason = useKiteAuthInvalidated()
+  useEffect(() => {
+    if (!kiteAuthInvalidReason) return
+    setAuthStatus({ isAuthenticated: false })
+    message.warning(`Kite session ended (${kiteAuthInvalidReason}) - please log in again.`, 8)
+  }, [kiteAuthInvalidReason])
 
   const handleLogin = async () => {
     try {

@@ -96,7 +96,7 @@ export default function TriggerFeed({ events, onClear }) {
         onClear && (
           <Popconfirm
             title="Clear trigger activity?"
-            description="Only clears this view - it's a live feed since the page loaded, not stored anywhere."
+            description="Only clears this browser's current view - the history is kept on the server until it restarts, so refreshing (or opening another tab) will show it again."
             onConfirm={onClear}
             okText="Clear"
             okButtonProps={{ danger: true }}

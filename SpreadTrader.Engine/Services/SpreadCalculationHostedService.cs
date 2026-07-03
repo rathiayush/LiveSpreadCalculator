@@ -147,11 +147,20 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             // whether the value actually changed since the last cycle.
             _snapshotCache.Upsert(snapshot);
 
-            if (_lastValues.TryGetValue(spread.Id, out var last) && last == spreadValue)
-                continue;
-
+            // This "did it change" check only gates the SignalR push below - it must NOT gate
+            // trigger evaluation. Previously it did both (a `continue` skipped evaluation
+            // entirely when the value was unchanged), which meant that once the market closes
+            // and ticks stop moving, spreadValue is bit-for-bit identical cycle after cycle -
+            // so EvaluateTriggersAsync would never run again for that spread AT ALL, for any
+            // rule, new or old, until a tick actually moved the value. A rule added (or
+            // re-armed) while the market is frozen would sit there Enabled/IsArmed=true forever
+            // and never get evaluated against the current snapshot - indistinguishable from
+            // being broken. Evaluating every cycle is cheap (in-memory only, no I/O unless a
+            // rule actually fires) - only the dashboard push benefits from being skipped when
+            // nothing changed.
+            var isChanged = !_lastValues.TryGetValue(spread.Id, out var last) || last != spreadValue;
             _lastValues[spread.Id] = spreadValue;
-            changed.Add(snapshot);
+            if (isChanged) changed.Add(snapshot);
 
             await EvaluateTriggersAsync(spread, snapshot, stoppingToken);
         }
@@ -180,17 +189,28 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             // different price levels); legacy rules judge the raw ask-price SpreadValue.
             var measured = rule.ThresholdIsPercent ? snapshot.SpreadPercent : snapshot.SpreadValue;
 
-            var crossed = rule.Operator == TriggerOperator.GreaterThanOrEqual
-                ? measured >= rule.Threshold
-                : measured <= rule.Threshold;
+            // AbsoluteGreaterThanOrEqual (WatchBothSides) judges |measured| against a positive-
+            // only Threshold (see TriggersController.Create) - it doesn't matter which side of
+            // zero the spread is on, only how far it's deviated from it either way.
+            var crossed = rule.Operator switch
+            {
+                TriggerOperator.GreaterThanOrEqual => measured >= rule.Threshold,
+                TriggerOperator.LessThanOrEqual => measured <= rule.Threshold,
+                TriggerOperator.AbsoluteGreaterThanOrEqual => Math.Abs(measured) >= rule.Threshold,
+                _ => false,
+            };
 
             if (!crossed)
             {
                 if (!rule.IsArmed)
                 {
-                    var rearmed = rule.Operator == TriggerOperator.GreaterThanOrEqual
-                        ? measured <= rule.Threshold - rule.RearmBuffer
-                        : measured >= rule.Threshold + rule.RearmBuffer;
+                    var rearmed = rule.Operator switch
+                    {
+                        TriggerOperator.GreaterThanOrEqual => measured <= rule.Threshold - rule.RearmBuffer,
+                        TriggerOperator.LessThanOrEqual => measured >= rule.Threshold + rule.RearmBuffer,
+                        TriggerOperator.AbsoluteGreaterThanOrEqual => Math.Abs(measured) <= rule.Threshold - rule.RearmBuffer,
+                        _ => false,
+                    };
                     if (rearmed)
                     {
                         rule.IsArmed = true;

@@ -7,4 +7,12 @@
     <RootNamespace>SpreadTrader.Core</RootNamespace>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- Needed by CsvTriggerRuleStore's ILogger<CsvTriggerRuleStore>? - Abstractions only (not
+         the full Microsoft.Extensions.Logging package), matching how SpreadTrader.KiteIntegration
+         already references it, since this is a plain class library (Microsoft.NET.Sdk) with none
+         of the ASP.NET Core framework references LiveSpreadCalculator gets for free. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
+  </ItemGroup>
+
 </Project>

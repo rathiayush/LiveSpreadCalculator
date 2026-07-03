@@ -3,7 +3,18 @@ namespace SpreadTrader.Core.Models;
 public enum TriggerOperator
 {
     GreaterThanOrEqual,
-    LessThanOrEqual
+    LessThanOrEqual,
+
+    /// <summary>Watches both sides at once: fires when the absolute value of the measured
+    /// spread (SpreadValue or SpreadPercent - see TriggerRule.ThresholdIsPercent) reaches
+    /// Threshold, regardless of which direction it moved. Threshold is stored as a positive
+    /// magnitude for this mode (see TriggersController.Create) - there's no sign to get wrong,
+    /// since which leg to buy/sell is decided live from the spread's actual direction at fire
+    /// time (AutoDirectionFromSpreadSign), completely independent of which side of the
+    /// threshold triggered the fire. Previously, catching a deviation on either side required
+    /// two separate signed rules (e.g. +8 and -8) - see BulkTriggerTemplateService's BULK-UP/
+    /// BULK-DOWN pair, which still uses that two-rule approach for bulk-created rules.</summary>
+    AbsoluteGreaterThanOrEqual,
 }
 
 public enum TriggerLegAction

@@ -23,6 +23,10 @@ export const api = {
 
   getTriggers: (spreadId) =>
     fetch(`/api/triggers${spreadId ? `?spreadId=${encodeURIComponent(spreadId)}` : ''}`).then(handle),
+  // Recent fired triggers + execution outcomes, newest first - seeds the Trigger Activity feed
+  // before the first SignalR push, same idea as getSpreadSnapshot for Live Spreads. Held in
+  // memory server-side (see ITriggerActivityStore) until the backend restarts.
+  getTriggerActivity: () => fetch('/api/triggers/activity').then(handle),
   createTrigger: (rule) =>
     fetch('/api/triggers', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(rule) }).then(handle),
   // Patches an existing rule in place (quantity/threshold/thresholdIsPercent etc.) rather than

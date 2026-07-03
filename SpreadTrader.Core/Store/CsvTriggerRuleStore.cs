@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 
@@ -27,10 +28,20 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
     private readonly string _filePath;
     private readonly object _fileLock = new();
     private readonly ConcurrentDictionary<string, TriggerRule> _rules = new();
+    private readonly ILogger<CsvTriggerRuleStore>? _logger;
 
-    public CsvTriggerRuleStore(string filePath)
+    // logger is optional (defaults to null) so any other call site/test that constructs this
+    // directly still compiles without wiring one up - see Load()/ParseLine, which previously
+    // dropped an unparseable row with zero trace anywhere. That silence is exactly what made a
+    // real incident invisible: a row this store itself wrote (e.g. a newly-added TriggerOperator
+    // value) failed to parse back in - most likely because the process had picked up new code
+    // for the write path via hot-reload but not for a type the read path depends on - and the
+    // rule just vanished from evaluation on the next Load() with nothing in the CSV, the API
+    // responses, or the UI hinting anything was ever wrong.
+    public CsvTriggerRuleStore(string filePath, ILogger<CsvTriggerRuleStore>? logger = null)
     {
         _filePath = filePath;
+        _logger = logger;
         Load();
     }
 
@@ -84,12 +95,30 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
                 return;
             }
 
+            var loaded = 0;
+            var skipped = 0;
             foreach (var line in File.ReadAllLines(_filePath).Skip(1))
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 var rule = ParseLine(line);
-                if (rule is not null) _rules[rule.Id] = rule;
+                if (rule is not null)
+                {
+                    _rules[rule.Id] = rule;
+                    loaded++;
+                }
+                else
+                {
+                    skipped++;
+                }
             }
+
+            if (skipped > 0)
+                _logger?.LogError(
+                    "CsvTriggerRuleStore.Load: {Skipped} row(s) in {Path} failed to parse and were dropped - " +
+                    "see the preceding warning(s) for which row(s) and why. Those rules will not be evaluated " +
+                    "or fire until fixed (edit the CSV directly, or delete+recreate them from the UI). " +
+                    "{Loaded} row(s) loaded successfully.",
+                    skipped, _filePath, loaded);
         }
     }
 
@@ -176,10 +205,16 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
         r.AutoDirectionFromSpreadSign,
         r.ThresholdIsPercent);
 
-    private static TriggerRule? ParseLine(string line)
+    private TriggerRule? ParseLine(string line)
     {
         var fields = SplitCsvLine(line);
-        if (fields.Length < 14) return null;
+        if (fields.Length < 14)
+        {
+            _logger?.LogWarning(
+                "CsvTriggerRuleStore: dropping a row in {Path} with only {FieldCount} column(s) " +
+                "(need at least 14) - raw line: {Line}", _filePath, fields.Length, line);
+            return null;
+        }
 
         try
         {
@@ -208,9 +243,23 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
                     && bool.Parse(fields[15]),
             };
         }
-        catch
+        catch (Exception ex)
         {
-            return null; // skip malformed rows rather than fail startup over one bad line
+            // Skip malformed rows rather than fail startup over one bad line - but log it loudly
+            // rather than dropping it with zero trace, which is exactly what let a rule vanish
+            // silently before this. fields[0]/[2] are read defensively (this catch can trigger
+            // before or after they're known good) so the message still names the rule id and
+            // Operator value whenever possible instead of just the exception type.
+            var ruleId = fields.Length > 0 ? fields[0] : "(unknown)";
+            var operatorValue = fields.Length > 2 ? fields[2] : "(unknown)";
+            _logger?.LogWarning(ex,
+                "CsvTriggerRuleStore: dropping unparseable row for rule id {RuleId} (Operator={Operator}) in " +
+                "{Path} - {Reason}. This rule will NOT be evaluated or fire until fixed. A common cause: the " +
+                "CSV holds an enum value (like a TriggerOperator) that this running build doesn't know about " +
+                "yet - e.g. a hot-reload that updated the write path but not a type the read path depends on. " +
+                "Full stop/restart the app, or fix/remove the row in {Path} directly. Raw line: {Line}",
+                ruleId, operatorValue, _filePath, ex.Message, _filePath, line);
+            return null;
         }
     }
 
