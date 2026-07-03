@@ -6,9 +6,11 @@ public sealed class EngineOptions
 
     /// <summary>How often spreads are recalculated from the tick store and, if changed,
     /// pushed to the UI / evaluated against trigger rules. Lower = snappier UI, more CPU and
-    /// more SignalR traffic. 300ms (the default in appsettings.json) is a reasonable default
-    /// for ~200 instruments; this class-level default of 250 is only used if the Engine section
-    /// is missing from configuration entirely.</summary>
+    /// more SignalR traffic. 150ms (the value in appsettings.json) roughly doubles the recalc/
+    /// evaluation rate versus the previous 300ms default - still cheap enough at ~100-200
+    /// instruments / ~100 spreads (see the class doc comment on SpreadCalculationHostedService).
+    /// This class-level default of 250 is only used if the Engine section is missing from
+    /// configuration entirely.</summary>
     public int SpreadRecalculationIntervalMs { get; set; } = 250;
 
     /// <summary>Minimum time a re-armable (non one-shot) rule must wait between fires, even if

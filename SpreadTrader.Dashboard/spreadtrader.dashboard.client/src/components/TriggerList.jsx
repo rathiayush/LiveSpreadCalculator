@@ -212,6 +212,11 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
                 onChange={(v) => setEditForm((f) => ({ ...f, threshold: v ?? '' }))}
                 style={{ width: '100%' }}
               />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                Sign still decides direction (positive = fires on far-pricier/near-discount widening,
+                negative = fires on near-pricier/near-premium widening) - flipping the sign here now
+                correctly flips which side it watches, it no longer gets stuck on the old direction.
+              </Typography.Text>
             </div>
 
             <Space>
