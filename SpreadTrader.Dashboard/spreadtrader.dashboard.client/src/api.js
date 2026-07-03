@@ -25,6 +25,12 @@ export const api = {
     fetch(`/api/triggers${spreadId ? `?spreadId=${encodeURIComponent(spreadId)}` : ''}`).then(handle),
   createTrigger: (rule) =>
     fetch('/api/triggers', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(rule) }).then(handle),
+  // Patches an existing rule in place (quantity/threshold/thresholdIsPercent etc.) rather than
+  // delete+recreate, so its id, enabled/armed state, and fire history are untouched - works on a
+  // trigger whether it's currently armed, fired, or disabled. Needs a matching
+  // PUT /api/triggers/{id} on the backend - see TriggerList's "Edit" action.
+  updateTrigger: (id, patch) =>
+    fetch(`/api/triggers/${encodeURIComponent(id)}`, { method: 'PUT', headers: jsonHeaders, body: JSON.stringify(patch) }).then(handle),
   deleteTrigger: (id) => fetch(`/api/triggers/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
   deleteAllTriggers: () => fetch('/api/triggers', { method: 'DELETE' }).then(handle),
   enableTrigger: (id) => fetch(`/api/triggers/${encodeURIComponent(id)}/enable`, { method: 'POST' }).then(handle),

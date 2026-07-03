@@ -10,5 +10,7 @@ public sealed class InMemorySpreadSnapshotCache : ISpreadSnapshotCache
 
     public void Upsert(SpreadSnapshot snapshot) => _snapshots[snapshot.SpreadId] = snapshot;
 
+    public bool Remove(string spreadId) => _snapshots.TryRemove(spreadId, out _);
+
     public IReadOnlyList<SpreadSnapshot> GetAll() => _snapshots.Values.ToArray();
 }

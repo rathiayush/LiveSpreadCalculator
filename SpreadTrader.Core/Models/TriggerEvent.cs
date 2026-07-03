@@ -8,8 +8,16 @@ namespace SpreadTrader.Core.Models;
 /// aren't guaranteed to agree at the margins when bid/ask spreads are wide. Re-deriving from
 /// sign would risk placing an order in the opposite direction from the one actually implied by
 /// the premium/discount call - carrying the explicit Direction avoids that entirely.
+///
+/// FireId correlates this event to the BasketExecutionEvent published later once
+/// OrderDispatchHostedService actually finishes placing (or blocking) the basket - the two are
+/// published from different services at different times (this one the instant the rule crosses
+/// its threshold, the other only after the margin check and order placement round-trips
+/// complete), so the dashboard needs a shared id to line up "a trigger fired" with "here's what
+/// it actually bought/sold and whether it succeeded".
 /// </summary>
 public readonly record struct TriggerEvent(
+    Guid FireId,
     string RuleId,
     string SpreadId,
     decimal SpreadValueAtTrigger,

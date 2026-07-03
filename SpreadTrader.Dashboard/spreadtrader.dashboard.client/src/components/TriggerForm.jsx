@@ -15,7 +15,7 @@ const emptyForm = {
   autoDirectionFromSpreadSign: true,
   nearLegAction: 'None',
   farLegAction: 'None',
-  quantity: '',
+  lots: '',
   product: 'NRML',
   orderType: 'MARKET',
   oneShot: true,
@@ -30,6 +30,13 @@ export default function TriggerForm({ spreads, onCreated }) {
   const set = (field) => (value) => setForm((f) => ({ ...f, [field]: value }))
   const setFromEvent = (field) => (e) => set(field)(e.target.value)
 
+  // Exchange lot size for whichever spread is selected - both legs of a calendar spread share
+  // the same underlying, so near/far always have the same lot size once resolved; used only to
+  // show "= N shares" below the Lots input, the actual lots -> quantity conversion happens
+  // server-side (see TriggersController.Create) since that's the source of truth for lot size.
+  const selectedSpread = spreads.find((s) => s.id === form.spreadId)
+  const lotSize = selectedSpread?.nearLeg?.lotSize || selectedSpread?.farLeg?.lotSize || 0
+
   const submit = async (e) => {
     e.preventDefault()
     if (!form.autoDirectionFromSpreadSign && form.nearLegAction === 'None' && form.farLegAction === 'None') {
@@ -42,7 +49,7 @@ export default function TriggerForm({ spreads, onCreated }) {
       await api.createTrigger({
         ...form,
         threshold: Number(form.threshold),
-        quantity: Number(form.quantity),
+        lots: Number(form.lots),
         rearmBuffer: Number(form.rearmBuffer || 0),
       })
       setForm({ ...emptyForm, spreadId: form.spreadId })
@@ -68,11 +75,14 @@ export default function TriggerForm({ spreads, onCreated }) {
             </Col>
             <Col xs={24} sm={12}>
               <Select
+                showSearch
                 placeholder="Select spread"
                 value={form.spreadId || undefined}
                 onChange={set('spreadId')}
                 style={{ width: '100%' }}
-                options={spreads.map((s) => ({ value: s.id, label: s.id }))}
+                optionFilterProp="label"
+                filterOption={(input, option) => (option?.label ?? '').toLowerCase().includes(input.toLowerCase())}
+                options={spreads.map((s) => ({ value: s.id, label: `${s.underlying} — ${s.id}` }))}
               />
             </Col>
           </Row>
@@ -140,11 +150,17 @@ export default function TriggerForm({ spreads, onCreated }) {
             <Col xs={24} sm={8}>
               <InputNumber
                 min={1}
-                placeholder="Quantity"
-                value={form.quantity === '' ? null : form.quantity}
-                onChange={(v) => set('quantity')(v ?? '')}
+                placeholder="Lots"
+                addonBefore="Lots"
+                value={form.lots === '' ? null : form.lots}
+                onChange={(v) => set('lots')(v ?? '')}
                 style={{ width: '100%' }}
               />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                {lotSize > 0
+                  ? `Lot size ${lotSize}${form.lots ? ` — ${Number(form.lots) * lotSize} shares/contracts per leg` : ''}`
+                  : 'Select a spread to see its lot size'}
+              </Typography.Text>
             </Col>
             <Col xs={24} sm={8}>
               <Select

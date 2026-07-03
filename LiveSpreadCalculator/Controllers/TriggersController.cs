@@ -28,15 +28,25 @@ public sealed class TriggersController : ControllerBase
     [HttpPost]
     public ActionResult<TriggerRule> Create([FromBody] CreateTriggerRuleRequest request)
     {
-        if (_spreadStore.Get(request.SpreadId) is null)
+        var spread = _spreadStore.Get(request.SpreadId);
+        if (spread is null)
             return BadRequest($"Unknown spread id: {request.SpreadId}");
 
         if (!request.AutoDirectionFromSpreadSign &&
             request.NearLegAction == TriggerLegAction.None && request.FarLegAction == TriggerLegAction.None)
             return BadRequest("At least one of NearLegAction / FarLegAction must be set when AutoDirectionFromSpreadSign is false - otherwise the rule would fire and place no orders.");
 
-        if (request.Quantity <= 0)
-            return BadRequest("Quantity must be greater than zero.");
+        if (request.Lots <= 0)
+            return BadRequest("Lots must be greater than zero.");
+
+        // Near and far month contracts on the same underlying always share the same lot size,
+        // so either leg's resolved LotSize works - fall back to the far leg in case only that
+        // one has been resolved yet. TriggerRule.Quantity is always the real, exchange-valid
+        // share/contract quantity from here on (Lots * LotSize) - see BulkTriggerTemplateService,
+        // which does the same conversion for bulk-created rules.
+        var lotSize = spread.NearLeg.LotSize > 0 ? spread.NearLeg.LotSize : spread.FarLeg.LotSize;
+        if (lotSize <= 0)
+            return BadRequest("Lot size not resolved yet for this spread - build/resolve the universe first.");
 
         var rule = new TriggerRule
         {
@@ -48,7 +58,7 @@ public sealed class TriggersController : ControllerBase
             NearLegAction = request.NearLegAction,
             FarLegAction = request.FarLegAction,
             AutoDirectionFromSpreadSign = request.AutoDirectionFromSpreadSign,
-            Quantity = request.Quantity,
+            Quantity = request.Lots * lotSize,
             Product = request.Product,
             OrderType = request.OrderType,
             OneShot = request.OneShot,
@@ -81,6 +91,35 @@ public sealed class TriggersController : ControllerBase
                 statusCode: StatusCodes.Status503ServiceUnavailable);
             return false;
         }
+    }
+
+    /// <summary>Retunes an existing trigger's lots/threshold in place - id, enabled/armed state,
+    /// and fire history are left untouched, so a fired one-shot rule just re-arms with the new
+    /// numbers next time it's enabled rather than needing to be deleted and recreated. Lots is
+    /// converted to an actual quantity the same way Create does it.</summary>
+    [HttpPut("{id}")]
+    public ActionResult<TriggerRule> Update(string id, [FromBody] UpdateTriggerRuleRequest request)
+    {
+        var rule = _ruleStore.Get(id);
+        if (rule is null) return NotFound();
+
+        var spread = _spreadStore.Get(rule.SpreadId);
+        if (spread is null)
+            return BadRequest($"Spread {rule.SpreadId} no longer exists - remove this trigger instead of editing it.");
+
+        if (request.Lots <= 0)
+            return BadRequest("Lots must be greater than zero.");
+
+        var lotSize = spread.NearLeg.LotSize > 0 ? spread.NearLeg.LotSize : spread.FarLeg.LotSize;
+        if (lotSize <= 0)
+            return BadRequest("Lot size not resolved yet for this spread - build/resolve the universe first.");
+
+        rule.Quantity = request.Lots * lotSize;
+        rule.Threshold = request.Threshold;
+        rule.ThresholdIsPercent = request.ThresholdIsPercent;
+
+        if (!TryUpsert(rule, out var problem)) return problem!;
+        return Ok(rule);
     }
 
     /// <summary>Applies one threshold/quantity/product template across many spreads at once

@@ -88,6 +88,9 @@ builder.Services.AddHostedService<SpreadRankingHostedService>();
 
 builder.Services.AddSingleton<ISpreadPublisher, SignalRSpreadPublisher>();
 builder.Services.AddSingleton<ITriggerEventSink, SignalRTriggerEventSink>();
+// Reports what actually got bought/sold (and whether it succeeded) once OrderDispatchHostedService
+// finishes acting on a fired trigger - see BasketExecutionEvent / IOrderExecutionSink.
+builder.Services.AddSingleton<IOrderExecutionSink, SignalROrderExecutionSink>();
 
 // ---- Universe builder + bulk trigger template ---------------------------------------------
 builder.Services.AddSingleton(sp => new UniverseBuilderService(

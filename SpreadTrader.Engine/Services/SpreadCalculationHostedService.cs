@@ -77,9 +77,11 @@ public sealed class SpreadCalculationHostedService : BackgroundService
     private async Task RunCycleAsync(CancellationToken stoppingToken)
     {
         var changed = new List<SpreadSnapshot>();
+        var currentIds = new HashSet<string>();
 
         foreach (var spread in _spreadStore.GetAll())
         {
+            currentIds.Add(spread.Id);
             if (!spread.Enabled) continue;
             if (!_tickStore.TryGet(spread.NearLeg.InstrumentToken, out var nearTick)) continue;
             if (!_tickStore.TryGet(spread.FarLeg.InstrumentToken, out var farTick)) continue;
@@ -156,6 +158,16 @@ public sealed class SpreadCalculationHostedService : BackgroundService
 
         if (changed.Count > 0)
             await _publisher.PublishAsync(changed, stoppingToken);
+
+        // Self-prune: _lastValues has no other removal path, so a spread deleted via
+        // DELETE /api/spreads (see SpreadsController) would otherwise sit here forever. Cheap
+        // to check every cycle since it only touches the small "removed since last cycle" set,
+        // not the whole dictionary on every pass.
+        if (_lastValues.Count > currentIds.Count)
+        {
+            foreach (var staleId in _lastValues.Keys.Where(id => !currentIds.Contains(id)).ToArray())
+                _lastValues.Remove(staleId);
+        }
     }
 
     private async Task EvaluateTriggersAsync(SpreadDefinition spread, SpreadSnapshot snapshot, CancellationToken stoppingToken)
@@ -198,7 +210,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             if (rule.OneShot) rule.Enabled = false;
             _ruleStore.Upsert(rule); // persist fired/disabled state so a restart doesn't re-fire it
 
-            var triggerEvent = new TriggerEvent(rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow);
+            var triggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow);
             _logger.LogInformation("Trigger fired: rule={RuleId} spread={SpreadId} value={Value} direction={Direction}",
                 rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction);
 

@@ -12,5 +12,9 @@ namespace SpreadTrader.Core.Abstractions;
 public interface ISpreadSnapshotCache
 {
     void Upsert(SpreadSnapshot snapshot);
+    /// <summary>Drops a spread's cached snapshot - call this when the spread itself is deleted
+    /// (see SpreadsController.Delete), otherwise a removed spread keeps showing up forever in
+    /// GET /api/spreads/snapshot and in the ranking, and the entry just sits here unused.</summary>
+    bool Remove(string spreadId);
     IReadOnlyList<SpreadSnapshot> GetAll();
 }

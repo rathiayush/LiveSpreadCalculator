@@ -35,11 +35,27 @@ public sealed class CreateTriggerRuleRequest
     /// negative at fire time, and does the opposite when it's positive.</summary>
     public bool AutoDirectionFromSpreadSign { get; set; } = true;
 
-    public int Quantity { get; set; }
+    /// <summary>Number of exchange lots, not raw share/contract quantity - Kite (and NSE F&amp;O
+    /// generally) only accepts order quantities that are whole multiples of the contract's lot
+    /// size, so this is converted to an actual quantity (Lots * the spread's resolved lot size)
+    /// by TriggersController.Create before it's stored on TriggerRule.Quantity - matching how
+    /// BulkTriggerTemplateService already does it for bulk-created rules.</summary>
+    public int Lots { get; set; }
+
     public string Product { get; set; } = "NRML";
     public string OrderType { get; set; } = "MARKET";
     public bool OneShot { get; set; } = true;
     public decimal RearmBuffer { get; set; }
+}
+
+/// <summary>Retunes an existing trigger's lots/threshold in place (leaving its id, enabled/armed
+/// state, and fire history untouched) - see PUT /api/triggers/{id} / TriggersController.Update.
+/// Lots is converted to an actual quantity the same way CreateTriggerRuleRequest.Lots is.</summary>
+public sealed class UpdateTriggerRuleRequest
+{
+    public int Lots { get; set; }
+    public decimal Threshold { get; set; }
+    public bool ThresholdIsPercent { get; set; }
 }
 
 /// <summary>One template applied across many spreads at once - see

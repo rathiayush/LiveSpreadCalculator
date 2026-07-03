@@ -92,4 +92,50 @@ public sealed class KiteMarginService
         if (!sectionElement.TryGetProperty("total", out var totalElement)) return null;
         return totalElement.TryGetDecimal(out var value) ? value : null;
     }
+
+    /// <summary>Calls GET /user/margins/{segment} for the account's actual usable margin right
+    /// now (cash + collateral - what's already blocked by open positions/orders) - "net" in
+    /// Kite's response, which is the same figure Kite Web shows as "Margin available". F&amp;O
+    /// (NFO) instruments settle against the "equity" segment's margin, not "commodity" (that's
+    /// MCX only), so the default here is what OrderDispatchHostedService's pre-trade check
+    /// actually needs. https://kite.trade/docs/connect/v3/user/#funds-and-margins
+    /// </summary>
+    public async Task<AvailableMarginResult> GetAvailableMarginAsync(string segment = "equity", CancellationToken cancellationToken = default)
+    {
+        var accessToken = _session.AccessToken;
+        if (string.IsNullOrEmpty(accessToken))
+            return new AvailableMarginResult(false, null, "No Kite access token - complete the login flow first.");
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"{_options.RestBaseUrl}/user/margins/{segment}");
+        request.Headers.Add("X-Kite-Version", "3");
+        request.Headers.Authorization = new AuthenticationHeaderValue("token", $"{_options.ApiKey}:{accessToken}");
+
+        try
+        {
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            if (!string.Equals(root.GetProperty("status").GetString(), "success", StringComparison.Ordinal))
+            {
+                var message = root.TryGetProperty("message", out var m) ? m.GetString() : body;
+                return new AvailableMarginResult(false, null, message);
+            }
+
+            var data = root.GetProperty("data");
+            var net = data.TryGetProperty("net", out var netElement) && netElement.TryGetDecimal(out var netValue)
+                ? netValue
+                : (decimal?)null;
+            return new AvailableMarginResult(net is not null, net, net is null ? "Response had no 'net' margin figure" : null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Available margin check failed for segment {Segment}", segment);
+            return new AvailableMarginResult(false, null, ex.Message);
+        }
+    }
 }
+
+/// <summary>Success/Net from GET /user/margins/{segment} - see KiteMarginService.GetAvailableMarginAsync.</summary>
+public sealed record AvailableMarginResult(bool Success, decimal? Net, string? ErrorMessage);
