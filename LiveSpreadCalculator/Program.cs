@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json.Serialization;
 using LiveSpreadCalculator.Auth;
 using LiveSpreadCalculator.Hubs;
+using LiveSpreadCalculator.Notifications;
 using LiveSpreadCalculator.Realtime;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -109,9 +110,28 @@ builder.Services.AddHostedService<SpreadRankingHostedService>();
 
 builder.Services.AddSingleton<ISpreadPublisher, SignalRSpreadPublisher>();
 builder.Services.AddSingleton<ITriggerEventSink, SignalRTriggerEventSink>();
+
 // Reports what actually got bought/sold (and whether it succeeded) once OrderDispatchHostedService
-// finishes acting on a fired trigger - see BasketExecutionEvent / IOrderExecutionSink.
-builder.Services.AddSingleton<IOrderExecutionSink, SignalROrderExecutionSink>();
+// finishes acting on a fired trigger - see BasketExecutionEvent / IOrderExecutionSink. The single
+// IOrderExecutionSink the engine depends on is a composite that fans the outcome out to the SignalR
+// dashboard push and (when configured) a Telegram message, each isolated so one failing can't stop
+// the other - see CompositeOrderExecutionSink / TelegramOrderExecutionSink.
+builder.Services.Configure<TelegramOptions>(builder.Configuration.GetSection(TelegramOptions.SectionName));
+// Bounds the fire-and-forget Telegram POST so a hung connection can't leave a background send
+// pending forever (the send itself is never awaited by order dispatch - see TelegramOrderExecutionSink).
+builder.Services.AddHttpClient(nameof(TelegramOrderExecutionSink), c => c.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddSingleton<SignalROrderExecutionSink>();
+builder.Services.AddSingleton<TelegramOrderExecutionSink>();
+builder.Services.AddSingleton<IOrderExecutionSink>(sp =>
+{
+    var sinks = new List<IOrderExecutionSink> { sp.GetRequiredService<SignalROrderExecutionSink>() };
+
+    var telegram = sp.GetRequiredService<IOptions<TelegramOptions>>().Value;
+    if (telegram.Enabled)
+        sinks.Add(sp.GetRequiredService<TelegramOrderExecutionSink>());
+
+    return new CompositeOrderExecutionSink(sinks, sp.GetRequiredService<ILogger<CompositeOrderExecutionSink>>());
+});
 
 // ---- Universe builder + bulk trigger template ---------------------------------------------
 builder.Services.AddSingleton(sp => new UniverseBuilderService(

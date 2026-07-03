@@ -160,7 +160,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         {
             var leg = legs[i];
             var result = placements[i];
-            legResults.Add(new OrderLegResult(leg.TradingSymbol, leg.TransactionType, leg.Quantity, result.Success, result.OrderId, result.ErrorMessage, FilledQuantity: result.FilledQuantity));
+            legResults.Add(new OrderLegResult(leg.TradingSymbol, leg.TransactionType, leg.Quantity, result.Success, result.OrderId, result.ErrorMessage, FilledQuantity: result.FilledQuantity, Price: leg.Price, OrderType: leg.OrderType, Status: result.Status));
 
             if (!result.Success)
             {
@@ -440,7 +440,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
 
             var flatten = ApplyMarketProtection(flattenPlan, ruleId);
             var result = await _orderGateway.PlaceOrderAsync(flatten, cancellationToken);
-            squareOffResults.Add(new OrderLegResult(flatten.TradingSymbol, flatten.TransactionType, flatten.Quantity, result.Success, result.OrderId, result.ErrorMessage, IsSquareOff: true, FilledQuantity: result.FilledQuantity));
+            squareOffResults.Add(new OrderLegResult(flatten.TradingSymbol, flatten.TransactionType, flatten.Quantity, result.Success, result.OrderId, result.ErrorMessage, IsSquareOff: true, FilledQuantity: result.FilledQuantity, Price: flatten.Price, OrderType: flatten.OrderType, Status: result.Status));
 
             if (result.Success)
             {
