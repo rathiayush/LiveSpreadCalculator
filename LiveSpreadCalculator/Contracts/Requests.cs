@@ -2,6 +2,15 @@ using SpreadTrader.Core.Models;
 
 namespace LiveSpreadCalculator.Contracts;
 
+/// <summary>App-login credentials posted to POST /api/auth/token. Validated against
+/// App_Data/users.csv (see CsvUserStore); on success the caller gets a JWT to send as a
+/// Bearer token on every subsequent API/hub call.</summary>
+public sealed class UserLoginRequest
+{
+    public required string Email { get; set; }
+    public required string Password { get; set; }
+}
+
 public sealed class InstrumentLegRequest
 {
     public required string TradingSymbol { get; set; }

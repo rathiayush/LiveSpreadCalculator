@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react'
 import * as signalR from '@microsoft/signalr'
 import { api } from '../api'
+import { getToken } from '../auth'
 
 // Why this file exists (replaces the old useSpreadHub.js hook):
 //
@@ -45,6 +46,11 @@ function notify(listeners) {
 
 function subscribe(listeners) {
   return (onStoreChange) => {
+    // Lazily open the hub the first time any component actually subscribes. Those components only
+    // mount once the user is logged in (App.jsx gates the whole app behind auth), so by the time
+    // this runs there's a JWT for accessTokenFactory to send - which is why the old module-load
+    // ensureConnection() call was removed (it would have fired before login and been rejected).
+    ensureConnection()
     listeners.add(onStoreChange)
     return () => listeners.delete(onStoreChange)
   }
@@ -71,7 +77,10 @@ function ensureConnection() {
   if (connection) return connection
 
   connection = new signalR.HubConnectionBuilder()
-    .withUrl('/hubs/spreads')
+    // accessTokenFactory supplies the JWT for the hub. SignalR appends it as ?access_token=... on
+    // the negotiate/WebSocket URL (a browser can't set an Authorization header on a WS handshake),
+    // which the backend's JwtBearer OnMessageReceived reads for /hubs paths - see Program.cs.
+    .withUrl('/hubs/spreads', { accessTokenFactory: () => getToken() ?? '' })
     .withAutomaticReconnect()
     .build()
 
@@ -198,7 +207,25 @@ function ensureConnection() {
   return connection
 }
 
-ensureConnection()
+// Tears the hub down on logout so a connection authenticated as the previous user doesn't linger,
+// and clears the seeded slices so the next user doesn't briefly see the old one's data. A fresh
+// ensureConnection() (with the new token) runs automatically the next time a hook subscribes.
+export function stopConnection() {
+  if (connection) {
+    const closing = connection
+    connection = null
+    closing.stop().catch(() => {})
+  }
+  spreadsMap = {}
+  rankingList = []
+  triggerEventsList = []
+  kiteAuthInvalidReason = null
+  connectionState = 'disconnected'
+  notify(spreadsListeners)
+  notify(rankingListeners)
+  notify(triggerListeners)
+  notify(connectionListeners)
+}
 
 // spreadId -> latest SpreadSnapshot. High frequency - only call this from a component that's
 // actually showing live per-spread values (currently just SpreadGrid/SpreadsPage).

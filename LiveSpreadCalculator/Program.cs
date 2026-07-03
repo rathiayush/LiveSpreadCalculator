@@ -1,8 +1,13 @@
+using System.Text;
 using System.Text.Json.Serialization;
+using LiveSpreadCalculator.Auth;
 using LiveSpreadCalculator.Hubs;
 using LiveSpreadCalculator.Realtime;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Store;
 using SpreadTrader.Engine;
@@ -36,6 +41,9 @@ var futuresCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 // see UniverseBuilderService.
 var universeCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:UniverseCsvPath"] ?? "App_Data/universe_futures.csv");
+// Allow-list of who may log in and obtain a JWT (email,password rows). See CsvUserStore.
+var usersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:UsersCsvPath"] ?? "App_Data/users.csv");
 
 builder.Services.AddSingleton<ITickStore, InMemoryTickStore>();
 builder.Services.AddSingleton<ITriggerRuleStore>(sp =>
@@ -114,6 +122,60 @@ builder.Services.AddSingleton(sp => new UniverseBuilderService(
     universeCsvPath));
 builder.Services.AddSingleton<BulkTriggerTemplateService>();
 
+// ---- Authentication (JWT) -------------------------------------------------------------------
+// Locks the entire API + SignalR hub behind a Bearer token. Only users listed in
+// App_Data/users.csv can obtain a token (POST /api/auth/token); the external world can't consume
+// anything without one. See JwtTokenService (mints) / the fallback policy below (enforces).
+builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
+builder.Services.AddSingleton(sp =>
+    new CsvUserStore(usersCsvPath, sp.GetRequiredService<ILogger<CsvUserStore>>()));
+builder.Services.AddSingleton<JwtTokenService>();
+
+var jwtOptions = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.Key));
+
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = jwtOptions.Issuer,
+            ValidateAudience = true,
+            ValidAudience = jwtOptions.Audience,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = signingKey,
+            ValidateLifetime = true,
+            ClockSkew = TimeSpan.FromMinutes(1),
+        };
+
+        // Browsers can't attach an Authorization header to a WebSocket handshake, so SignalR sends
+        // the token as an ?access_token=... query-string param on the hub URL instead. Pull it out
+        // for hub requests so the same JWT secures the real-time feed too.
+        options.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = context =>
+            {
+                var accessToken = context.Request.Query["access_token"];
+                var path = context.HttpContext.Request.Path;
+                if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+                    context.Token = accessToken;
+                return Task.CompletedTask;
+            }
+        };
+    });
+
+// Fallback policy = "authenticated user required" applied to EVERY endpoint that doesn't specify
+// its own [Authorize]/[AllowAnonymous]. This is what makes the whole API secure-by-default:
+// controllers, minimal-API endpoints, and the SignalR hub all require a valid token unless they
+// explicitly opt out with [AllowAnonymous] (login, the Kite OAuth callback, and /healthz).
+builder.Services.AddAuthorization(options =>
+{
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
+});
+
 // ---- Web / API / real-time ------------------------------------------------------------------
 builder.Services.AddSignalR();
 
@@ -121,7 +183,27 @@ builder.Services.AddControllers()
     .AddJsonOptions(o => o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(c =>
+{
+    // Lets the Swagger UI "Authorize" button take a Bearer token so endpoints can be tried in dev
+    // now that everything requires one. Paste the token from POST /api/auth/token.
+    var scheme = new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Description = "Enter the JWT from POST /api/auth/token (just the token, no 'Bearer ' prefix).",
+        Reference = new Microsoft.OpenApi.Models.OpenApiReference
+        {
+            Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+            Id = "Bearer",
+        },
+    };
+    c.AddSecurityDefinition("Bearer", scheme);
+    c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement { [scheme] = Array.Empty<string>() });
+});
 
 var dashboardOrigin = builder.Configuration["Dashboard:BaseUrl"] ?? "https://localhost:63061";
 builder.Services.AddCors(options =>
@@ -143,10 +225,13 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 app.UseCors(DashboardCorsPolicy);
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
 app.MapHub<SpreadHub>("/hubs/spreads");
-app.MapGet("/healthz", () => Results.Ok(new { status = "ok" })); // used by Dockerfile HEALTHCHECK / cloud liveness probes
+// Liveness probe only - no user data, must be reachable without a token by the Docker HEALTHCHECK
+// / cloud probe, so it opts out of the global "authenticated user required" fallback policy.
+app.MapGet("/healthz", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
 
 app.Run();

@@ -67,13 +67,20 @@ public sealed class SpreadRankingHostedService : BackgroundService
     /// empty - no ticks have arrived yet - so the very first cycle publishes nothing. Without
     /// this, the next attempt wouldn't happen until a full RankingIntervalMinutes later (default
     /// 3 minutes), even though real snapshot data is usually ready within a few seconds. Instead,
-    /// retry every 5 seconds until the first non-empty ranking is produced, capped at 2 minutes
+    /// retry on a short interval until the first non-empty ranking is produced, capped at 2 minutes
     /// so a genuinely quiet period (market closed, nothing subscribed yet) doesn't spin forever -
     /// the normal timer loop picks it up from there regardless.
+    ///
+    /// The retry interval is deliberately short (1s) so ranking appears almost as soon as the first
+    /// spreads have real values, instead of trailing them by up to 5 seconds. A 1s in-memory
+    /// sort+publish is cheap, and this loop only runs during the brief warm-up window (it exits the
+    /// instant the first non-empty ranking goes out), so the tighter poll costs nothing once the
+    /// feed is live.
     /// </summary>
     private async Task WarmUpAsync(CancellationToken stoppingToken)
     {
         var deadline = DateTimeOffset.UtcNow.AddMinutes(2);
+        var retryInterval = TimeSpan.FromSeconds(1);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -93,7 +100,7 @@ public sealed class SpreadRankingHostedService : BackgroundService
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                await Task.Delay(retryInterval, stoppingToken);
             }
             catch (OperationCanceledException)
             {
