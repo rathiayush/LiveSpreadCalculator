@@ -5,6 +5,15 @@ import { api } from '../api'
 
 export default function SpreadList({ spreads, onChanged }) {
   const [search, setSearch] = useState('')
+  // Controlled pagination (see the same note in SpreadGrid) - keeps the current page stable and
+  // resets to page 1 on search so filtering can't leave you stranded on a now-empty page.
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(15)
+
+  const onSearch = (value) => {
+    setSearch(value)
+    setPage(1)
+  }
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase()
@@ -58,7 +67,7 @@ export default function SpreadList({ spreads, onChanged }) {
             placeholder="Search by symbol..."
             allowClear
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => onSearch(e.target.value)}
             style={{ width: 220 }}
           />
         )
@@ -71,7 +80,18 @@ export default function SpreadList({ spreads, onChanged }) {
           dataSource={filtered.map((s) => ({ key: s.id, ...s }))}
           columns={columns}
           size="small"
-          pagination={{ pageSize: 15, showSizeChanger: true, pageSizeOptions: [15, 30, 50, 100] }}
+          pagination={{
+            current: page,
+            pageSize,
+            showSizeChanger: true,
+            pageSizeOptions: [15, 30, 50, 100],
+            position: ['bottomCenter'],
+            showTotal: (total) => `${total} spread${total === 1 ? '' : 's'}`,
+            onChange: (nextPage, nextPageSize) => {
+              setPage(nextPage)
+              setPageSize(nextPageSize)
+            },
+          }}
           scroll={{ x: 'max-content' }}
         />
       )}

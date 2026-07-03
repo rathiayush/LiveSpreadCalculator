@@ -9,6 +9,20 @@ import FlashValue from './FlashValue'
 // single unpaginated table is unusable.
 export default function SpreadGrid({ definitions, liveValues }) {
   const [search, setSearch] = useState('')
+  // Controlled pagination. This table re-renders ~4x/second from the live tick feed; with antd's
+  // default (uncontrolled) pagination the current page lives in antd's own internal state, and the
+  // constant re-render with a fresh `pagination` object each tick let it get lost / snap back to
+  // page 1, which read as "pagination not working". Owning current/pageSize here makes the page
+  // deterministic and immune to the live re-renders.
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(25)
+
+  // Reset to the first page whenever the search term changes, so filtering can't strand you on a
+  // page number that no longer exists in the smaller result set.
+  const onSearch = (value) => {
+    setSearch(value)
+    setPage(1)
+  }
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase()
@@ -104,7 +118,7 @@ export default function SpreadGrid({ definitions, liveValues }) {
           placeholder="Search by symbol..."
           allowClear
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          onChange={(e) => onSearch(e.target.value)}
           style={{ width: 220 }}
         />
       }
@@ -116,7 +130,18 @@ export default function SpreadGrid({ definitions, liveValues }) {
           dataSource={dataSource}
           columns={columns}
           size="small"
-          pagination={{ pageSize: 25, showSizeChanger: true, pageSizeOptions: [25, 50, 100, 200] }}
+          pagination={{
+            current: page,
+            pageSize,
+            showSizeChanger: true,
+            pageSizeOptions: [25, 50, 100, 200],
+            position: ['bottomCenter'],
+            showTotal: (total) => `${total} spread${total === 1 ? '' : 's'}`,
+            onChange: (nextPage, nextPageSize) => {
+              setPage(nextPage)
+              setPageSize(nextPageSize)
+            },
+          }}
           scroll={{ x: 'max-content' }}
         />
       )}

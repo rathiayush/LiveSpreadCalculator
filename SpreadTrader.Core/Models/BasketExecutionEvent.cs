@@ -4,7 +4,13 @@ namespace SpreadTrader.Core.Models;
 /// auto-square-off order fired afterward because the basket only partially filled (IsSquareOff
 /// distinguishes the two) - see OrderDispatchHostedService and BasketExecutionEvent. Quantity is
 /// what was requested; FilledQuantity is what Kite actually confirmed filled (see OrderResult) -
-/// they can differ even when Success is true (a genuine partial fill within this one leg).</summary>
+/// they can differ even when Success is true (a genuine partial fill within this one leg).
+///
+/// Price is the price the order was actually sent at - for a MARKET leg converted to a protected
+/// LIMIT (see OrderDispatchHostedService.ApplyMarketProtection) that's the protection-band limit
+/// price; null means it went as a raw MARKET order with no price reference. OrderType/Status carry
+/// the sent order type and Kite's raw terminal status (COMPLETE/REJECTED/CANCELLED/OPEN...) so the
+/// Telegram/dashboard readout can show exactly what was placed and at what price.</summary>
 public sealed record OrderLegResult(
     string TradingSymbol,
     string TransactionType, // BUY or SELL
@@ -13,7 +19,10 @@ public sealed record OrderLegResult(
     string? OrderId,
     string? ErrorMessage,
     bool IsSquareOff = false,
-    int FilledQuantity = 0);
+    int FilledQuantity = 0,
+    decimal? Price = null,
+    string? OrderType = null,
+    string? Status = null);
 
 /// <summary>Published once OrderDispatchHostedService finishes acting on a fired trigger -
 /// correlates back to the TriggerEvent that caused it via FireId, and reports what was actually

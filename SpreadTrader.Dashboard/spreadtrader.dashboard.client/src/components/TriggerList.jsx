@@ -23,6 +23,11 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
   const [editBusy, setEditBusy] = useState(false)
   const [editError, setEditError] = useState(null)
 
+  // Controlled pagination (see the note in SpreadGrid) so the page stays put across the frequent
+  // re-renders when triggers fire and their status updates.
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
+
   // Both legs of a calendar spread share the same underlying, so near/far always have the same
   // lot size once resolved - see TriggerForm's identical helper for why either leg works.
   const getLotSize = (spreadId) => {
@@ -165,7 +170,18 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
             dataSource={triggers.map((t) => ({ key: t.id, ...t }))}
             columns={columns}
             size="small"
-            pagination={{ pageSize: 10 }}
+            pagination={{
+              current: page,
+              pageSize,
+              showSizeChanger: true,
+              pageSizeOptions: [10, 20, 50, 100],
+              position: ['bottomCenter'],
+              showTotal: (total) => `${total} trigger${total === 1 ? '' : 's'}`,
+              onChange: (nextPage, nextPageSize) => {
+                setPage(nextPage)
+                setPageSize(nextPageSize)
+              },
+            }}
             scroll={{ x: 'max-content' }}
           />
         )}

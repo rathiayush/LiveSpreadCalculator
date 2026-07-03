@@ -1,2 +1,4 @@
 Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent
-1a298de5-6bcf-4ca8-8fc7-e468a2ec32d4,KPITTECH-JUL-AUG,AbsoluteGreaterThanOrEqual,8,None,None,775,NRML,MARKET,True,0,False,False,2026-07-03T10:37:30.5285241+00:00,True,False
+1a298de5-6bcf-4ca8-8fc7-e468a2ec32d4,KPITTECH-JUL-AUG,AbsoluteGreaterThanOrEqual,8,None,None,775,NRML,MARKET,True,0,False,False,2026-07-03T17:22:09.4355769+00:00,True,False
+02554f9a-a70f-4e5b-a193-70091c7b6a9e,FEDERALBNK-JUL-AUG,GreaterThanOrEqual,0.1,None,None,2500,NRML,MARKET,True,0,True,True,,True,True
+8da00cc0-ba9a-4c6a-8c4c-d7355c6cbd31,FEDERALBNK-JUL-AUG,GreaterThanOrEqual,0.03,Sell,Buy,12500,NRML,MARKET,True,0,False,False,2026-07-03T17:25:14.9908768+00:00,False,False
