@@ -1,0 +1,43 @@
+Zerodha Kite Connect - IP Whitelist Reference
+==============================================
+(Kite Connect's IP Whitelist field accepts at most 2 IP addresses.)
+
+USE THESE (Azure Web App "LiveSpreadCalculator" outbound IPs - orders are placed from here):
+74.224.96.31
+104.211.225.167
+
+NOT USED (your own computer's IPv6 address, detected by Kite's console when browsing from
+your home/mobile network - not relevant unless you also place live orders by running the
+app locally instead of on Azure):
+2405:201:5c33:b847:e23a:93f9:da7c:d65
+2405:201:5c33:b847:8de2:b9f7:7351:388d
+
+Notes:
+- Only ORDER-PLACEMENT calls require IP whitelisting (per NSE rule effective 1 Apr 2025).
+  Market data, positions, quotes, etc. work from any IP.
+- Zerodha only allows one IP whitelist change per calendar week - avoid changing the Azure
+  App Service plan tier casually once these are set, since a tier change can change the
+  app's outbound IPs and force a re-whitelist.
+- Set in Kite Connect developer console: My Apps -> your app -> Profile -> IP Whitelist.
+
+
+Redirect URL (Kite Connect app settings)
+==========================================
+https://livespreadcalculator-hmgsc4ddf9hba7gv.southindia-01.azurewebsites.net/api/auth/callback
+
+This is AuthController.Callback in the code - Kite redirects the browser here with
+request_token after a successful login, and it's the only endpoint Zerodha itself needs to
+reach. Set it in the developer console under: My Apps -> your app -> Redirect URL.
+
+Local (dev) equivalent - from launchSettings.json:
+https://localhost:7105/api/auth/callback
+(http://localhost:5159/api/auth/callback if running the http profile instead of https)
+
+IMPORTANT: Kite Connect only supports ONE Redirect URL per app/API key - you can't list both
+the production and local URLs on the same app. If you want to test the Kite login flow
+locally without disturbing the production app, create a second app in the Kite Connect
+developer console (a separate API key/secret) with the localhost Redirect URL above, and use
+that key only in local appsettings/user-secrets - never in appsettings.Production.json.
+
+Postback URL: not implemented in this app (no endpoint receives Kite's order-update POSTs) -
+leave that field blank unless/until such an endpoint is added.
