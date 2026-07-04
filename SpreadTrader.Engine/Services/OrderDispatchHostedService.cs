@@ -20,9 +20,12 @@ namespace SpreadTrader.Engine.Services;
 ///     if EngineOptions.VerifyMarginBeforeDispatch is on, against the account's actual available
 ///     margin (GetAvailableMarginAsync). If the account can't cover it, nothing is placed at
 ///     all - see CheckMarginAsync.
-///  2. All legs are then fired essentially at once (Task.WhenAll, not a sequential
-///     foreach+await) - IOrderGateway/RateLimiter still paces the actual Kite calls under the
-///     rate limit, but nothing here adds extra latency between leg 1 and leg 2 on top of that.
+///  2. Legs are then placed hedge-first (see PlaceHedgeFirstAsync): the BUY (long/hedge) leg(s)
+///     go in first and only once they've filled are the SELL (short) leg(s) sent, so the short is
+///     evaluated by Kite WITH the hedge margin benefit already applied (the low "final" margin)
+///     rather than being charged - and potentially rejected for - full naked-short margin. If the
+///     hedge doesn't fill, the short is deliberately never placed. IOrderGateway/RateLimiter still
+///     paces the actual Kite calls under the rate limit.
 ///
 /// There is deliberately no attempt at a true all-or-nothing (fill everything or nothing at all)
 /// basket here, because Kite Connect/NSE simply doesn't offer that for F&amp;O: there's no atomic
@@ -149,11 +152,11 @@ public sealed class OrderDispatchHostedService : BackgroundService
             }
         }
 
-        // Punch every leg essentially at once rather than one-at-a-time - see the class doc
-        // comment. IOrderGateway/RateLimiter still paces the underlying Kite calls under the
-        // rate limit; this just avoids adding a full extra round-trip of latency between legs
-        // on top of that pacing.
-        var placements = await Task.WhenAll(legs.Select(leg => _orderGateway.PlaceOrderAsync(leg, stoppingToken)));
+        // Place the hedge (BUY) leg(s) first, confirm they fill, and only then place the short
+        // (SELL) leg(s) - see PlaceHedgeFirstAsync and the class doc comment for why. This is what
+        // gets the exchange's hedge margin benefit applied to the short instead of it being blocked
+        // as a naked short, and keeps the brief between-legs window on the safe (long) side.
+        var placements = await PlaceHedgeFirstAsync(legs, rule.Id, stoppingToken);
 
         var legResults = new List<OrderLegResult>(legs.Count);
         for (var i = 0; i < legs.Count; i++)
@@ -187,6 +190,71 @@ public sealed class OrderDispatchHostedService : BackgroundService
         await _executionSink.PublishAsync(
             new BasketExecutionEvent(triggerEvent.FireId, rule.Id, spread.Id, spread.Underlying, orderKind, legResults, MarginBlocked: false, BlockedReason: null, DateTimeOffset.UtcNow),
             stoppingToken);
+    }
+
+    /// <summary>Places the basket hedge-first: all BUY (long/hedge) legs go in first and only once
+    /// they've resolved to a fill are the SELL (short) legs sent. Returns an OrderResult[] aligned
+    /// to the input <paramref name="legs"/> order (same indices), so the caller's result mapping,
+    /// stray-order cancel, and partial-fill square-off logic are unchanged.
+    ///
+    /// Why sequence instead of firing everything at once: at placement time Kite blocks margin
+    /// per order. A naked short leg reaching Kite before its hedge exists is charged the full
+    /// un-hedged SPAN+exposure (in Kite's own basket-margin example, ~3x the hedged figure), so an
+    /// account funded only for the hedged spread can have its short leg rejected outright. Getting
+    /// the buy leg in as a position first means the short is evaluated WITH the hedge benefit (the
+    /// low "final" margin) and goes through. The short side is also the risky/expensive side to be
+    /// caught naked on, so doing buy-first keeps the brief inter-leg window on the safe long side.
+    ///
+    /// If a hedge leg fails to fill, the short legs are deliberately NOT sent (placing a naked
+    /// short is exactly what this ordering exists to avoid) - they come back as skipped results,
+    /// and any hedge that did fill is flattened by the caller's partial-fill square-off.</summary>
+    private async Task<OrderResult[]> PlaceHedgeFirstAsync(List<OrderLegRequest> legs, string ruleId, CancellationToken cancellationToken)
+    {
+        var results = new OrderResult[legs.Count];
+        var buyIndices = new List<int>();
+        var sellIndices = new List<int>();
+        for (var i = 0; i < legs.Count; i++)
+            (string.Equals(legs[i].TransactionType, "BUY", StringComparison.OrdinalIgnoreCase) ? buyIndices : sellIndices).Add(i);
+
+        // 1. Hedge (BUY) legs first, together - buys never need a pre-existing position, so there's
+        //    no reason to serialize them among themselves; the sequencing that matters is buys
+        //    before sells, not buy before buy.
+        if (buyIndices.Count > 0)
+        {
+            var buyResults = await Task.WhenAll(buyIndices.Select(i => _orderGateway.PlaceOrderAsync(legs[i], cancellationToken)));
+            for (var k = 0; k < buyIndices.Count; k++)
+                results[buyIndices[k]] = buyResults[k];
+        }
+
+        if (sellIndices.Count == 0)
+            return results;
+
+        // 2. Short (SELL) legs only once every hedge leg is confirmed filled (OrderResult.Success
+        //    is true only on a real fill - see OrderResult). No buy legs at all (a sell-only rule)
+        //    trivially passes: there's no hedge to wait for.
+        var hedgeInPlace = buyIndices.Count == 0 || buyIndices.All(i => results[i].Success);
+        if (hedgeInPlace)
+        {
+            var sellResults = await Task.WhenAll(sellIndices.Select(i => _orderGateway.PlaceOrderAsync(legs[i], cancellationToken)));
+            for (var k = 0; k < sellIndices.Count; k++)
+                results[sellIndices[k]] = sellResults[k];
+        }
+        else
+        {
+            _logger.LogError(
+                "Rule {RuleId}: hedge (BUY) leg did not fill - NOT placing the SELL leg(s) to avoid opening a naked short. Any hedge that did fill will be squared off.",
+                ruleId);
+            foreach (var i in sellIndices)
+                results[i] = new OrderResult
+                {
+                    Success = false,
+                    FilledQuantity = 0,
+                    Status = "SKIPPED",
+                    ErrorMessage = "Skipped: hedge (BUY) leg did not fill, so the SELL leg was not placed (would have been a naked short).",
+                };
+        }
+
+        return results;
     }
 
     /// <summary>"Basket" for a real multi-leg spread order, "Single leg" for a rule configured
