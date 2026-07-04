@@ -31,4 +31,14 @@
     <ProjectReference Include="..\SpreadTrader.Engine\SpreadTrader.Engine.csproj" />
   </ItemGroup>
 
+  <!-- App_Data (users.csv, triggers.csv, etc.) defaults to a plain "None" item under the SDK's
+       implicit globs, which dotnet publish does NOT copy anywhere. Without this, App_Data never
+       makes it into publish output or the deploy.zip, even though the file exists in source - see
+       CsvUserStore/CsvTriggerRuleStore, which both read from this folder at the deployed content
+       root. Contains real (if placeholder) credentials, so keep it out of source control - see
+       .gitignore. -->
+  <ItemGroup>
+    <Content Include="App_Data\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
