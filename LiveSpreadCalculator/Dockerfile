@@ -14,6 +14,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 USER $APP_UID
 
 
+# This stage builds the React dashboard (spreadtrader.dashboard.client) so its static output can
+# be dropped into the API's wwwroot below - Program.cs serves it from the same origin/process via
+# UseStaticFiles + MapFallbackToFile, so the client's relative /api and /hubs calls just work with
+# no CORS needed. This is what makes "one container, one URL" possible instead of hosting the API
+# and the dashboard as two separate deployments.
+FROM node:20-alpine AS client-build
+WORKDIR /client
+COPY ["SpreadTrader.Dashboard/spreadtrader.dashboard.client/package.json", "SpreadTrader.Dashboard/spreadtrader.dashboard.client/package-lock.json*", "./"]
+RUN npm ci
+COPY ["SpreadTrader.Dashboard/spreadtrader.dashboard.client/", "./"]
+RUN npm run build
+
 # This stage is used to build the service project
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 ARG BUILD_CONFIGURATION=Release
@@ -36,6 +48,9 @@ RUN dotnet publish "./LiveSpreadCalculator.csproj" -c $BUILD_CONFIGURATION -o /a
 FROM base AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
+# Vite's default build output directory is "dist" - becomes wwwroot so UseStaticFiles/
+# MapFallbackToFile in Program.cs pick it up automatically (ASP.NET Core's default web root).
+COPY --from=client-build /client/dist ./wwwroot
 
 ENV ASPNETCORE_ENVIRONMENT=Production
 ENV ASPNETCORE_URLS=http://+:8080

@@ -85,6 +85,10 @@ function ensureConnection() {
     .build()
 
   // Seeds spreads/ranking once from REST so pages aren't empty while waiting for the first push.
+  // These are logged (not silently swallowed) specifically so "why is the page empty?" is
+  // answerable from the browser console: a genuinely-empty backend (no configured spreads yet,
+  // or no ranking computed yet) resolves fine with an empty array/null and logs nothing; a real
+  // fetch failure (expired JWT -> 401, network error, 500) lands here and prints exactly why.
   api.getSpreadSnapshot()
     .then((initial) => {
       if (!initial) return
@@ -93,7 +97,7 @@ function ensureConnection() {
       spreadsMap = next
       notify(spreadsListeners)
     })
-    .catch(() => {})
+    .catch((err) => console.error('[spreadHub] failed to seed spread snapshot:', err))
 
   api.getSpreadRanking()
     .then((initial) => {
@@ -101,7 +105,7 @@ function ensureConnection() {
       rankingList = initial
       notify(rankingListeners)
     })
-    .catch(() => {})
+    .catch((err) => console.error('[spreadHub] failed to seed ranking:', err))
 
   // Seeds the Trigger Activity feed from the server's in-memory history (see
   // ITriggerActivityStore) so a browser refresh no longer loses everything since the page
@@ -119,7 +123,7 @@ function ensureConnection() {
       triggerEventsList = [...triggerEventsList, ...seeded].slice(0, 50)
       notify(triggerListeners)
     })
-    .catch(() => {})
+    .catch((err) => console.error('[spreadHub] failed to seed trigger activity:', err))
 
   // Each incoming message is already a full batch of everything that changed in one
   // recalculation cycle (see Engine:SpreadRecalculationIntervalMs / SpreadCalculationHostedService
@@ -199,7 +203,8 @@ function ensureConnection() {
       connectionState = 'connected'
       notify(connectionListeners)
     })
-    .catch(() => {
+    .catch((err) => {
+      console.error('[spreadHub] hub connection failed to start:', err)
       connectionState = 'disconnected'
       notify(connectionListeners)
     })

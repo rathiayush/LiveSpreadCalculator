@@ -244,6 +244,17 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+
+// Serves the built React dashboard (spreadtrader.dashboard.client's `npm run build` output,
+// copied into wwwroot - see Dockerfile) from this same origin/process. The client calls the API
+// with relative paths (/api/..., /hubs/spreads - see src/api.js and src/hooks/spreadHub.js), so
+// serving both from one origin means no CORS is needed for the dashboard itself and there's only
+// one URL/one deployable unit for "the app". Static files are plain middleware (not endpoints),
+// so they're never subject to the JWT fallback policy below - the page shell always loads
+// unauthenticated and the React app itself gates its UI behind the login screen.
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
 app.UseCors(DashboardCorsPolicy);
 app.UseAuthentication();
 app.UseAuthorization();
@@ -253,5 +264,11 @@ app.MapHub<SpreadHub>("/hubs/spreads");
 // Liveness probe only - no user data, must be reachable without a token by the Docker HEALTHCHECK
 // / cloud probe, so it opts out of the global "authenticated user required" fallback policy.
 app.MapGet("/healthz", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
+
+// SPA fallback: any GET that isn't an API route, hub, or an existing static file falls through to
+// index.html so client-side routing (react-router-dom) works on a hard refresh/deep link.
+// AllowAnonymous is required - without it the global fallback policy above would demand a JWT just
+// to load the page that lets you log in.
+app.MapFallbackToFile("index.html").AllowAnonymous();
 
 app.Run();
