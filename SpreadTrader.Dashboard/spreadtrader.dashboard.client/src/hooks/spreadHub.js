@@ -1,7 +1,17 @@
 import { useSyncExternalStore } from 'react'
 import * as signalR from '@microsoft/signalr'
 import { api } from '../api'
-import { getToken } from '../auth'
+import { getToken, clearSession } from '../auth'
+
+// SignalR doesn't surface an expired/invalid JWT as a typed error - an unauthorized negotiate or
+// WebSocket handshake just comes back as a generic Error whose message happens to mention the
+// status. Used below so a token dying while someone is just sitting on a live page (no REST call
+// to trip authFetch's 401 handling - see api.js) still flips the whole app back to the login
+// screen immediately, instead of only on the next button click that happens to hit the API.
+function isAuthError(err) {
+  const msg = String(err?.message ?? err ?? '')
+  return /\b401\b/.test(msg) || /unauthorized/i.test(msg)
+}
 
 // Why this file exists (replaces the old useSpreadHub.js hook):
 //
@@ -192,9 +202,14 @@ function ensureConnection() {
     connectionState = 'connected'
     notify(connectionListeners)
   })
-  connection.onclose(() => {
+  connection.onclose((err) => {
     connectionState = 'disconnected'
     notify(connectionListeners)
+    // Automatic reconnect gave up (it retries a handful of times, then closes for good) - if
+    // that's because the token is no longer valid, clearSession() notifies every useAuth()
+    // subscriber (see auth.js), which is what flips App.jsx from the dashboard back to the login
+    // screen app-wide, the same way authFetch's 401 handling does for REST calls.
+    if (isAuthError(err)) clearSession()
   })
 
   connection
@@ -207,6 +222,7 @@ function ensureConnection() {
       console.error('[spreadHub] hub connection failed to start:', err)
       connectionState = 'disconnected'
       notify(connectionListeners)
+      if (isAuthError(err)) clearSession()
     })
 
   return connection
