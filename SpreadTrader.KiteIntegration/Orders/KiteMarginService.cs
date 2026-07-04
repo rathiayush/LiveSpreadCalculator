@@ -17,9 +17,15 @@ namespace SpreadTrader.KiteIntegration.Orders;
 /// it would cost with no offsetting positions considered.
 /// https://kite.trade/docs/connect/v3/margins/#basket-margins
 ///
-/// This is informational only - see OrderDispatchHostedService, which logs the result but does
-/// not block order placement on it (Kite's own order entry will reject an order if margin is
-/// genuinely insufficient, so a failed/short margin check here is not treated as fatal).
+/// consider_positions=true makes Kite factor in the account's EXISTING open positions/orders, so
+/// "final" is the incremental margin the basket needs on top of what's already there - the correct
+/// figure to compare against available margin (which is likewise already net of existing blocks).
+///
+/// When EngineOptions.VerifyMarginBeforeDispatch is on, OrderDispatchHostedService.CheckMarginAsync
+/// DOES block dispatch on this: a confirmed-insufficient result stops the basket entirely (nothing
+/// is placed), so one leg can't go through while the other is rejected for margin. A failed *check*
+/// (network/API hiccup), on the other hand, is not treated as fatal - Kite's own order entry still
+/// enforces margin regardless - so dispatch proceeds in that case.
 /// </summary>
 public sealed class KiteMarginService
 {
