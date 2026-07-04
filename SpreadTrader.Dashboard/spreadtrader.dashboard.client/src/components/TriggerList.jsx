@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Card, Table, Button, Popconfirm, Tag, Typography, Space, Modal, InputNumber, Switch, Radio, Alert } from 'antd'
+import { Card, Table, Button, Popconfirm, Tag, Typography, Space, Modal, InputNumber, Switch, Radio, Alert, Tooltip } from 'antd'
 import {
   ThunderboltOutlined,
   CheckCircleOutlined,
@@ -102,8 +102,23 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
   }
 
   const columns = [
-    { title: 'Id', dataIndex: 'id', key: 'id', fixed: 'left' },
-    { title: 'Spread', dataIndex: 'spreadId', key: 'spreadId' },
+    {
+      // The id is an internal UUID the user never types or reasons about, so show only a short
+      // monospace stub (full value on hover) - the full 36-char UUID was overrunning its column
+      // and visually colliding with the Spread column. Copyable so it can still be grabbed if needed.
+      title: 'Id',
+      dataIndex: 'id',
+      key: 'id',
+      width: 120,
+      render: (v) => (
+        <Tooltip title={v}>
+          <Typography.Text copyable={{ text: v }} style={{ fontFamily: 'monospace', fontSize: 12 }}>
+            {String(v).slice(0, 8)}…
+          </Typography.Text>
+        </Tooltip>
+      ),
+    },
+    { title: 'Spread', dataIndex: 'spreadId', key: 'spreadId', ellipsis: { showTitle: true } },
     {
       title: 'Condition',
       key: 'condition',
@@ -255,8 +270,10 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
             {editing?.operator !== 'AbsoluteGreaterThanOrEqual' && (
               <div>
                 <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
-                  Fire when the spread...
+                  Fire when...
                 </Typography.Text>
+                {/* Named after which leg gets pricier, not "rises/falls" - see the identical
+                    comment in TriggerForm.jsx for why. */}
                 <Radio.Group
                   block
                   optionType="button"
@@ -264,8 +281,8 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
                   value={editForm.operator}
                   onChange={(e) => setEditForm((f) => ({ ...f, operator: e.target.value }))}
                   options={[
-                    { label: 'Rises to/above (>=)', value: 'gte' },
-                    { label: 'Falls to/below (<=)', value: 'lte' },
+                    { label: 'Far leg gets pricier (near at discount)', value: 'gte' },
+                    { label: 'Near leg gets pricier (near at premium)', value: 'lte' },
                   ]}
                 />
               </div>

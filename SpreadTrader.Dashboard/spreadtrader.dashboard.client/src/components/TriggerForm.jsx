@@ -26,14 +26,23 @@ const generateRuleId = () =>
 //     to/above, or falls to/below, the threshold) plus a fixed Buy/Sell/None per leg. Threshold
 //     is always typed as a plain positive magnitude - the operator picker carries the direction
 //     instead of the user having to remember "type a negative number for <=".
+// Matches the classic calendar-spread arbitrage convention (same one auto-direction/"watch both
+// sides" applies live): far leg pricier -> near is cheap -> buy near, sell far. Near leg pricier
+// -> near is rich -> sell near, buy far. See OPERATOR_LEG_DEFAULTS below - picking an operator
+// pre-fills the matching leg actions so the common case needs no extra clicks, while still
+// leaving both selects free to override for anything non-standard.
+const OPERATOR_LEG_DEFAULTS = {
+  gte: { nearLegAction: 'Buy', farLegAction: 'Sell' },
+  lte: { nearLegAction: 'Sell', farLegAction: 'Buy' },
+}
+
 const emptyForm = {
   spreadId: '',
   threshold: '',
   thresholdIsPercent: false,
   watchBothSides: false,
   operator: 'gte',
-  nearLegAction: 'None',
-  farLegAction: 'None',
+  ...OPERATOR_LEG_DEFAULTS.gte,
   lots: '',
   product: 'NRML',
   orderType: 'MARKET',
@@ -47,6 +56,11 @@ export default function TriggerForm({ spreads, onCreated }) {
   const [error, setError] = useState(null)
 
   const set = (field) => (value) => setForm((f) => ({ ...f, [field]: value }))
+
+  // Picking an operator re-applies its matching leg defaults (see OPERATOR_LEG_DEFAULTS) so the
+  // common case ("far pricier -> buy near/sell far", "near pricier -> sell near/buy far") is set
+  // automatically - the two Selects below stay fully editable if you want something else.
+  const setOperator = (value) => setForm((f) => ({ ...f, operator: value, ...OPERATOR_LEG_DEFAULTS[value] }))
 
   // Exchange lot size for whichever spread is selected - both legs of a calendar spread share
   // the same underlying, so near/far always have the same lot size once resolved; used only to
@@ -157,17 +171,20 @@ export default function TriggerForm({ spreads, onCreated }) {
               <Row gutter={[12, 12]}>
                 <Col xs={24}>
                   <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
-                    Fire when the spread...
+                    Fire when...
                   </Typography.Text>
+                  {/* Named after which leg gets pricier, not "rises/falls" - which direction
+                      counts as "up" depends on which leg you're subtracting from which, so
+                      naming the leg directly instead of >=/<= removes that ambiguity. */}
                   <Radio.Group
                     block
                     optionType="button"
                     buttonStyle="solid"
                     value={form.operator}
-                    onChange={(e) => set('operator')(e.target.value)}
+                    onChange={(e) => setOperator(e.target.value)}
                     options={[
-                      { label: 'Rises to/above (>=)', value: 'gte' },
-                      { label: 'Falls to/below (<=)', value: 'lte' },
+                      { label: 'Far leg gets pricier (near at discount)', value: 'gte' },
+                      { label: 'Near leg gets pricier (near at premium)', value: 'lte' },
                     ]}
                   />
                 </Col>
@@ -175,7 +192,7 @@ export default function TriggerForm({ spreads, onCreated }) {
 
               <Row gutter={[12, 12]}>
                 <Col xs={24} sm={12}>
-                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Near leg</Typography.Text>
+                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Near leg action</Typography.Text>
                   <Select
                     value={form.nearLegAction}
                     onChange={set('nearLegAction')}
@@ -184,7 +201,7 @@ export default function TriggerForm({ spreads, onCreated }) {
                   />
                 </Col>
                 <Col xs={24} sm={12}>
-                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Far leg</Typography.Text>
+                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Far leg action</Typography.Text>
                   <Select
                     value={form.farLegAction}
                     onChange={set('farLegAction')}
