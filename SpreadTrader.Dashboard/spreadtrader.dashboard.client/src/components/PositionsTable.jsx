@@ -81,7 +81,11 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
   }
 
   const columns = [
-    { title: 'Symbol', dataIndex: 'tradingSymbol', key: 'tradingSymbol', fixed: 'left' },
+    // width is required (not just cosmetic) on a fixed column - without it, antd can't reliably
+    // compute the sticky offset for the columns after it before layout settles, especially on a
+    // narrow/mobile viewport, which is what caused this column's text to render overlapping the
+    // Exchange column next to it instead of pushing it aside.
+    { title: 'Symbol', dataIndex: 'tradingSymbol', key: 'tradingSymbol', fixed: 'left', width: 170 },
     { title: 'Exchange', dataIndex: 'exchange', key: 'exchange' },
     { title: 'Product', dataIndex: 'product', key: 'product' },
     {
@@ -181,14 +185,13 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
 
   return (
     <Card
-      title={
-        <Space>
-          Open positions ({positions.length})
-          <Typography.Text style={{ color: totalPnl >= 0 ? '#3f8600' : '#cf1322' }}>
-            Total PNL: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)}
-          </Typography.Text>
-        </Space>
-      }
+      // Just the short count here - Total PNL used to live in this same Space, but antd's Card
+      // header title has overflow:hidden/white-space:nowrap by default, so on a narrow/mobile
+      // viewport the "extra" buttons on the right squeezed the title down until Total PNL (the
+      // second item) got clipped off entirely rather than wrapping - it never actually
+      // disappeared, it just ran out of header width to render in. Moved below, as its own
+      // block-level line in the card body, where it can't be truncated by anything.
+      title={`Open positions (${positions.length})`}
       extra={
         <Space size="small">
           {selectedKeys.length > 0 && (
@@ -215,6 +218,12 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
         </Space>
       }
     >
+      <Typography.Text strong style={{ display: 'block', marginBottom: 12, fontSize: 15 }}>
+        Total PNL:{' '}
+        <span style={{ color: totalPnl >= 0 ? '#3f8600' : '#cf1322' }}>
+          {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)}
+        </span>
+      </Typography.Text>
       {error && <Alert type="error" message={error} closable onClose={() => setError(null)} style={{ marginBottom: 12 }} />}
       {positions.length === 0 ? (
         <Typography.Text type="secondary">No open positions right now.</Typography.Text>

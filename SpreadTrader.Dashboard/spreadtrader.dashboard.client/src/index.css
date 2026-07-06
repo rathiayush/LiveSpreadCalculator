@@ -20,6 +20,10 @@ html[data-theme='dark'] {
   --row-hover: rgba(77, 163, 255, 0.07);
   --scrollbar-thumb: #2a2d38;
   --scrollbar-thumb-hover: #383c4a;
+      /* Matches App.jsx's THEME_TOKENS.Table.headerBg for this mode - used only to give a fixed
+     header cell (see the sticky-column rules below) the same opaque background as the rest of
+     the header row, instead of the body's --bg-elevated. */
+  --table-header-bg: #171a22;
   --page-bg-image:
     radial-gradient(1400px 560px at 50% -12%, rgba(77, 163, 255, 0.07), transparent 65%),
     linear-gradient(180deg, #0d0f15 0%, #0a0b10 40%, #08090d 100%);
@@ -50,6 +54,7 @@ html[data-theme='light'] {
   --row-hover: rgba(77, 163, 255, 0.09);
   --scrollbar-thumb: #cbd5e1;
   --scrollbar-thumb-hover: #a8b6c8;
+  --table-header-bg: #f4f6f9;
   --page-bg-image:
     radial-gradient(1400px 560px at 50% -12%, rgba(77, 163, 255, 0.08), transparent 65%),
     linear-gradient(180deg, #f8fafc 0%, #f1f4f8 45%, #eef1f6 100%);
@@ -181,6 +186,39 @@ html[data-theme='light'] .ant-card {
 
 .ant-table-tbody > tr:hover > td {
   background: var(--row-hover) !important;
+}
+
+/* Sticky/fixed columns (see PositionsTable/SpreadGrid/SpreadList/RankingPanel's `fixed: 'left'`
+   columns) need their OWN opaque background - `.ant-table { background: transparent !important }`
+   above is what lets the table blend into its Card, but that same transparency was leaking into
+   the fixed column too, so as you scrolled the table horizontally the other columns' text would
+   scroll along right underneath (and visibly through) the "stuck" column instead of being hidden
+   behind it. background-color (not the `background` shorthand) so it layers under, rather than
+   replaces, the striping/hover background-image rules further down. Body and header cells use
+   different opaque colors to match their own row's actual background. */
+.ant-table-tbody > tr > td.ant-table-cell-fix-left,
+.ant-table-tbody > tr > td.ant-table-cell-fix-right {
+  background-color: var(--bg-elevated) !important;
+}
+
+.ant-table-thead > tr > th.ant-table-cell-fix-left,
+.ant-table-thead > tr > th.ant-table-cell-fix-right {
+  background-color: var(--table-header-bg) !important;
+}
+
+/* Re-applies the zebra stripe/hover tint on top of that opaque backdrop for fixed body cells
+   specifically, using background-image (which layers over background-color, unlike the
+   `background` shorthand above which would reset it back to none) - without this, a fixed column
+   would always look solid/unstriped and never highlight on hover, unlike the rest of the row. */
+.ant-table-tbody > tr:nth-child(even) > td.ant-table-cell-fix-left,
+.ant-table-tbody > tr:nth-child(even) > td.ant-table-cell-fix-right {
+  background-image: linear-gradient(var(--row-stripe), var(--row-stripe));
+}
+
+.ant-table-tbody > tr:hover > td.ant-table-cell-fix-left,
+.ant-table-tbody > tr:hover > td.ant-table-cell-fix-right {
+  background-color: var(--bg-elevated) !important;
+  background-image: linear-gradient(var(--row-hover), var(--row-hover)) !important;
 }
 
 .ant-menu-dark.ant-menu-inline .ant-menu-item-selected {

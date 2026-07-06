@@ -31,7 +31,11 @@ export default function SpreadList({ spreads, onChanged }) {
   }
 
   const columns = [
-    { title: 'Id', dataIndex: 'id', key: 'id', fixed: 'left' },
+    // width is required (not just cosmetic) on a fixed column - without it, antd can't reliably
+    // compute the sticky offset for the columns after it before layout settles, especially on a
+    // narrow/mobile viewport, causing this column's text to render overlapping the next column
+    // instead of pushing it aside.
+    { title: 'Id', dataIndex: 'id', key: 'id', fixed: 'left', width: 170 },
     { title: 'Underlying', dataIndex: 'underlying', key: 'underlying', render: (v) => <strong>{v}</strong> },
     { title: 'Near', key: 'near', render: (_, s) => s.nearLeg.tradingSymbol },
     { title: 'Far', key: 'far', render: (_, s) => s.farLeg.tradingSymbol },

@@ -38,10 +38,15 @@ export default function SpreadGrid({ definitions, liveValues }) {
 
   const columns = [
     {
+      // width is required (not just cosmetic) on a fixed column - without it, antd can't
+      // reliably compute the sticky offset for the columns after it before layout settles,
+      // especially on a narrow/mobile viewport, causing this column's text to render
+      // overlapping the next column instead of pushing it aside.
       title: 'Underlying',
       dataIndex: 'underlying',
       key: 'underlying',
       fixed: 'left',
+      width: 140,
       sorter: (a, b) => a.underlying.localeCompare(b.underlying),
       render: (v) => <strong>{v}</strong>,
     },
