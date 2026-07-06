@@ -10,6 +10,7 @@ using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using SpreadTrader.Core.Abstractions;
+using SpreadTrader.Core.Realtime;
 using SpreadTrader.Core.Store;
 using SpreadTrader.Engine;
 using SpreadTrader.Engine.Services;
@@ -17,6 +18,7 @@ using SpreadTrader.KiteIntegration;
 using SpreadTrader.KiteIntegration.Auth;
 using SpreadTrader.KiteIntegration.Instruments;
 using SpreadTrader.KiteIntegration.Orders;
+using SpreadTrader.KiteIntegration.Positions;
 using SpreadTrader.KiteIntegration.Ticker;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -95,6 +97,22 @@ builder.Services.AddSingleton(sp => new KiteMarginService(
     sp.GetRequiredService<KiteAuthFailureHandler>(),
     sp.GetRequiredService<ILogger<KiteMarginService>>()));
 
+// Live positions/PNL + manual square-off (PositionsController) - see KitePositionsService's doc
+// comment for why this exists (lets the dashboard replace checking PNL via the Kite app, which
+// invalidates this app's own session).
+builder.Services.AddSingleton(sp => new KitePositionsService(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KitePositionsService)),
+    sp.GetRequiredService<IOptions<KiteOptions>>(),
+    sp.GetRequiredService<KiteSession>(),
+    sp.GetRequiredService<KiteAuthFailureHandler>(),
+    sp.GetRequiredService<InstrumentMasterService>(),
+    sp.GetRequiredService<ILogger<KitePositionsService>>()));
+
+// Shared MARKET -> protected-LIMIT conversion (Kite rejects raw MARKET orders for F&O - see
+// MarketProtectionService's doc comment). Used by both OrderDispatchHostedService (triggered
+// baskets, registered below) and PositionsController (manual square-off).
+builder.Services.AddSingleton<MarketProtectionService>();
+
 builder.Services.AddSingleton<KiteTickerClient>();
 
 // ---- Engine (singleton pipeline: ingest -> calculate -> evaluate -> dispatch) ---------------
@@ -110,6 +128,15 @@ builder.Services.AddHostedService<SpreadRankingHostedService>();
 
 builder.Services.AddSingleton<ISpreadPublisher, SignalRSpreadPublisher>();
 builder.Services.AddSingleton<ITriggerEventSink, SignalRTriggerEventSink>();
+
+// Live PNL for the Positions & PNL dashboard page - see LivePositionsHostedService's doc comment
+// for how this gets an exact live figure from Kite's ticker/order-postback streams instead of
+// polling GET /api/positions on a timer. PositionsViewerTracker is the shared singleton SpreadHub
+// (JoinPositions/LeavePositions) and LivePositionsHostedService both depend on, so the hosted
+// service can skip its resync/push work entirely while no browser tab has that page open.
+builder.Services.AddSingleton<PositionsViewerTracker>();
+builder.Services.AddSingleton<IPositionsPublisher, SignalRPositionsPublisher>();
+builder.Services.AddHostedService<LivePositionsHostedService>();
 
 // Reports what actually got bought/sold (and whether it succeeded) once OrderDispatchHostedService
 // finishes acting on a fired trigger - see BasketExecutionEvent / IOrderExecutionSink. The single

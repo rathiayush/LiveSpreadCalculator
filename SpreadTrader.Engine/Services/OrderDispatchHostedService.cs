@@ -37,8 +37,8 @@ namespace SpreadTrader.Engine.Services;
 ///  a. Pre-trade margin gating (EngineOptions.VerifyMarginBeforeDispatch / CheckMarginAsync) -
 ///     if the account can't cover the whole basket, nothing is sent at all.
 ///  b. Every MARKET-originated leg is sent as a protected IOC LIMIT order (see
-///     ApplyMarketProtection) - IOC fills what it can immediately and cancels the remainder
-///     right away instead of resting, so its outcome is known almost instantly rather than
+///     MarketProtectionService.Protect) - IOC fills what it can immediately and cancels the
+///     remainder right away instead of resting, so its outcome is known almost instantly rather than
 ///     staying ambiguous for a long time.
 ///  c. KiteOrderGateway.PlaceOrderAsync polls the order's real status after placement instead of
 ///     trusting mere placement-acceptance as "success" - if a leg is confirmed filled while
@@ -47,10 +47,11 @@ namespace SpreadTrader.Engine.Services;
 ///     than left resting and unmanaged (CancelStrayOpenOrdersAsync).
 ///
 /// Any leg configured (or, for square-off, hardcoded) as OrderType=MARKET is converted to a
-/// protected LIMIT order before it's sent - see ApplyMarketProtection. Kite Connect's API
-/// rejects plain MARKET orders for F&amp;O outright ("Market orders without market protection are
-/// not allowed via API"), and there's no market_protection parameter on the order-placement
-/// endpoint itself to opt back in - a bounded-slippage LIMIT order is the supported workaround.
+/// protected LIMIT order before it's sent - see MarketProtectionService.Protect (shared with
+/// PositionsController's manual square-off). Kite Connect's API rejects plain MARKET orders for
+/// F&amp;O outright ("Market orders without market protection are not allowed via API"), and
+/// there's no market_protection parameter on the order-placement endpoint itself to opt back in -
+/// a bounded-slippage LIMIT order is the supported workaround.
 ///
 /// Whatever happens (blocked on margin, legs placed/rejected, square-off fired) is published as
 /// a BasketExecutionEvent via IOrderExecutionSink, correlated back to the original TriggerEvent
@@ -62,10 +63,10 @@ public sealed class OrderDispatchHostedService : BackgroundService
     private readonly TriggerEventChannel _triggerChannel;
     private readonly ITriggerRuleStore _ruleStore;
     private readonly ISpreadDefinitionStore _spreadStore;
-    private readonly ITickStore _tickStore;
     private readonly IOrderGateway _orderGateway;
     private readonly KiteMarginService _marginService;
     private readonly IOrderExecutionSink _executionSink;
+    private readonly MarketProtectionService _marketProtection;
     private readonly EngineOptions _options;
     private readonly ILogger<OrderDispatchHostedService> _logger;
 
@@ -73,20 +74,20 @@ public sealed class OrderDispatchHostedService : BackgroundService
         TriggerEventChannel triggerChannel,
         ITriggerRuleStore ruleStore,
         ISpreadDefinitionStore spreadStore,
-        ITickStore tickStore,
         IOrderGateway orderGateway,
         KiteMarginService marginService,
         IOrderExecutionSink executionSink,
+        MarketProtectionService marketProtection,
         IOptions<EngineOptions> options,
         ILogger<OrderDispatchHostedService> logger)
     {
         _triggerChannel = triggerChannel;
         _ruleStore = ruleStore;
         _spreadStore = spreadStore;
-        _tickStore = tickStore;
         _orderGateway = orderGateway;
         _marginService = marginService;
         _executionSink = executionSink;
+        _marketProtection = marketProtection;
         _options = options.Value;
         _logger = logger;
     }
@@ -136,7 +137,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         // Apply market protection before the margin check too, so the basket-margin figure
         // reflects what's actually about to be sent (a MARKET order and its protected-LIMIT
         // equivalent can price margin slightly differently).
-        var legs = legPlans.Select(plan => ApplyMarketProtection(plan, rule.Id)).ToList();
+        var legs = legPlans.Select(plan => _marketProtection.Protect(plan.Request, plan.InstrumentToken, plan.TickSize, $"Rule {rule.Id}")).ToList();
 
         // EngineOptions.VerifyMarginBeforeDispatch gates whether the margin service is called
         // at all here, not just whether its result can block dispatch - when it's off, this
@@ -274,112 +275,6 @@ public sealed class OrderDispatchHostedService : BackgroundService
             new BasketExecutionEvent(triggerEvent.FireId, triggerEvent.RuleId, triggerEvent.SpreadId, underlying, orderKind, Array.Empty<OrderLegResult>(), MarginBlocked: true, BlockedReason: reason, DateTimeOffset.UtcNow),
             cancellationToken);
 
-    /// <summary>Fallback tick size used when an instrument's real one hasn't been resolved yet
-    /// (universe built before TickSize was tracked, or InstrumentMasterService hasn't loaded) -
-    /// 0.05 is the tick size for the overwhelming majority of NSE F&amp;O contracts, so it's a far
-    /// better guess than skipping alignment entirely.</summary>
-    private const decimal DefaultTickSize = 0.05m;
-
-    /// <summary>Kite Connect rejects a plain OrderType=MARKET leg for F&amp;O with "Market orders
-    /// without market protection are not allowed via API" - there's no market_protection
-    /// parameter on the order-placement endpoint to opt back in, so any MARKET leg is converted
-    /// here to a LIMIT order priced EngineOptions.MarketProtectionPercent through the best
-    /// available quote: best-ask * (1 + pct/100) for a BUY (willing to pay up to that much more
-    /// to all-but-guarantee a fill), best-bid * (1 - pct/100) for a SELL. Falls back to the last
-    /// traded price if full-mode depth hasn't arrived yet for that instrument, and leaves the
-    /// leg as MARKET (unchanged) only if there's no price reference at all yet - in which case
-    /// Kite will still reject it, but there's nothing better to send.
-    ///
-    /// The raw band-adjusted price is then aligned to the instrument's actual tick size (Kite
-    /// rejects a LIMIT price that isn't an exact multiple of it, e.g. "Tick size for this script
-    /// is 0.05" - a flat 2-decimal round doesn't guarantee that) via RoundToTick: rounded up for
-    /// a BUY and down for a SELL, so the sent price is never more restrictive than the intended
-    /// protection band - see RoundToTick's own comment for why the rounding direction matters.
-    /// </summary>
-    private OrderLegRequest ApplyMarketProtection(LegPlan plan, string ruleId)
-    {
-        var leg = plan.Request;
-        if (!string.Equals(leg.OrderType, "MARKET", StringComparison.OrdinalIgnoreCase))
-            return leg;
-
-        if (!_tickStore.TryGet(plan.InstrumentToken, out var tick))
-        {
-            _logger.LogWarning(
-                "Rule {RuleId}: no tick data yet for {Symbol} - sending as MARKET anyway, Kite will likely reject it (market protection requires a price reference).",
-                ruleId, leg.TradingSymbol);
-            return leg;
-        }
-
-        var isBuy = string.Equals(leg.TransactionType, "BUY", StringComparison.OrdinalIgnoreCase);
-        var reference = isBuy
-            ? (tick.BestAskPrice > 0 ? tick.BestAskPrice : tick.LastPrice)
-            : (tick.BestBidPrice > 0 ? tick.BestBidPrice : tick.LastPrice);
-
-        if (reference <= 0)
-        {
-            _logger.LogWarning("Rule {RuleId}: no usable price reference for {Symbol} yet - sending as MARKET anyway.", ruleId, leg.TradingSymbol);
-            return leg;
-        }
-
-        var band = _options.MarketProtectionPercent / 100m;
-        var rawPrice = isBuy ? reference * (1 + band) : reference * (1 - band);
-
-        var tickSize = plan.TickSize > 0 ? plan.TickSize : DefaultTickSize;
-        if (plan.TickSize <= 0)
-        {
-            _logger.LogWarning(
-                "Rule {RuleId}: no tick size resolved for {Symbol} - falling back to {Default} (rebuild the universe to pick up real tick sizes).",
-                ruleId, leg.TradingSymbol, DefaultTickSize);
-        }
-
-        var protectedPrice = RoundToTick(rawPrice, tickSize, roundUp: isBuy);
-
-        _logger.LogInformation(
-            "Rule {RuleId}: {Symbol} MARKET -> protected LIMIT @ {Price} ({Percent}% band around {Reference}, tick size {TickSize})",
-            ruleId, leg.TradingSymbol, protectedPrice, _options.MarketProtectionPercent, reference, tickSize);
-
-        return new OrderLegRequest
-        {
-            TradingSymbol = leg.TradingSymbol,
-            Exchange = leg.Exchange,
-            TransactionType = leg.TransactionType,
-            Quantity = leg.Quantity,
-            Product = leg.Product,
-            OrderType = "LIMIT",
-            Price = protectedPrice,
-            // IOC instead of the DAY default: fill whatever it can immediately and cancel the
-            // rest right away, rather than resting in the book if price moves past the
-            // protection band. A resting DAY order at this price could otherwise sit open and
-            // unfilled for a long time with no fast way to detect it - IOC turns that into an
-            // immediate, known outcome that KiteOrderGateway's post-placement status poll can
-            // actually observe within a second or two, which is what makes
-            // AutoSquareOffOnPartialFill trustworthy. This is also the closest thing Kite offers
-            // to "fill or don't" for an individual leg - there's no true FOK/all-or-none order
-            // type on this exchange, for a single leg or for a basket (see the class doc
-            // comment and ARCHITECTURE.md).
-            Validity = "IOC",
-            Variety = leg.Variety,
-            Tag = leg.Tag,
-        };
-    }
-
-    /// <summary>Aligns a price to the nearest valid multiple of the instrument's tick size, in
-    /// whichever direction keeps the order at least as permissive as the raw band-adjusted price
-    /// - never more restrictive, since that could shave a fraction of a tick off the intended
-    /// slippage protection and occasionally cost a fill for no real benefit. For a BUY, rounds up
-    /// (willing to pay at least the intended protected price, never less); for a SELL, rounds
-    /// down (willing to accept at least as low, never more). Kite LIMIT prices are always at most
-    /// 2 decimal places regardless of tick size (0.05, 0.10, 1.00, ...), so the result is rounded
-    /// to 2 decimals afterwards as a final safety net against any residual fractional-paisa
-    /// noise from the multiplication/division.</summary>
-    private static decimal RoundToTick(decimal price, decimal tickSize, bool roundUp)
-    {
-        if (tickSize <= 0) return Math.Round(price, 2);
-        var ticks = price / tickSize;
-        var roundedTicks = roundUp ? Math.Ceiling(ticks) : Math.Floor(ticks);
-        return Math.Round(roundedTicks * tickSize, 2);
-    }
-
     /// <summary>Checks the basket's combined margin requirement (with the near/far hedge
     /// benefit applied - see KiteMarginService.GetBasketMarginAsync) against the account's
     /// actual available margin. Returns null if dispatch should proceed, or a human-readable
@@ -458,7 +353,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
     /// through, since a lone near or far month future is a completely different (and far more
     /// margin-expensive) risk than the intended hedged spread - see EngineOptions.
     /// AutoSquareOffOnPartialFill. Fires an opposite-direction order for each filled leg
-    /// immediately (also passed through ApplyMarketProtection, same as any other MARKET leg -
+    /// immediately (also passed through MarketProtectionService, same as any other MARKET leg -
     /// this is cleanup, not a rate-sensitive trade, but Kite still rejects a raw MARKET order
     /// here too); if even the square-off fails, that's logged as Critical since it means the
     /// account is left with a naked position needing manual attention. Returns the square-off
@@ -492,21 +387,18 @@ public sealed class OrderDispatchHostedService : BackgroundService
         foreach (var (plan, filledQuantity) in filled)
         {
             var leg = plan.Request;
-            var flattenPlan = new LegPlan(
-                new OrderLegRequest
-                {
-                    TradingSymbol = leg.TradingSymbol,
-                    Exchange = leg.Exchange,
-                    TransactionType = leg.TransactionType == "BUY" ? "SELL" : "BUY",
-                    Quantity = filledQuantity, // flatten exactly what filled, not the original requested quantity
-                    Product = leg.Product,
-                    OrderType = "MARKET", // this is risk cleanup, not a rate-sensitive trade - ApplyMarketProtection still converts it to a protected LIMIT before it's sent
-                    Tag = leg.Tag,
-                },
-                plan.InstrumentToken,
-                plan.TickSize);
+            var flattenLeg = new OrderLegRequest
+            {
+                TradingSymbol = leg.TradingSymbol,
+                Exchange = leg.Exchange,
+                TransactionType = leg.TransactionType == "BUY" ? "SELL" : "BUY",
+                Quantity = filledQuantity, // flatten exactly what filled, not the original requested quantity
+                Product = leg.Product,
+                OrderType = "MARKET", // this is risk cleanup, not a rate-sensitive trade - MarketProtectionService still converts it to a protected LIMIT before it's sent
+                Tag = leg.Tag,
+            };
 
-            var flatten = ApplyMarketProtection(flattenPlan, ruleId);
+            var flatten = _marketProtection.Protect(flattenLeg, plan.InstrumentToken, plan.TickSize, $"Rule {ruleId} auto-square-off");
             var result = await _orderGateway.PlaceOrderAsync(flatten, cancellationToken);
             squareOffResults.Add(new OrderLegResult(flatten.TradingSymbol, flatten.TransactionType, flatten.Quantity, result.Success, result.OrderId, result.ErrorMessage, IsSquareOff: true, FilledQuantity: result.FilledQuantity, Price: flatten.Price, OrderType: flatten.OrderType, Status: result.Status));
 
@@ -530,7 +422,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
     /// size - BuildLegs knows both (spread.NearLeg/FarLeg.InstrumentToken / .TickSize) but
     /// OrderLegRequest itself has neither field (Kite's order API only wants tradingsymbol+
     /// exchange+price), so they're carried alongside rather than looked up later - see
-    /// ApplyMarketProtection.</summary>
+    /// MarketProtectionService.Protect.</summary>
     private readonly record struct LegPlan(OrderLegRequest Request, uint InstrumentToken, decimal TickSize);
 
     private static List<LegPlan> BuildLegs(TriggerRule rule, SpreadDefinition spread, string direction)

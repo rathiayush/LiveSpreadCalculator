@@ -69,6 +69,9 @@ export const api = {
   // before the first SignalR push, same idea as getSpreadSnapshot for Live Spreads. Held in
   // memory server-side (see ITriggerActivityStore) until the backend restarts.
   getTriggerActivity: () => authFetch('/api/triggers/activity').then(handle),
+  // Wipes the server-side Trigger Activity history (not just this browser's view) - see
+  // TriggerActivityPage's Clear button.
+  clearTriggerActivity: () => authFetch('/api/triggers/activity', { method: 'DELETE' }).then(handle),
   createTrigger: (rule) =>
     authFetch('/api/triggers', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(rule) }).then(handle),
   // Patches an existing rule in place (quantity/threshold/thresholdIsPercent etc.) rather than
@@ -106,4 +109,21 @@ export const api = {
 
   getAuthStatus: () => authFetch('/api/auth/status').then(handle),
   getLoginUrl: () => authFetch('/api/auth/login-url').then(handle),
+
+  // Live open positions + PNL (GET /portfolio/positions under the hood) - see
+  // KitePositionsService. { success, positions: [...], errorMessage }.
+  getPositions: () => authFetch('/api/positions').then(handle),
+  // Exits `lots` lots of an open position (product must match - Kite nets down by product).
+  // Backend derives BUY vs SELL itself from the position's actual current sign.
+  squareOffPosition: (position, lots) =>
+    authFetch('/api/positions/square-off', {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        tradingSymbol: position.tradingSymbol,
+        exchange: position.exchange,
+        product: position.product,
+        lots,
+      }),
+    }).then(handle),
 }

@@ -1,4 +1,4 @@
-import { Card, List, Typography, Space, Button, Popconfirm, Tag, Tooltip } from 'antd'
+import { Card, List, Typography, Space, Button, Popconfirm, Tag, Tooltip, Alert } from 'antd'
 import {
   ThunderboltOutlined,
   ClearOutlined,
@@ -87,7 +87,7 @@ function ExecutionStatus({ e }) {
   )
 }
 
-export default function TriggerFeed({ events, onClear }) {
+export default function TriggerFeed({ events, onClear, clearError }) {
   return (
     <Card
       title={<Space><ThunderboltOutlined style={{ color: '#f5a623' }} /> Recent trigger fires ({events.length})</Space>}
@@ -96,7 +96,7 @@ export default function TriggerFeed({ events, onClear }) {
         onClear && (
           <Popconfirm
             title="Clear trigger activity?"
-            description="Only clears this browser's current view - the history is kept on the server until it restarts, so refreshing (or opening another tab) will show it again."
+            description="Removes the history from the server too (not just this browser's view) - anyone else looking at this feed, or a fresh refresh/new tab, won't see these entries again. Cannot be undone."
             onConfirm={onClear}
             okText="Clear"
             okButtonProps={{ danger: true }}
@@ -107,6 +107,15 @@ export default function TriggerFeed({ events, onClear }) {
         )
       }
     >
+      {clearError && (
+        <Alert
+          type="error"
+          showIcon
+          closable
+          message={`Couldn't clear server-side history: ${clearError}. Your local view was cleared anyway, but it may reappear on refresh.`}
+          style={{ marginBottom: 12 }}
+        />
+      )}
       {events.length === 0 ? (
         <Typography.Text type="secondary">No triggers fired yet.</Typography.Text>
       ) : (

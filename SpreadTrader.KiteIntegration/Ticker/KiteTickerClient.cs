@@ -31,6 +31,17 @@ public sealed class KiteTickerClient : IAsyncDisposable
 
     public event Action<Tick>? TickReceived;
 
+    /// <summary>Fired whenever Kite pushes an order postback over this same WebSocket connection
+    /// (text frame, `{"type":"order","data":{...}}` - see
+    /// https://kite.trade/docs/connect/v3/websocket/#postbacks-and-non-binary-updates). Kite's
+    /// docs specifically recommend this over the separate HTTP postback webhook for individual-
+    /// developer apps: it covers every order for the logged-in user regardless of which client
+    /// placed it (this app's own triggered baskets, manual square-off, or even a trade placed
+    /// directly in the Kite app/web), all without a public postback_url to register/host.
+    /// Deliberately parameterless - consumers (see LivePositionsHostedService) don't need to know
+    /// which order changed, only that SOME order did, as the cue to re-fetch REST positions.</summary>
+    public event Action? OrderUpdateReceived;
+
     public KiteTickerClient(IOptions<KiteOptions> options, KiteSession session, ILogger<KiteTickerClient> logger)
     {
         _options = options.Value;
@@ -162,12 +173,46 @@ public sealed class KiteTickerClient : IAsyncDisposable
                 messageStream.Write(buffer, 0, result.Count);
             } while (!result.EndOfMessage);
 
+            if (result.MessageType == WebSocketMessageType.Text)
+            {
+                // JsonDocument.Parse has no ReadOnlySpan<byte> overload (only ReadOnlyMemory<byte>,
+                // ReadOnlySequence<byte>, Stream, or string) - AsMemory instead of AsSpan here, and
+                // HandleTextMessage takes ReadOnlyMemory<byte> to match.
+                HandleTextMessage(messageStream.GetBuffer().AsMemory(0, (int)messageStream.Length));
+                continue;
+            }
+
             if (result.MessageType != WebSocketMessageType.Binary || TickReceived is null)
-                continue; // heartbeats and text postbacks (order updates/alerts) are not handled here
+                continue; // heartbeats (and text messages, handled above) have nothing left to do here
 
             var ticks = KiteTickPacketParser.ParseMessage(messageStream.GetBuffer().AsSpan(0, (int)messageStream.Length));
             foreach (var tick in ticks)
                 TickReceived.Invoke(tick);
+        }
+    }
+
+    /// <summary>Parses a text frame for `{"type":"order",...}` (see OrderUpdateReceived's doc
+    /// comment) and raises the event if it matches. "error"/"message" frames (also documented as
+    /// possible `type` values - connection-level errors and broker alerts, not order updates) are
+    /// deliberately ignored here; nothing currently needs them. Any frame that isn't valid JSON,
+    /// or doesn't have the shape expected, is swallowed - a malformed/unexpected text frame from
+    /// Kite should never take down tick processing on the same connection.</summary>
+    private void HandleTextMessage(ReadOnlyMemory<byte> bytes)
+    {
+        if (OrderUpdateReceived is null) return;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(bytes);
+            if (doc.RootElement.TryGetProperty("type", out var typeElement) &&
+                string.Equals(typeElement.GetString(), "order", StringComparison.Ordinal))
+            {
+                OrderUpdateReceived.Invoke();
+            }
+        }
+        catch (JsonException ex)
+        {
+            _logger.LogDebug(ex, "Ignoring unparseable Kite ticker text frame.");
         }
     }
 

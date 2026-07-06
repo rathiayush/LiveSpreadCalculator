@@ -1,0 +1,143 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using SpreadTrader.Core.Abstractions;
+using SpreadTrader.Core.Models;
+
+namespace SpreadTrader.Engine.Services;
+
+/// <summary>
+/// Converts a MARKET order leg into a protected IOC LIMIT order - Kite Connect's API rejects a
+/// plain OrderType=MARKET leg for F&amp;O outright with "Market orders without market protection
+/// are not allowed via API", and there's no market_protection parameter on the order-placement
+/// endpoint itself to opt back in, so a bounded-slippage LIMIT order is the supported workaround:
+/// priced EngineOptions.MarketProtectionPercent through a reference price (best-ask*(1+pct) for a
+/// BUY, best-bid*(1-pct) for a SELL), aligned to the instrument's tick size, sent IOC so it fills
+/// what it can immediately and cancels the rest rather than resting.
+///
+/// Extracted as its own service (rather than living only on OrderDispatchHostedService, where
+/// this logic originated) so every place in this app that fires a MARKET-type order - triggered
+/// baskets, their partial-fill auto-square-off, and PositionsController's manual square-off from
+/// the dashboard - sends something Kite will actually accept, using one copy of the band/
+/// tick-rounding math instead of several that could quietly drift apart.
+/// </summary>
+public sealed class MarketProtectionService
+{
+    /// <summary>Fallback tick size used when an instrument's real one hasn't been resolved yet
+    /// (universe/instrument master not built yet) - 0.05 is the tick size for the overwhelming
+    /// majority of NSE F&amp;O contracts, so it's a far better guess than skipping alignment
+    /// entirely.</summary>
+    private const decimal DefaultTickSize = 0.05m;
+
+    private readonly ITickStore _tickStore;
+    private readonly EngineOptions _options;
+    private readonly ILogger<MarketProtectionService> _logger;
+
+    public MarketProtectionService(ITickStore tickStore, IOptions<EngineOptions> options, ILogger<MarketProtectionService> logger)
+    {
+        _tickStore = tickStore;
+        _options = options.Value;
+        _logger = logger;
+    }
+
+    /// <summary>Tick-store-backed variant, for symbols that are part of the live-streamed
+    /// universe (triggered baskets always are, since a spread can't exist without both legs
+    /// subscribed). Looks up the latest bid/ask/LTP for <paramref name="instrumentToken"/> from
+    /// the shared ITickStore and hands off to <see cref="ProtectFromReference"/> for the actual
+    /// band/rounding math. Returns <paramref name="leg"/> unchanged if it isn't OrderType=MARKET,
+    /// or if no tick data has arrived yet for this instrument (Kite will then likely reject it,
+    /// but there's no better price reference available to send instead).</summary>
+    public OrderLegRequest Protect(OrderLegRequest leg, uint instrumentToken, decimal tickSize, string context)
+    {
+        if (!string.Equals(leg.OrderType, "MARKET", StringComparison.OrdinalIgnoreCase))
+            return leg;
+
+        if (!_tickStore.TryGet(instrumentToken, out var tick))
+        {
+            _logger.LogWarning(
+                "{Context}: no tick data yet for {Symbol} - sending as MARKET anyway, Kite will likely reject it (market protection requires a price reference).",
+                context, leg.TradingSymbol);
+            return leg;
+        }
+
+        var isBuy = string.Equals(leg.TransactionType, "BUY", StringComparison.OrdinalIgnoreCase);
+        var reference = isBuy
+            ? (tick.BestAskPrice > 0 ? tick.BestAskPrice : tick.LastPrice)
+            : (tick.BestBidPrice > 0 ? tick.BestBidPrice : tick.LastPrice);
+
+        return ProtectFromReference(leg, reference, tickSize, context);
+    }
+
+    /// <summary>Reference-price variant, for callers that already have an up-to-date price
+    /// without needing the live WebSocket ticker - e.g. PositionsController's manual square-off,
+    /// which uses GET /portfolio/positions' own last_price. This matters because an open position
+    /// isn't necessarily for a symbol any currently-configured spread subscribes to, so ITickStore
+    /// may have no data for it at all even though Kite itself has a perfectly good LTP.
+    ///
+    /// Returns <paramref name="leg"/> unchanged if it isn't OrderType=MARKET, or if
+    /// <paramref name="referencePrice"/> is not a usable (&gt; 0) price.</summary>
+    public OrderLegRequest ProtectFromReference(OrderLegRequest leg, decimal referencePrice, decimal tickSize, string context)
+    {
+        if (!string.Equals(leg.OrderType, "MARKET", StringComparison.OrdinalIgnoreCase))
+            return leg;
+
+        if (referencePrice <= 0)
+        {
+            _logger.LogWarning("{Context}: no usable price reference for {Symbol} yet - sending as MARKET anyway.", context, leg.TradingSymbol);
+            return leg;
+        }
+
+        var isBuy = string.Equals(leg.TransactionType, "BUY", StringComparison.OrdinalIgnoreCase);
+        var band = _options.MarketProtectionPercent / 100m;
+        var rawPrice = isBuy ? referencePrice * (1 + band) : referencePrice * (1 - band);
+
+        var effectiveTickSize = tickSize > 0 ? tickSize : DefaultTickSize;
+        if (tickSize <= 0)
+        {
+            _logger.LogWarning(
+                "{Context}: no tick size resolved for {Symbol} - falling back to {Default} (rebuild the universe/instrument master to pick up real tick sizes).",
+                context, leg.TradingSymbol, DefaultTickSize);
+        }
+
+        var protectedPrice = RoundToTick(rawPrice, effectiveTickSize, roundUp: isBuy);
+
+        _logger.LogInformation(
+            "{Context}: {Symbol} MARKET -> protected LIMIT @ {Price} ({Percent}% band around {Reference}, tick size {TickSize})",
+            context, leg.TradingSymbol, protectedPrice, _options.MarketProtectionPercent, referencePrice, effectiveTickSize);
+
+        return new OrderLegRequest
+        {
+            TradingSymbol = leg.TradingSymbol,
+            Exchange = leg.Exchange,
+            TransactionType = leg.TransactionType,
+            Quantity = leg.Quantity,
+            Product = leg.Product,
+            OrderType = "LIMIT",
+            Price = protectedPrice,
+            // IOC instead of the DAY default: fill whatever it can immediately and cancel the
+            // rest right away, rather than resting in the book if price moves past the
+            // protection band - see OrderDispatchHostedService's class doc comment for why this
+            // matters for the auto-square-off/partial-fill logic that depends on a fast, known
+            // terminal outcome.
+            Validity = "IOC",
+            Variety = leg.Variety,
+            Tag = leg.Tag,
+        };
+    }
+
+    /// <summary>Aligns a price to the nearest valid multiple of the instrument's tick size, in
+    /// whichever direction keeps the order at least as permissive as the raw band-adjusted price
+    /// - never more restrictive, since that could shave a fraction of a tick off the intended
+    /// slippage protection and occasionally cost a fill for no real benefit. For a BUY, rounds up
+    /// (willing to pay at least the intended protected price, never less); for a SELL, rounds
+    /// down (willing to accept at least as low, never more). Kite LIMIT prices are always at most
+    /// 2 decimal places regardless of tick size (0.05, 0.10, 1.00, ...), so the result is rounded
+    /// to 2 decimals afterwards as a final safety net against any residual fractional-paisa
+    /// noise from the multiplication/division.</summary>
+    private static decimal RoundToTick(decimal price, decimal tickSize, bool roundUp)
+    {
+        if (tickSize <= 0) return Math.Round(price, 2);
+        var ticks = price / tickSize;
+        var roundedTicks = roundUp ? Math.Ceiling(ticks) : Math.Floor(ticks);
+        return Math.Round(roundedTicks * tickSize, 2);
+    }
+}

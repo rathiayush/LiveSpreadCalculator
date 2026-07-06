@@ -18,12 +18,12 @@ namespace SpreadTrader.Core.Store;
 /// </summary>
 public sealed class CsvTriggerRuleStore : ITriggerRuleStore
 {
-    // AutoDirectionFromSpreadSign and ThresholdIsPercent were added after the first version of
-    // this file shipped, so they're appended at the end and ParseLine treats them as optional
-    // (defaulting to true / false respectively, matching the model defaults) - older CSVs
-    // without those columns still load fine.
+    // AutoDirectionFromSpreadSign, ThresholdIsPercent, and the three LinkedPosition* columns
+    // were all added after the first version of this file shipped, so they're appended at the
+    // end and ParseLine treats them as optional (defaulting to true / false / null respectively,
+    // matching the model defaults) - older CSVs without those columns still load fine.
     private const string Header =
-        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent";
+        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent,LinkedPositionTradingSymbol,LinkedPositionExchange,LinkedPositionProduct";
 
     private readonly string _filePath;
     private readonly object _fileLock = new();
@@ -203,7 +203,10 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
         r.IsArmed,
         r.LastFiredAt?.ToString("O", CultureInfo.InvariantCulture) ?? "",
         r.AutoDirectionFromSpreadSign,
-        r.ThresholdIsPercent);
+        r.ThresholdIsPercent,
+        Escape(r.LinkedPositionTradingSymbol ?? ""),
+        Escape(r.LinkedPositionExchange ?? ""),
+        Escape(r.LinkedPositionProduct ?? ""));
 
     private TriggerRule? ParseLine(string line)
     {
@@ -241,6 +244,9 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
                     : true,
                 ThresholdIsPercent = fields.Length > 15 && !string.IsNullOrEmpty(fields[15])
                     && bool.Parse(fields[15]),
+                LinkedPositionTradingSymbol = fields.Length > 16 && !string.IsNullOrEmpty(fields[16]) ? fields[16] : null,
+                LinkedPositionExchange = fields.Length > 17 && !string.IsNullOrEmpty(fields[17]) ? fields[17] : null,
+                LinkedPositionProduct = fields.Length > 18 && !string.IsNullOrEmpty(fields[18]) ? fields[18] : null,
             };
         }
         catch (Exception ex)

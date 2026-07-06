@@ -1,3 +1,16 @@
+https://livespreadcalculator-hmgsc4ddf9hba7gv.southindia-01.azurewebsites.net/api/auth/callback
+74.224.96.31
+104.211.225.167
+
+
+
+
+
+
+
+
+
+
 Zerodha Kite Connect - IP Whitelist Reference
 ==============================================
 (Kite Connect's IP Whitelist field accepts at most 2 IP addresses.)

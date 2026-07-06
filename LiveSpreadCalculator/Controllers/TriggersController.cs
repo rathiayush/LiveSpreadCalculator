@@ -34,11 +34,22 @@ public sealed class TriggersController : ControllerBase
     /// <summary>Seeds the Trigger Activity feed on page load (see hooks/spreadHub.js) - newest
     /// first, same in-memory history that SignalRTriggerEventSink/SignalROrderExecutionSink feed
     /// on every fire, so a browser refresh no longer loses everything since the page loaded.
-    /// Cleared only by a full backend restart (see InMemoryTriggerActivityStore) - deliberately
-    /// not persisted to disk, since this is a rolling activity log, not configuration.</summary>
+    /// Cleared by a full backend restart, or explicitly via DELETE below - deliberately not
+    /// persisted to disk, since this is a rolling activity log, not configuration.</summary>
     [HttpGet("activity")]
     public ActionResult<IReadOnlyList<TriggerActivityEntry>> GetActivity() =>
         Ok(_activityStore.GetRecent());
+
+    /// <summary>Wipes the Trigger Activity feed's server-side history - see TriggerFeed's Clear
+    /// button, which previously only cleared the current browser's local view (the history would
+    /// reappear from GetActivity above on refresh or in another tab). Has no effect on any
+    /// TriggerRule - only this rolling fired/executed log.</summary>
+    [HttpDelete("activity")]
+    public IActionResult ClearActivity()
+    {
+        _activityStore.Clear();
+        return NoContent();
+    }
 
     [HttpPost]
     public ActionResult<TriggerRule> Create([FromBody] CreateTriggerRuleRequest request)
@@ -79,14 +90,17 @@ public sealed class TriggersController : ControllerBase
             SpreadId = request.SpreadId,
             // WatchBothSides -> AbsoluteGreaterThanOrEqual with Threshold forced positive (its
             // sign is meaningless in this mode - see CreateTriggerRuleRequest.WatchBothSides).
-            // Otherwise, Operator is derived from the sign of Threshold, not taken from the
-            // client - see the comment on CreateTriggerRuleRequest.Threshold. Keeps this in
-            // permanent lockstep with the number the user actually typed instead of relying on
-            // a separately-set enum that could silently drift out of sync with it (see the same
-            // fix in Update below).
+            // Otherwise: FireWhenGreaterOrEqual, if the client sent one, wins outright - it exists
+            // specifically because sign-inference can't represent every valid rule (a negative
+            // target you're waiting for the spread to RISE to, e.g. an exit rule recovering from
+            // -15 toward -7 - see CreateTriggerRuleRequest.FireWhenGreaterOrEqual). Falls back to
+            // the original sign-of-Threshold inference when it's null, for every existing caller
+            // (TriggerForm.jsx's ordinary Add Trigger page) that never sends it.
             Operator = request.WatchBothSides
                 ? TriggerOperator.AbsoluteGreaterThanOrEqual
-                : request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual,
+                : request.FireWhenGreaterOrEqual is { } explicitDirection
+                    ? (explicitDirection ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual)
+                    : request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual,
             Threshold = request.WatchBothSides ? Math.Abs(request.Threshold) : request.Threshold,
             ThresholdIsPercent = request.ThresholdIsPercent,
             NearLegAction = request.NearLegAction,
@@ -97,6 +111,13 @@ public sealed class TriggersController : ControllerBase
             OrderType = request.OrderType,
             OneShot = request.OneShot,
             RearmBuffer = request.RearmBuffer,
+            // Only set for exit rules created from the Positions & PNL page - see
+            // TriggerRule.LinkedPositionTradingSymbol and PositionsController.SquareOff, which
+            // deletes any rule matching these three fields the moment that position is manually
+            // squared off.
+            LinkedPositionTradingSymbol = request.LinkedPositionTradingSymbol,
+            LinkedPositionExchange = request.LinkedPositionExchange,
+            LinkedPositionProduct = request.LinkedPositionProduct,
         };
 
         if (!TryUpsert(rule, out var problem)) return problem!;
@@ -158,6 +179,16 @@ public sealed class TriggersController : ControllerBase
             // the new magnitude, sign still ignored, same as Create.
             rule.Threshold = Math.Abs(request.Threshold);
         }
+        else if (request.FireWhenGreaterOrEqual is { } explicitDirection)
+        {
+            // Same escape hatch as Create: an exit trigger's raw signed target (e.g. -8, waiting
+            // for the spread to RISE to it) can't be represented by sign-of-Threshold inference,
+            // so honor the client's explicit direction and store Threshold exactly as sent - no
+            // Math.abs, no sign flip. See UpdateTriggerRuleRequest.FireWhenGreaterOrEqual and
+            // TriggerList.jsx's edit modal, which sends this only for rules linked to a position.
+            rule.Threshold = request.Threshold;
+            rule.Operator = explicitDirection ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual;
+        }
         else
         {
             rule.Threshold = request.Threshold;
@@ -172,21 +203,25 @@ public sealed class TriggersController : ControllerBase
         return Ok(rule);
     }
 
-    /// <summary>Applies one threshold/quantity/product template across many spreads at once
-    /// (e.g. the whole built universe) instead of configuring each one by hand. Creates two
-    /// percent-threshold, auto-direction rules per spread - see BulkTriggerTemplateService.
-    /// </summary>
+    /// <summary>Applies one target/quantity/product/legs template across many spreads at once
+    /// (e.g. the whole built universe) instead of configuring each one by hand. Creates ONE
+    /// fixed-leg rule per spread, no auto-direction - see BulkTriggerTemplateService's doc
+    /// comment for why the same fixed Buy/Sell legs apply everywhere in the batch regardless of
+    /// which leg is actually rich/cheap for each different underlying.</summary>
     [HttpPost("bulk")]
     public ActionResult<BulkTriggerTemplateResult> ApplyBulkTemplate([FromBody] BulkTriggerTemplateRequest request)
     {
-        if (request.ThresholdPercent <= 0)
-            return BadRequest("ThresholdPercent must be greater than zero.");
+        if (request.NearLegAction == TriggerLegAction.None && request.FarLegAction == TriggerLegAction.None)
+            return BadRequest("At least one of NearLegAction / FarLegAction must be set - otherwise the rule would fire and place no orders.");
         if (request.LotsPerTrade <= 0)
             return BadRequest("LotsPerTrade must be greater than zero.");
 
         var result = _bulkTemplate.Apply(
             request.SpreadIds,
-            request.ThresholdPercent,
+            request.TargetPercent,
+            request.FireWhenGreaterOrEqual,
+            request.NearLegAction,
+            request.FarLegAction,
             request.LotsPerTrade,
             request.Product,
             request.OrderType,
