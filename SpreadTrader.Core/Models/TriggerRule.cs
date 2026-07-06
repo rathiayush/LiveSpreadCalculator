@@ -77,4 +77,16 @@ public sealed class TriggerRule
     // Mutable runtime state - not thread-safe on its own, only touched under the store's lock.
     public bool IsArmed { get; set; } = true;
     public DateTimeOffset? LastFiredAt { get; set; }
+
+    /// <summary>Set only for exit rules created from the Positions & PNL page ("Add trigger" on
+    /// an open position - see LiveSpreadCalculator's AddPositionExitTriggerPage.jsx and
+    /// TriggersController.Create). Identifies the specific open position this rule exists to
+    /// protect/exit, so PositionsController.SquareOff can find and delete it the instant that
+    /// position is manually squared off - an exit rule left armed against a position that's
+    /// already been manually closed (fully or on this leg) no longer makes sense and could fire
+    /// against stale assumptions. Null for ordinary entry-style rules created from the Triggers
+    /// page, which aren't tied to any specific position.</summary>
+    public string? LinkedPositionTradingSymbol { get; set; }
+    public string? LinkedPositionExchange { get; set; }
+    public string? LinkedPositionProduct { get; set; }
 }

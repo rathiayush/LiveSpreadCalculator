@@ -37,6 +37,15 @@ let spreadsMap = {}
 let rankingList = []
 let triggerEventsList = []
 let connectionState = 'connecting'
+// Live open positions/PNL - see LivePositionsHostedService on the backend, which recomputes and
+// pushes this roughly every 750ms while any position is open (reacting instantly to order
+// postbacks in between). [] means "none open" just as much as "not loaded yet" - same as
+// spreadsMap/rankingList, there's no separate loading flag for this slice either.
+let positionsList = []
+// Last known error fetching positions (seed or an explicit refreshPositions() call) - null once
+// a fetch/push succeeds. Kept separate from positionsList so a transient fetch failure doesn't
+// have to also decide whether to blank out data that's still perfectly good to show.
+let positionsError = null
 // Non-null once the backend has told us (via "kiteAuthInvalidated" - see
 // KiteAuthFailureHandler/SignalRKiteAuthNotifier) that a real Kite API call failed with a
 // TokenException mid-session. Distinct from the one-time GET /api/auth/status check App.jsx
@@ -49,6 +58,8 @@ const rankingListeners = new Set()
 const triggerListeners = new Set()
 const connectionListeners = new Set()
 const kiteAuthListeners = new Set()
+const positionsListeners = new Set()
+const positionsErrorListeners = new Set()
 
 function notify(listeners) {
   for (const listener of listeners) listener()
@@ -71,14 +82,37 @@ const subscribeRanking = subscribe(rankingListeners)
 const subscribeTriggers = subscribe(triggerListeners)
 const subscribeConnection = subscribe(connectionListeners)
 const subscribeKiteAuth = subscribe(kiteAuthListeners)
+const subscribePositions = subscribe(positionsListeners)
+const subscribePositionsError = subscribe(positionsErrorListeners)
 
 const getSpreadsSnapshot = () => spreadsMap
 const getRankingSnapshot = () => rankingList
 const getTriggersSnapshot = () => triggerEventsList
 const getConnectionSnapshot = () => connectionState
 const getKiteAuthSnapshot = () => kiteAuthInvalidReason
+const getPositionsSnapshot = () => positionsList
+const getPositionsErrorSnapshot = () => positionsError
 
 let connection = null
+
+// Whether the Positions & PNL page currently wants live updates - set by joinPositionsView/
+// leavePositionsView (called from PositionsPage's mount/unmount). Kept as its own flag, separate
+// from just invoking the hub method once, because a SignalR reconnect gets a brand new connection
+// on the server (see SpreadHub.JoinPositions) - this flag is what lets connection.start()/
+// onreconnected below re-join automatically so the backend's LivePositionsHostedService doesn't
+// silently stop pushing PNL after a network blip just because the server-side "who's watching"
+// state reset.
+let positionsViewerWanted = false
+
+// Best-effort: only actually invokes when the hub is currently connected. If it isn't (still
+// starting up, or mid-reconnect), the connection.start()/onreconnected handlers below re-check
+// positionsViewerWanted once they complete and invoke JoinPositions again then - so a join
+// requested before the connection is ready is never silently lost.
+function invokeIfConnected(methodName) {
+  if (connection && connection.state === signalR.HubConnectionState.Connected) {
+    connection.invoke(methodName).catch((err) => console.error(`[spreadHub] ${methodName} failed:`, err))
+  }
+}
 
 // Runs exactly once, the first time this module is imported anywhere (ES modules are singletons)
 // - not tied to any component's mount/unmount, so there's no StrictMode double-connect concern
@@ -135,6 +169,21 @@ function ensureConnection() {
     })
     .catch((err) => console.error('[spreadHub] failed to seed trigger activity:', err))
 
+  // Seeds Positions & PNL from a plain REST call so the page isn't empty while waiting for the
+  // first "positionsUpdate" push (see LivePositionsHostedService on the backend).
+  api.getPositions()
+    .then((result) => {
+      positionsList = result.success ? result.positions : []
+      positionsError = result.success ? null : (result.errorMessage || 'Could not load positions.')
+      notify(positionsListeners)
+      notify(positionsErrorListeners)
+    })
+    .catch((err) => {
+      positionsError = err.message
+      notify(positionsErrorListeners)
+      console.error('[spreadHub] failed to seed positions:', err)
+    })
+
   // Each incoming message is already a full batch of everything that changed in one
   // recalculation cycle (see Engine:SpreadRecalculationIntervalMs / SpreadCalculationHostedService
   // on the backend) - no need to throttle again here.
@@ -184,6 +233,16 @@ function ensureConnection() {
     notify(triggerListeners)
   })
 
+  // Pushed roughly every 750ms while any position is open (see LivePositionsHostedService on
+  // the backend) - already a full replacement list, same idea as spreadUpdate/rankingUpdate, so
+  // this just overwrites rather than merging.
+  connection.on('positionsUpdate', (positions) => {
+    positionsList = positions
+    positionsError = null
+    notify(positionsListeners)
+    notify(positionsErrorListeners)
+  })
+
   // Pushed the instant KiteAuthFailureHandler sees a TokenException from any real Kite call
   // (order placement, margin check, order status/cancel) - see that class on the backend. The
   // session is already cleared server-side by the time this arrives, so GET /api/auth/status
@@ -201,6 +260,11 @@ function ensureConnection() {
   connection.onreconnected(() => {
     connectionState = 'connected'
     notify(connectionListeners)
+    // A reconnect gets a brand new connection (and Context.Items) on the server, so whatever
+    // this connection had joined before is gone server-side - re-join now if the Positions & PNL
+    // page is still open, otherwise LivePositionsHostedService would silently stay paused for
+    // this viewer after a network blip even though the page never actually left.
+    if (positionsViewerWanted) invokeIfConnected('JoinPositions')
   })
   connection.onclose((err) => {
     connectionState = 'disconnected'
@@ -217,6 +281,9 @@ function ensureConnection() {
     .then(() => {
       connectionState = 'connected'
       notify(connectionListeners)
+      // Covers the case where joinPositionsView() was called (PositionsPage mounted) before this
+      // initial connect finished - invokeIfConnected() inside it would have been a no-op then.
+      if (positionsViewerWanted) invokeIfConnected('JoinPositions')
     })
     .catch((err) => {
       console.error('[spreadHub] hub connection failed to start:', err)
@@ -241,11 +308,18 @@ export function stopConnection() {
   rankingList = []
   triggerEventsList = []
   kiteAuthInvalidReason = null
+  positionsList = []
+  positionsError = null
+  // Not carried over to the next login - if Positions & PNL happens to still be mounted across a
+  // logout/login, its own effect re-runs joinPositionsView() on the fresh connection anyway.
+  positionsViewerWanted = false
   connectionState = 'disconnected'
   notify(spreadsListeners)
   notify(rankingListeners)
   notify(triggerListeners)
   notify(connectionListeners)
+  notify(positionsListeners)
+  notify(positionsErrorListeners)
 }
 
 // spreadId -> latest SpreadSnapshot. High frequency - only call this from a component that's
@@ -285,4 +359,54 @@ export function useKiteAuthInvalidated() {
 export function clearKiteAuthInvalidated() {
   kiteAuthInvalidReason = null
   notify(kiteAuthListeners)
+}
+
+// Live open positions/PNL - see LivePositionsHostedService on the backend. Updates roughly every
+// 750ms while any position is open; [] both before the first load and once the account is flat.
+export function usePositions() {
+  return useSyncExternalStore(subscribePositions, getPositionsSnapshot)
+}
+
+// Last known error loading positions (seed or an explicit refreshPositions() call), or null.
+export function usePositionsError() {
+  return useSyncExternalStore(subscribePositionsError, getPositionsErrorSnapshot)
+}
+
+// Forces an immediate REST re-fetch instead of waiting for the next live push - wired to the
+// Positions & PNL page's manual refresh button. Updates the same shared store, so every
+// usePositions()/usePositionsError() subscriber sees the result, not just the caller.
+export function refreshPositions() {
+  return api.getPositions()
+    .then((result) => {
+      positionsList = result.success ? result.positions : positionsList
+      positionsError = result.success ? null : (result.errorMessage || 'Could not load positions.')
+      notify(positionsListeners)
+      notify(positionsErrorListeners)
+      return result
+    })
+    .catch((err) => {
+      positionsError = err.message
+      notify(positionsErrorListeners)
+      throw err
+    })
+}
+
+// Tells the backend a browser tab now has the Positions & PNL page open, so
+// LivePositionsHostedService resumes its Kite REST resync + live PNL push for as long as at
+// least one tab has called this - see PositionsViewerTracker/SpreadHub.JoinPositions on the
+// backend. Call from that page's mount; call leavePositionsView() on its unmount. Safe to call
+// even before the SignalR connection has finished starting (invokeIfConnected no-ops until
+// then, and positionsViewerWanted makes connection.start()/onreconnected pick it up once ready).
+export function joinPositionsView() {
+  positionsViewerWanted = true
+  ensureConnection()
+  invokeIfConnected('JoinPositions')
+}
+
+// Counterpart to joinPositionsView() - call on the Positions & PNL page's unmount. Does NOT stop
+// the shared SignalR connection itself (other pages/hooks may still be using it) - only tells the
+// backend this tab no longer needs live position pushes.
+export function leavePositionsView() {
+  positionsViewerWanted = false
+  invokeIfConnected('LeavePositions')
 }

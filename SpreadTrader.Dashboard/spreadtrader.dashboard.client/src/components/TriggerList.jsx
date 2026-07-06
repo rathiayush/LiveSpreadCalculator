@@ -59,11 +59,15 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
       // TriggersController.Create/Update) - back it out to lots for the input using the
       // spread's resolved lot size, so the edit modal matches what "Add trigger" collects.
       lots: lotSize > 0 ? Math.round(rule.quantity / lotSize) : '',
-      // Threshold is always shown as a plain positive magnitude now - the operator picker below
-      // carries the direction instead of the user having to read/preserve a sign (matches Add
-      // trigger's UX). AbsoluteGreaterThanOrEqual rules (watch-both-sides) already stored the
-      // threshold unsigned, so Math.abs is a no-op for those.
-      threshold: Math.abs(rule.threshold),
+      // Every rule (ordinary or exit) now stores Threshold as a raw signed absolute spread
+      // target, not a deviation magnitude - see TriggerForm.jsx/AddPositionExitTriggerPage.jsx,
+      // both of which send it exactly as typed. Show it as-is (no Math.abs): the >=/<= operator
+      // below can legitimately pair with EITHER sign (e.g. GreaterThanOrEqual with a negative
+      // target, an exit rule waiting for the spread to RISE to -7 from -15) - forcing it through
+      // a magnitude+sign-flip here would silently corrupt that on save. Only
+      // AbsoluteGreaterThanOrEqual (watch-both-sides) rules genuinely store an unsigned
+      // magnitude, so Math.abs is still correct (and a no-op) for those.
+      threshold: rule.operator === 'AbsoluteGreaterThanOrEqual' ? Math.abs(rule.threshold) : rule.threshold,
       thresholdIsPercent: rule.thresholdIsPercent,
       operator: rule.operator === 'LessThanOrEqual' ? 'lte' : 'gte',
     })
@@ -80,16 +84,24 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
     setEditBusy(true)
     setEditError(null)
     try {
-      const magnitude = Math.abs(Number(editForm.threshold))
-      // AbsoluteGreaterThanOrEqual (watch-both-sides) rules ignore sign entirely - Update can't
-      // switch a rule out of that mode, so just send the magnitude. Otherwise the operator
-      // picker below supplies the sign that TriggersController.Update re-derives Operator from.
-      const signedThreshold = editing.operator === 'AbsoluteGreaterThanOrEqual'
-        ? magnitude
-        : (editForm.operator === 'lte' ? -magnitude : magnitude)
+      let threshold
+      let fireWhenGreaterOrEqual
+      if (editing.operator === 'AbsoluteGreaterThanOrEqual') {
+        // Watch-both-sides ignores sign entirely - Update can't switch a rule out of that mode,
+        // so just send the magnitude; fireWhenGreaterOrEqual is meaningless here and left unset.
+        threshold = Math.abs(Number(editForm.threshold))
+      } else {
+        // Raw signed target, direction sent explicitly - same convention Create uses now for
+        // every rule (see TriggerForm.jsx), so a negative target the spread needs to RISE to
+        // (e.g. -8 with >=) round-trips correctly instead of being forced through a magnitude+
+        // sign-flip that can't represent every valid sign/operator combination.
+        threshold = Number(editForm.threshold)
+        fireWhenGreaterOrEqual = editForm.operator === 'gte'
+      }
       await api.updateTrigger(editing.id, {
         lots: Number(editForm.lots),
-        threshold: signedThreshold,
+        threshold,
+        fireWhenGreaterOrEqual,
         thresholdIsPercent: editForm.thresholdIsPercent,
       })
       setEditing(null)
@@ -251,11 +263,13 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
 
             <div>
               <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
-                Threshold {editForm.thresholdIsPercent ? "(% of the near leg's price)" : '(rupee spread amount)'}
+                {editing?.operator === 'AbsoluteGreaterThanOrEqual'
+                  ? `Deviation magnitude ${editForm.thresholdIsPercent ? '(%)' : '(rupee spread amount)'}`
+                  : `Target spread ${editForm.thresholdIsPercent ? '% (signed)' : 'value (signed)'}`}
               </Typography.Text>
               <InputNumber
                 step={0.05}
-                min={0.01}
+                min={editing?.operator === 'AbsoluteGreaterThanOrEqual' ? 0.01 : undefined}
                 value={editForm.threshold === '' ? null : editForm.threshold}
                 onChange={(v) => setEditForm((f) => ({ ...f, threshold: v ?? '' }))}
                 style={{ width: '100%' }}
@@ -263,17 +277,15 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
               <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
                 {editing?.operator === 'AbsoluteGreaterThanOrEqual'
                   ? "This rule watches both sides (direction decided automatically, live) - enter a plain positive number, sign is ignored either way."
-                  : "Enter a plain positive number - pick the direction below instead of a sign to remember."}
+                  : 'Enter the actual signed spread level (e.g. -8), not a magnitude - pick the comparison below.'}
               </Typography.Text>
             </div>
 
             {editing?.operator !== 'AbsoluteGreaterThanOrEqual' && (
               <div>
                 <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
-                  Fire when...
+                  Fire when the spread is...
                 </Typography.Text>
-                {/* Named after which leg gets pricier, not "rises/falls" - see the identical
-                    comment in TriggerForm.jsx for why. */}
                 <Radio.Group
                   block
                   optionType="button"
@@ -281,8 +293,8 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
                   value={editForm.operator}
                   onChange={(e) => setEditForm((f) => ({ ...f, operator: e.target.value }))}
                   options={[
-                    { label: 'Far leg gets pricier (near at discount)', value: 'gte' },
-                    { label: 'Near leg gets pricier (near at premium)', value: 'lte' },
+                    { label: `>= ${editForm.threshold === '' ? 'this' : editForm.threshold}${editForm.thresholdIsPercent ? '%' : ''}`, value: 'gte' },
+                    { label: `<= ${editForm.threshold === '' ? 'this' : editForm.threshold}${editForm.thresholdIsPercent ? '%' : ''}`, value: 'lte' },
                   ]}
                 />
               </div>

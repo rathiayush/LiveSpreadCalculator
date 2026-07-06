@@ -64,4 +64,12 @@ public sealed class InMemoryTriggerActivityStore : ITriggerActivityStore
             return _entries.ToArray();
         }
     }
+
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _entries.Clear();
+        }
+    }
 }

@@ -10,6 +10,7 @@ import {
   RiseOutlined,
   WifiOutlined,
   HistoryOutlined,
+  ScissorOutlined,
   SunOutlined,
   MoonOutlined,
   MenuOutlined,
@@ -26,6 +27,8 @@ import SymbolsPage from './pages/SymbolsPage'
 import ConfiguredSpreadsPage from './pages/ConfiguredSpreadsPage'
 import TriggersPage from './pages/TriggersPage'
 import TriggerActivityPage from './pages/TriggerActivityPage'
+import PositionsPage from './pages/PositionsPage'
+import AddPositionExitTriggerPage from './pages/AddPositionExitTriggerPage'
 
 const { Header, Content, Sider } = Layout
 
@@ -60,6 +63,7 @@ const NAV_ITEMS = [
   { key: '/spreads', label: 'Live Spreads', icon: <LineChartOutlined />, subtitle: 'Search and drill into any configured spread' },
   { key: '/triggers', label: 'Triggers', icon: <ThunderboltOutlined />, subtitle: 'Rules that fire baskets automatically' },
   { key: '/trigger-activity', label: 'Trigger Activity', icon: <HistoryOutlined />, subtitle: 'Live feed of trigger fires' },
+  { key: '/positions', label: 'Positions & PNL', icon: <ScissorOutlined />, subtitle: 'Open positions, live PNL, and manual square-off' },
   { key: '/symbols', label: 'Symbols', icon: <CloudSyncOutlined />, subtitle: 'Sync the F&O symbol list and build the tradeable universe', group: 'admin' },
   { key: '/configured-spreads', label: 'Configured Spreads', icon: <UnorderedListOutlined />, subtitle: 'Every spread definition currently streaming', group: 'admin' },
 ]
@@ -415,6 +419,14 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
             <Route
               path="/trigger-activity"
               element={<TriggerActivityPage />}
+            />
+            <Route
+              path="/positions"
+              element={<PositionsPage />}
+            />
+            <Route
+              path="/positions/exit-trigger"
+              element={<AddPositionExitTriggerPage />}
             />
           </Routes>
         </Content>

@@ -6,15 +6,16 @@ namespace SpreadTrader.Engine.Services;
 
 /// <summary>
 /// Applies one trigger template across many spreads at once - built for the "configure a
-/// trigger for all 100 stocks" case, where retyping the same threshold/quantity/product 100
-/// times one at a time isn't practical. For every target spread it creates two TriggerRules,
-/// both percent-threshold and auto-direction:
-///   - fires when spread % &gt;= +thresholdPercent (spread far above near - sell near, buy far)
-///   - fires when spread % &lt;= -thresholdPercent (spread far below near - buy near, sell far)
-/// so the strategy trades either side of the deviation without needing two separate manual
-/// configuration passes. Quantity is computed per stock as lotsPerTrade * that stock's exchange
-/// lot size (from InstrumentConfig.LotSize, resolved by the instrument master) rather than a
-/// single flat quantity, since lot sizes vary widely across the F&amp;O universe.
+/// trigger for all 100 stocks" case, where retyping the same threshold/quantity/product/legs 100
+/// times one at a time isn't practical. For every target spread it creates ONE TriggerRule with
+/// a fixed signed target %, explicit comparison, and fixed Buy/Sell/None leg actions - all
+/// applied identically across the whole batch (see BulkTriggerTemplateRequest). Deliberately no
+/// auto-direction: a single template can't know in advance which leg is actually rich/cheap for
+/// each different underlying, so the same fixed legs fire everywhere a spread crosses the target,
+/// regardless of which side of that stock's own spread is actually pricier at that moment.
+/// Quantity is computed per stock as lotsPerTrade * that stock's exchange lot size (from
+/// InstrumentConfig.LotSize, resolved by the instrument master) rather than a single flat
+/// quantity, since lot sizes vary widely across the F&amp;O universe.
 /// </summary>
 public sealed class BulkTriggerTemplateService
 {
@@ -34,7 +35,10 @@ public sealed class BulkTriggerTemplateService
 
     public BulkTriggerTemplateResult Apply(
         IReadOnlyList<string>? spreadIds,
-        decimal thresholdPercent,
+        decimal targetPercent,
+        bool fireWhenGreaterOrEqual,
+        TriggerLegAction nearLegAction,
+        TriggerLegAction farLegAction,
         int lotsPerTrade,
         string product,
         string orderType,
@@ -59,14 +63,25 @@ public sealed class BulkTriggerTemplateService
 
             var quantity = lotsPerTrade * lotSize;
 
+            // Pre-refactor bulk applications created two auto-direction rules per spread under
+            // these ids (see the old BULK-UP/BULK-DOWN pair, described in this class's doc
+            // comment history) - remove any left over from before this change so re-applying the
+            // template doesn't leave a stale auto-direction rule sitting alongside (and
+            // double-firing orders next to) the new single fixed-leg rule below. No-ops if
+            // they were never created (Remove returns false, ignored).
+            _ruleStore.Remove($"{spread.Id}-BULK-UP");
+            _ruleStore.Remove($"{spread.Id}-BULK-DOWN");
+
             _ruleStore.Upsert(new TriggerRule
             {
-                Id = $"{spread.Id}-BULK-UP",
+                Id = $"{spread.Id}-BULK",
                 SpreadId = spread.Id,
-                Operator = TriggerOperator.GreaterThanOrEqual,
-                Threshold = thresholdPercent,
+                Operator = fireWhenGreaterOrEqual ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual,
+                Threshold = targetPercent,
                 ThresholdIsPercent = true,
-                AutoDirectionFromSpreadSign = true,
+                AutoDirectionFromSpreadSign = false,
+                NearLegAction = nearLegAction,
+                FarLegAction = farLegAction,
                 Quantity = quantity,
                 Product = product,
                 OrderType = orderType,
@@ -74,22 +89,7 @@ public sealed class BulkTriggerTemplateService
                 RearmBuffer = rearmBufferPercent,
             });
 
-            _ruleStore.Upsert(new TriggerRule
-            {
-                Id = $"{spread.Id}-BULK-DOWN",
-                SpreadId = spread.Id,
-                Operator = TriggerOperator.LessThanOrEqual,
-                Threshold = -thresholdPercent,
-                ThresholdIsPercent = true,
-                AutoDirectionFromSpreadSign = true,
-                Quantity = quantity,
-                Product = product,
-                OrderType = orderType,
-                OneShot = oneShot,
-                RearmBuffer = rearmBufferPercent,
-            });
-
-            rulesCreated += 2;
+            rulesCreated += 1;
         }
 
         _logger.LogInformation(

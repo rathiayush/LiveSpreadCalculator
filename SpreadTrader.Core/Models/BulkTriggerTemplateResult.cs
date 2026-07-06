@@ -1,9 +1,10 @@
 namespace SpreadTrader.Core.Models;
 
 /// <summary>Result of applying one trigger template across many spreads at once - see
-/// BulkTriggerTemplateService. Two TriggerRules are created per spread (one for each direction
-/// of the spread % deviation), both with AutoDirectionFromSpreadSign so the actual buy/sell legs
-/// are resolved from the sign of the spread at fire time.</summary>
+/// BulkTriggerTemplateService. One TriggerRule is created per spread, with a fixed signed target
+/// %, explicit comparison, and fixed Buy/Sell/None leg actions applied identically across the
+/// whole batch (see BulkTriggerTemplateRequest) - no auto-direction, since a single template
+/// can't know in advance which leg is actually rich/cheap for each different underlying.</summary>
 public sealed record BulkTriggerTemplateResult(
     int SpreadCount,
     int RulesCreated,

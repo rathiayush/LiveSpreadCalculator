@@ -15,22 +15,10 @@ const generateRuleId = () =>
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 
-// Direction is now fully determined by watchBothSides - there's no separate "auto direction"
-// toggle to get out of sync with it:
-//   - watchBothSides ON  -> the engine always decides live which leg to buy/sell from the
-//     spread's actual direction the instant it crosses the threshold (classic calendar-spread
-//     arbitrage - sell whichever leg is rich, buy whichever is cheap). This is the only mode
-//     that makes sense here, since a fixed manual leg action can't correctly handle a deviation
-//     that might fire from either side.
-//   - watchBothSides OFF -> fully manual: an explicit operator (fires when the spread rises
-//     to/above, or falls to/below, the threshold) plus a fixed Buy/Sell/None per leg. Threshold
-//     is always typed as a plain positive magnitude - the operator picker carries the direction
-//     instead of the user having to remember "type a negative number for <=".
-// Matches the classic calendar-spread arbitrage convention (same one auto-direction/"watch both
-// sides" applies live): far leg pricier -> near is cheap -> buy near, sell far. Near leg pricier
-// -> near is rich -> sell near, buy far. See OPERATOR_LEG_DEFAULTS below - picking an operator
-// pre-fills the matching leg actions so the common case needs no extra clicks, while still
-// leaving both selects free to override for anything non-standard.
+// Picking an operator pre-fills the classic calendar-spread arb legs (far pricier -> buy near/
+// sell far, near pricier -> sell near/buy far) purely as a convenience starting point - both
+// Selects below stay fully editable, and nothing here is sent to the backend as-is (the actual
+// nearLegAction/farLegAction fields are).
 const OPERATOR_LEG_DEFAULTS = {
   gte: { nearLegAction: 'Buy', farLegAction: 'Sell' },
   lte: { nearLegAction: 'Sell', farLegAction: 'Buy' },
@@ -38,9 +26,8 @@ const OPERATOR_LEG_DEFAULTS = {
 
 const emptyForm = {
   spreadId: '',
-  threshold: '',
+  target: '',
   thresholdIsPercent: false,
-  watchBothSides: false,
   operator: 'gte',
   ...OPERATOR_LEG_DEFAULTS.gte,
   lots: '',
@@ -50,6 +37,14 @@ const emptyForm = {
   rearmBuffer: '0',
 }
 
+// Every trigger created here is now the same simple shape: a plain SIGNED absolute spread target
+// (e.g. -8, not a deviation magnitude away from zero), an explicit >= / <= comparison against it,
+// and manual Buy/Sell/None leg actions you set yourself - no "watch both sides"/auto-direction
+// mode where the engine decides live which leg to buy/sell from whichever side happened to cross.
+// Matches AddPositionExitTriggerPage's exit-trigger UX; the backend/engine already treat
+// Threshold as a literal comparison value (see SpreadCalculationHostedService.EvaluateTriggersAsync
+// - `measured >= rule.Threshold` / `measured <= rule.Threshold`), so this is a frontend
+// simplification only - no API contract changes were needed for single-spread rules.
 export default function TriggerForm({ spreads, onCreated }) {
   const [form, setForm] = useState(emptyForm)
   const [busy, setBusy] = useState(false)
@@ -71,31 +66,38 @@ export default function TriggerForm({ spreads, onCreated }) {
 
   const submit = async (e) => {
     e.preventDefault()
-    if (!form.watchBothSides && form.nearLegAction === 'None' && form.farLegAction === 'None') {
+    if (form.nearLegAction === 'None' && form.farLegAction === 'None') {
       setError('Pick a Buy/Sell action for at least one leg.')
       return
     }
-    if (Number(form.threshold) === 0) {
-      setError('Threshold must be non-zero.')
+    if (!form.spreadId) {
+      setError('Select a spread.')
+      return
+    }
+    if (form.target === '') {
+      setError('Enter a target spread value.')
       return
     }
     setBusy(true)
     setError(null)
     try {
-      const magnitude = Math.abs(Number(form.threshold))
-      // Operator only carries a sign when watchBothSides is off - watching both sides ignores
-      // sign entirely (see TriggersController.Create), so always send a plain positive number
-      // there regardless of what the (hidden, in that mode) operator field happens to hold.
-      const signedThreshold = (!form.watchBothSides && form.operator === 'lte') ? -magnitude : magnitude
       await api.createTrigger({
-        // form.operator is a frontend-only field (not part of the request contract) - harmless
-        // to send since unrecognized JSON properties are just ignored by ASP.NET Core's model
-        // binder, but autoDirectionFromSpreadSign below is the one the backend actually reads.
-        ...form,
-        autoDirectionFromSpreadSign: form.watchBothSides,
         id: generateRuleId(),
-        threshold: signedThreshold,
+        spreadId: form.spreadId,
+        // The raw signed target itself - NOT a magnitude. fireWhenGreaterOrEqual carries the
+        // direction explicitly instead of relying on this value's sign, so a negative target
+        // (e.g. -8) works identically whichever way you picked below.
+        threshold: Number(form.target),
+        fireWhenGreaterOrEqual: form.operator === 'gte',
+        thresholdIsPercent: form.thresholdIsPercent,
+        watchBothSides: false,
+        autoDirectionFromSpreadSign: false,
+        nearLegAction: form.nearLegAction,
+        farLegAction: form.farLegAction,
         lots: Number(form.lots),
+        product: form.product,
+        orderType: form.orderType,
+        oneShot: form.oneShot,
         rearmBuffer: Number(form.rearmBuffer || 0),
       })
       setForm({ ...emptyForm, spreadId: form.spreadId })
@@ -106,6 +108,8 @@ export default function TriggerForm({ spreads, onCreated }) {
       setBusy(false)
     }
   }
+
+  const unit = form.thresholdIsPercent ? '%' : ''
 
   return (
     <Card title={<Space><PlusCircleOutlined style={{ color: '#3ddc84' }} /> Add trigger</Space>} style={{ marginBottom: 16 }}>
@@ -134,83 +138,82 @@ export default function TriggerForm({ spreads, onCreated }) {
             <Col xs={24}>
               <InputNumber
                 step={0.05}
-                min={0.01}
-                placeholder={form.thresholdIsPercent ? 'Spread % deviation magnitude' : 'Ask-price spread deviation magnitude'}
-                value={form.threshold === '' ? null : form.threshold}
-                onChange={(v) => set('threshold')(v ?? '')}
+                placeholder={form.thresholdIsPercent ? 'Target spread % (signed)' : 'Target spread value (signed)'}
+                value={form.target === '' ? null : form.target}
+                onChange={(v) => set('target')(v ?? '')}
                 style={{ width: '100%' }}
               />
               <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
-                {form.watchBothSides
-                  ? "Enter a plain positive number - fires when the spread deviates at least this much in EITHER direction; the engine decides live which leg to buy/sell from the actual direction at that moment."
-                  : "Enter a plain positive number - pick the direction below (instead of a sign to remember) and which leg to buy/sell further down."}
+                Enter the actual spread level (e.g. -8), not a deviation magnitude - pick the
+                comparison below, and which leg to buy/sell further down.
               </Typography.Text>
             </Col>
           </Row>
 
           <Space>
             <Switch checked={form.thresholdIsPercent} onChange={set('thresholdIsPercent')} />
-            <Typography.Text>Threshold is a % of the near leg's price (instead of a rupee amount)</Typography.Text>
+            <Typography.Text>Target is a % of the near leg's price (instead of a rupee amount)</Typography.Text>
           </Space>
 
-          <Space>
-            <Switch checked={form.watchBothSides} onChange={set('watchBothSides')} />
-            <Typography.Text>Watch both sides (direction decided automatically, live)</Typography.Text>
-          </Space>
+          <Row gutter={[12, 12]}>
+            <Col xs={24}>
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
+                Fire when the spread is...
+              </Typography.Text>
+              <Radio.Group
+                block
+                optionType="button"
+                buttonStyle="solid"
+                value={form.operator}
+                onChange={(e) => setOperator(e.target.value)}
+                options={[
+                  { label: `Rises to ${form.target === '' ? 'this' : form.target}${unit} or higher`, value: 'gte' },
+                  { label: `Falls to ${form.target === '' ? 'this' : form.target}${unit} or lower`, value: 'lte' },
+                ]}
+              />
+            </Col>
+          </Row>
 
-          {form.watchBothSides ? (
-            <Typography.Text type="secondary">
-              Classic calendar-spread arbitrage, handled automatically: when the near (current
-              month) leg is trading at a premium to the far leg, the engine sells near and buys
-              far. When near is at a discount, it does the opposite - buys near, sells far. No
-              manual operator or leg selection needed here, since which side actually crossed the
-              threshold decides this live.
-            </Typography.Text>
-          ) : (
-            <>
-              <Row gutter={[12, 12]}>
-                <Col xs={24}>
-                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
-                    Fire when...
-                  </Typography.Text>
-                  {/* Named after which leg gets pricier, not "rises/falls" - which direction
-                      counts as "up" depends on which leg you're subtracting from which, so
-                      naming the leg directly instead of >=/<= removes that ambiguity. */}
-                  <Radio.Group
-                    block
-                    optionType="button"
-                    buttonStyle="solid"
-                    value={form.operator}
-                    onChange={(e) => setOperator(e.target.value)}
-                    options={[
-                      { label: 'Far leg gets pricier (near at discount)', value: 'gte' },
-                      { label: 'Near leg gets pricier (near at premium)', value: 'lte' },
-                    ]}
-                  />
-                </Col>
-              </Row>
+          <Row gutter={[12, 12]}>
+            <Col xs={24} sm={12}>
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Near leg action</Typography.Text>
+              <Select
+                value={form.nearLegAction}
+                onChange={set('nearLegAction')}
+                style={{ width: '100%' }}
+                options={LEG_ACTIONS.map((a) => ({ value: a, label: a }))}
+              />
+            </Col>
+            <Col xs={24} sm={12}>
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Far leg action</Typography.Text>
+              <Select
+                value={form.farLegAction}
+                onChange={set('farLegAction')}
+                style={{ width: '100%' }}
+                options={LEG_ACTIONS.map((a) => ({ value: a, label: a }))}
+              />
+            </Col>
+          </Row>
 
-              <Row gutter={[12, 12]}>
-                <Col xs={24} sm={12}>
-                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Near leg action</Typography.Text>
-                  <Select
-                    value={form.nearLegAction}
-                    onChange={set('nearLegAction')}
-                    style={{ width: '100%' }}
-                    options={LEG_ACTIONS.map((a) => ({ value: a, label: a }))}
-                  />
-                </Col>
-                <Col xs={24} sm={12}>
-                  <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Far leg action</Typography.Text>
-                  <Select
-                    value={form.farLegAction}
-                    onChange={set('farLegAction')}
-                    style={{ width: '100%' }}
-                    options={LEG_ACTIONS.map((a) => ({ value: a, label: a }))}
-                  />
-                </Col>
-              </Row>
-            </>
+          {/* Plain-English restatement of exactly what this rule will do, using the actual
+              contract names and choices made above - e.g. "once KPITTECH26JULFUT vs
+              KPITTECH26AUGFUT difference rises to -8 or higher: KPITTECH26JULFUT will be
+              BOUGHT, KPITTECH26AUGFUT will be SOLD" - named after the two actual contracts
+              instead of the abstract word "spread" or raw comparison symbols. */}
+          {selectedSpread && form.target !== '' && (form.nearLegAction !== 'None' || form.farLegAction !== 'None') && (
+            <Alert
+              type="info"
+              showIcon
+              message={
+                <>
+                  Once <b>{selectedSpread.nearLeg.tradingSymbol}</b> vs <b>{selectedSpread.farLeg.tradingSymbol}</b> difference <b>{form.operator === 'gte' ? `rises to ${form.target}${unit} or higher` : `falls to ${form.target}${unit} or lower`}</b>:
+                  {form.nearLegAction !== 'None' && <> <b>{selectedSpread.nearLeg.tradingSymbol}</b> will be <b>{form.nearLegAction === 'Buy' ? 'BOUGHT' : 'SOLD'}</b></>}
+                  {form.nearLegAction !== 'None' && form.farLegAction !== 'None' && ', and'}
+                  {form.farLegAction !== 'None' && <> <b>{selectedSpread.farLeg.tradingSymbol}</b> will be <b>{form.farLegAction === 'Buy' ? 'BOUGHT' : 'SOLD'}</b></>}
+                  .
+                </>
+              }
+            />
           )}
 
           <Row gutter={[12, 12]}>
