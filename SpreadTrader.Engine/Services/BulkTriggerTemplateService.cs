@@ -43,7 +43,8 @@ public sealed class BulkTriggerTemplateService
         string product,
         string orderType,
         bool oneShot,
-        decimal rearmBufferPercent)
+        decimal rearmBufferPercent,
+        decimal slippagePercent)
     {
         var targets = spreadIds is { Count: > 0 }
             ? spreadIds.Select(_spreadStore.Get).Where(s => s is not null).Select(s => s!).ToArray()
@@ -87,6 +88,7 @@ public sealed class BulkTriggerTemplateService
                 OrderType = orderType,
                 OneShot = oneShot,
                 RearmBuffer = rearmBufferPercent,
+                SlippagePercent = slippagePercent,
             });
 
             rulesCreated += 1;

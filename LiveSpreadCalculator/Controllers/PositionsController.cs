@@ -1,8 +1,10 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using LiveSpreadCalculator.Contracts;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
+using SpreadTrader.Engine;
 using SpreadTrader.Engine.Services;
 using SpreadTrader.KiteIntegration.Instruments;
 using SpreadTrader.KiteIntegration.Positions;
@@ -24,6 +26,7 @@ public sealed class PositionsController : ControllerBase
     private readonly InstrumentMasterService _instrumentMaster;
     private readonly IOrderExecutionSink _executionSink;
     private readonly ITriggerRuleStore _ruleStore;
+    private readonly EngineOptions _options;
     private readonly ILogger<PositionsController> _logger;
 
     public PositionsController(
@@ -33,6 +36,7 @@ public sealed class PositionsController : ControllerBase
         InstrumentMasterService instrumentMaster,
         IOrderExecutionSink executionSink,
         ITriggerRuleStore ruleStore,
+        IOptions<EngineOptions> options,
         ILogger<PositionsController> logger)
     {
         _positionsService = positionsService;
@@ -41,6 +45,7 @@ public sealed class PositionsController : ControllerBase
         _instrumentMaster = instrumentMaster;
         _executionSink = executionSink;
         _ruleStore = ruleStore;
+        _options = options.Value;
         _logger = logger;
     }
 
@@ -120,7 +125,10 @@ public sealed class PositionsController : ControllerBase
             leg,
             position.LastPrice,
             instrument?.TickSize ?? 0,
-            $"Manual square-off {position.TradingSymbol}");
+            $"Manual square-off {position.TradingSymbol}",
+            // No TriggerRule to draw a per-rule slippage from here - this is a manual, ad-hoc
+            // exit, not a fired rule - so it falls back to the app-wide EngineOptions default.
+            _options.MarketProtectionPercent);
 
         var result = await _orderGateway.PlaceOrderAsync(protectedLeg, cancellationToken);
 

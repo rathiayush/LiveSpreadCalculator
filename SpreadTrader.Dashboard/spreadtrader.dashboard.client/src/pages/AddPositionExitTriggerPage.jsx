@@ -66,6 +66,7 @@ export default function AddPositionExitTriggerPage() {
   const [farLegAction, setFarLegAction] = useState('None')
   const [lots, setLots] = useState('')
   const [orderType, setOrderType] = useState('MARKET')
+  const [slippagePercent, setSlippagePercent] = useState(0.10)
   const [oneShot, setOneShot] = useState(true)
   const [rearmBuffer, setRearmBuffer] = useState('0')
   const [busy, setBusy] = useState(false)
@@ -154,6 +155,10 @@ export default function AddPositionExitTriggerPage() {
       setSubmitError('Enter a target spread value.')
       return
     }
+    if (slippagePercent === '' || Number(slippagePercent) <= 0) {
+      setSubmitError('Enter a slippage % greater than 0.')
+      return
+    }
     if (fireWhenGreaterOrEqual === null) {
       setSubmitError('Waiting for a live spread value to determine fire direction - try again in a moment.')
       return
@@ -178,6 +183,7 @@ export default function AddPositionExitTriggerPage() {
         lots: Number(lots),
         product: position.product,
         orderType,
+        slippagePercent: Number(slippagePercent),
         oneShot,
         rearmBuffer: Number(rearmBuffer || 0),
         linkedPositionTradingSymbol: position.tradingSymbol,
@@ -329,7 +335,7 @@ export default function AddPositionExitTriggerPage() {
           </Row>
 
           <Row gutter={[12, 12]}>
-            <Col xs={24} sm={8}>
+            <Col xs={24} sm={6}>
               <InputNumber
                 min={1}
                 max={lotSize > 0 ? Math.floor(Math.abs(position.quantity) / lotSize) || undefined : undefined}
@@ -345,11 +351,11 @@ export default function AddPositionExitTriggerPage() {
                   : 'Lot size not resolved yet for this spread'}
               </Typography.Text>
             </Col>
-            <Col xs={24} sm={8}>
+            <Col xs={24} sm={6}>
               <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Product</Typography.Text>
               <Select value={position.product} disabled style={{ width: '100%' }} options={[{ value: position.product, label: position.product }]} />
             </Col>
-            <Col xs={24} sm={8}>
+            <Col xs={24} sm={6}>
               <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Order type</Typography.Text>
               <Select
                 value={orderType}
@@ -357,6 +363,21 @@ export default function AddPositionExitTriggerPage() {
                 style={{ width: '100%' }}
                 options={[{ value: 'MARKET', label: 'MARKET' }, { value: 'LIMIT', label: 'LIMIT' }]}
               />
+            </Col>
+            <Col xs={24} sm={6}>
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Slippage</Typography.Text>
+              <InputNumber
+                min={0.05}
+                step={0.05}
+                addonAfter="%"
+                placeholder="Slippage"
+                value={slippagePercent === '' ? null : slippagePercent}
+                onChange={(v) => setSlippagePercent(v ?? '')}
+                style={{ width: '100%' }}
+              />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                How far past the current price each leg may fill at, so the exit goes through right away. Steps in 0.05% increments - type any value.
+              </Typography.Text>
             </Col>
           </Row>
 

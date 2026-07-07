@@ -52,11 +52,17 @@ public sealed class EngineOptions
     /// <summary>Kite Connect's API rejects plain MARKET orders outright with "Market orders
     /// without market protection are not allowed via API" for F&amp;O - there's no
     /// market_protection flag in the order-placement API itself, so any leg configured as
-    /// OrderType=MARKET (including the AutoSquareOffOnPartialFill cleanup order) is converted to
-    /// a LIMIT order at a price this many percent through the best available quote instead: for
-    /// a BUY, best-ask * (1 + this/100); for a SELL, best-bid * (1 - this/100) - see
-    /// OrderDispatchHostedService.ApplyMarketProtection. This bounds worst-case slippage to the
-    /// same band real "market protection" would, while still all-but-guaranteeing a fill.
+    /// OrderType=MARKET is converted to a LIMIT order at a price some percent through the best
+    /// available quote instead: for a BUY, best-ask * (1 + pct/100); for a SELL,
+    /// best-bid * (1 - pct/100) - see MarketProtectionService.
+    ///
+    /// Trigger-fired baskets (and their partial-fill auto-square-off cleanup) use the firing
+    /// TriggerRule's own SlippagePercent instead of this value, since the right amount of
+    /// headroom varies contract to contract - see TriggerRule.SlippagePercent, chosen per rule
+    /// in the trigger-creation UI. This setting now only supplies the band for
+    /// PositionsController's manual square-off, where there's no TriggerRule to draw a
+    /// per-order value from.
+    ///
     /// Falls back to the last traded price if no live bid/ask depth has arrived yet for that
     /// instrument. Set to 0 to send the limit price exactly at the best quote (no slippage
     /// headroom at all - more likely to sit unfilled if the market moves between decision and

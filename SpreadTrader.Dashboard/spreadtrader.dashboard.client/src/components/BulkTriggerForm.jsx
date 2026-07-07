@@ -13,6 +13,7 @@ const emptyForm = {
   lotsPerTrade: 1,
   product: 'NRML',
   orderType: 'MARKET',
+  slippagePercent: 0.10,
   oneShot: true,
   rearmBufferPercent: 0.1,
 }
@@ -38,6 +39,10 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
       setError('Pick a Buy/Sell action for at least one leg.')
       return
     }
+    if (form.slippagePercent === '' || Number(form.slippagePercent) <= 0) {
+      setError('Enter a slippage % greater than 0.')
+      return
+    }
     setBusy(true)
     setError(null)
     setResult(null)
@@ -52,6 +57,7 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
         orderType: form.orderType,
         oneShot: form.oneShot,
         rearmBufferPercent: Number(form.rearmBufferPercent || 0),
+        slippagePercent: Number(form.slippagePercent),
       })
       setResult(res)
       onCreated()
@@ -160,7 +166,7 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
           </Row>
 
           <Row gutter={[12, 12]}>
-            <Col xs={24}>
+            <Col xs={24} sm={12}>
               <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Order type</Typography.Text>
               <Select
                 value={form.orderType}
@@ -168,6 +174,21 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
                 style={{ width: '100%' }}
                 options={[{ value: 'MARKET', label: 'MARKET' }, { value: 'LIMIT', label: 'LIMIT' }]}
               />
+            </Col>
+            <Col xs={24} sm={12}>
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Slippage (every spread)</Typography.Text>
+              <InputNumber
+                min={0.05}
+                step={0.05}
+                addonAfter="%"
+                placeholder="Slippage"
+                value={form.slippagePercent === '' ? null : form.slippagePercent}
+                onChange={(v) => set('slippagePercent')(v ?? '')}
+                style={{ width: '100%' }}
+              />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                How far past the current price each leg is allowed to fill at (on both legs, for every rule in the batch) so orders go through right away instead of possibly sitting unfilled. Steps in 0.05% increments - type any value.
+              </Typography.Text>
             </Col>
           </Row>
 

@@ -12,7 +12,7 @@ import {
 } from '@ant-design/icons'
 import { api } from '../api'
 
-const emptyEdit = { lots: '', threshold: '', thresholdIsPercent: false, operator: 'gte' }
+const emptyEdit = { lots: '', threshold: '', thresholdIsPercent: false, operator: 'gte', slippagePercent: 0.10 }
 
 export default function TriggerList({ triggers, onChanged, spreads }) {
   // The rule currently open in the edit modal, or null - available regardless of enabled/armed/
@@ -70,6 +70,7 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
       threshold: rule.operator === 'AbsoluteGreaterThanOrEqual' ? Math.abs(rule.threshold) : rule.threshold,
       thresholdIsPercent: rule.thresholdIsPercent,
       operator: rule.operator === 'LessThanOrEqual' ? 'lte' : 'gte',
+      slippagePercent: rule.slippagePercent,
     })
     setEditError(null)
   }
@@ -81,6 +82,10 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
 
   const saveEdit = async () => {
     if (!editing) return
+    if (editForm.slippagePercent === '' || Number(editForm.slippagePercent) <= 0) {
+      setEditError('Enter a slippage % greater than 0.')
+      return
+    }
     setEditBusy(true)
     setEditError(null)
     try {
@@ -103,6 +108,7 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
         threshold,
         fireWhenGreaterOrEqual,
         thresholdIsPercent: editForm.thresholdIsPercent,
+        slippagePercent: Number(editForm.slippagePercent),
       })
       setEditing(null)
       onChanged()
@@ -154,6 +160,12 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
       ),
     },
     { title: 'Qty', dataIndex: 'quantity', key: 'quantity' },
+    {
+      title: 'Slippage',
+      dataIndex: 'slippagePercent',
+      key: 'slippagePercent',
+      render: (v) => `${Number(v ?? 0).toFixed(2)}%`,
+    },
     {
       title: 'Status',
       key: 'status',
@@ -307,6 +319,22 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
               />
               <Typography.Text>Threshold is a % of the near leg's price (instead of a rupee amount)</Typography.Text>
             </Space>
+
+            <div>
+              <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Slippage</Typography.Text>
+              <InputNumber
+                min={0.05}
+                step={0.05}
+                addonAfter="%"
+                placeholder="Slippage"
+                value={editForm.slippagePercent === '' ? null : editForm.slippagePercent}
+                onChange={(v) => setEditForm((f) => ({ ...f, slippagePercent: v ?? '' }))}
+                style={{ width: '100%' }}
+              />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                How far past the current price both legs are allowed to fill at when this rule fires. Steps in 0.05% increments - type any value.
+              </Typography.Text>
+            </div>
 
             {editError && <Alert type="error" message={editError} showIcon />}
           </Space>

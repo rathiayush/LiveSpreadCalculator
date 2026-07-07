@@ -18,12 +18,13 @@ namespace SpreadTrader.Core.Store;
 /// </summary>
 public sealed class CsvTriggerRuleStore : ITriggerRuleStore
 {
-    // AutoDirectionFromSpreadSign, ThresholdIsPercent, and the three LinkedPosition* columns
-    // were all added after the first version of this file shipped, so they're appended at the
-    // end and ParseLine treats them as optional (defaulting to true / false / null respectively,
-    // matching the model defaults) - older CSVs without those columns still load fine.
+    // AutoDirectionFromSpreadSign, ThresholdIsPercent, the three LinkedPosition* columns, and
+    // SlippagePercent were all added after the first version of this file shipped, so they're
+    // appended at the end and ParseLine treats them as optional (defaulting to true / false /
+    // null / 0.10 respectively, matching the model defaults) - older CSVs without those columns
+    // still load fine.
     private const string Header =
-        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent,LinkedPositionTradingSymbol,LinkedPositionExchange,LinkedPositionProduct";
+        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent,LinkedPositionTradingSymbol,LinkedPositionExchange,LinkedPositionProduct,SlippagePercent";
 
     private readonly string _filePath;
     private readonly object _fileLock = new();
@@ -206,7 +207,8 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
         r.ThresholdIsPercent,
         Escape(r.LinkedPositionTradingSymbol ?? ""),
         Escape(r.LinkedPositionExchange ?? ""),
-        Escape(r.LinkedPositionProduct ?? ""));
+        Escape(r.LinkedPositionProduct ?? ""),
+        r.SlippagePercent.ToString(CultureInfo.InvariantCulture));
 
     private TriggerRule? ParseLine(string line)
     {
@@ -247,6 +249,9 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
                 LinkedPositionTradingSymbol = fields.Length > 16 && !string.IsNullOrEmpty(fields[16]) ? fields[16] : null,
                 LinkedPositionExchange = fields.Length > 17 && !string.IsNullOrEmpty(fields[17]) ? fields[17] : null,
                 LinkedPositionProduct = fields.Length > 18 && !string.IsNullOrEmpty(fields[18]) ? fields[18] : null,
+                SlippagePercent = fields.Length > 19 && !string.IsNullOrEmpty(fields[19])
+                    ? decimal.Parse(fields[19], CultureInfo.InvariantCulture)
+                    : 0.10m,
             };
         }
         catch (Exception ex)

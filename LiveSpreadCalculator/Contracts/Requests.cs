@@ -81,6 +81,13 @@ public sealed class CreateTriggerRuleRequest
     public bool OneShot { get; set; } = true;
     public decimal RearmBuffer { get; set; }
 
+    /// <summary>How far past the best bid/ask (as a percent) MarketProtectionService may price the
+    /// protected LIMIT order it substitutes for a MARKET leg when this rule fires - applied to
+    /// BOTH legs, each off its own reference price. User-chosen in the trigger-creation UI (one
+    /// of 0.05/0.10/0.15/0.20/0.25/0.30) instead of a single app-wide setting - see
+    /// TriggerRule.SlippagePercent.</summary>
+    public decimal SlippagePercent { get; set; } = 0.10m;
+
     /// <summary>Set only when this rule is created from the Positions & PNL page's "Add trigger"
     /// action on an open position (see AddPositionExitTriggerPage.jsx) - identifies the exact
     /// position this exit rule protects, so PositionsController.SquareOff can find and delete it
@@ -107,6 +114,11 @@ public sealed class UpdateTriggerRuleRequest
     /// negative target the spread needs to RISE to. Null (what the ordinary trigger edit flow
     /// still sends) preserves the original sign-of-Threshold inference.</summary>
     public bool? FireWhenGreaterOrEqual { get; set; }
+
+    /// <summary>Same convention as CreateTriggerRuleRequest.SlippagePercent - null leaves the
+    /// rule's existing SlippagePercent untouched, so callers that don't offer a slippage editor
+    /// don't need to round-trip the current value just to patch lots/threshold.</summary>
+    public decimal? SlippagePercent { get; set; }
 }
 
 /// <summary>Exits (fully or partially) an existing open position - see POST
@@ -165,4 +177,8 @@ public sealed class BulkTriggerTemplateRequest
     public string OrderType { get; set; } = "MARKET";
     public bool OneShot { get; set; } = true;
     public decimal RearmBufferPercent { get; set; }
+
+    /// <summary>Same convention as CreateTriggerRuleRequest.SlippagePercent, applied identically
+    /// to every rule created by this batch.</summary>
+    public decimal SlippagePercent { get; set; } = 0.10m;
 }

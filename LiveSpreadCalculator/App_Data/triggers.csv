@@ -1,2 +1,1 @@
-Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent,LinkedPositionTradingSymbol,LinkedPositionExchange,LinkedPositionProduct
-5ec45b10-fb02-4d89-a5d1-b7ecfc83e8f7,KPITTECH-JUL-AUG,LessThanOrEqual,-13,Buy,Sell,775,NRML,MARKET,True,0,False,False,2026-07-06T19:30:40.8388294+00:00,False,False,,,
+Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent,LinkedPositionTradingSymbol,LinkedPositionExchange,LinkedPositionProduct,SlippagePercent

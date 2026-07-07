@@ -50,42 +50,13 @@ export default function SpreadGrid({ definitions, liveValues }) {
       sorter: (a, b) => a.underlying.localeCompare(b.underlying),
       render: (v) => <strong>{v}</strong>,
     },
-    { title: 'Near leg', key: 'near', render: (_, r) => r.nearLeg.tradingSymbol },
-    { title: 'Far leg', key: 'far', render: (_, r) => r.farLeg.tradingSymbol },
-    {
-      title: 'Near price',
-      key: 'nearPrice',
-      render: (_, r) => {
-        if (!r.live) return '—'
-        const usesBid = r.live.direction === 'SellNear/BuyFar'
-        return <FlashValue value={r.live.nearPrice}>{`${r.live.nearPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`}</FlashValue>
-      },
-    },
-    {
-      title: 'Far price',
-      key: 'farPrice',
-      render: (_, r) => {
-        if (!r.live) return '—'
-        const usesBid = r.live.direction === 'BuyNear/SellFar'
-        return <FlashValue value={r.live.farPrice}>{`${r.live.farPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`}</FlashValue>
-      },
-    },
-    {
-      title: 'Spread',
-      key: 'spread',
-      sorter: (a, b) => (a.live?.spreadValue ?? 0) - (b.live?.spreadValue ?? 0),
-      render: (_, r) => r.live ? (
-        <FlashValue value={r.live.spreadValue}>
-          <span style={{ color: r.live.spreadValue >= 0 ? '#3ddc84' : '#ff5c5c', fontWeight: 600 }}>
-            {r.live.spreadValue.toFixed(2)}
-          </span>
-        </FlashValue>
-      ) : '—',
-    },
     {
       // Same |spread %| the Dashboard ranks by (spreadValue as a percentage of the near leg
       // price) - computed here rather than read off the live snapshot since the per-tick
       // spreadUpdate payload doesn't carry a percent field, only the ranking snapshot does.
+      // Leads the non-fixed columns (right after Underlying) since this - along with the
+      // rupee Spread next to it - is the number people actually scan this grid for; legs and
+      // per-leg prices are supporting detail, not the headline.
       title: 'Spread %',
       key: 'spreadPercent',
       sorter: (a, b) => {
@@ -105,7 +76,41 @@ export default function SpreadGrid({ definitions, liveValues }) {
         )
       },
     },
+    {
+      title: 'Spread',
+      key: 'spread',
+      sorter: (a, b) => (a.live?.spreadValue ?? 0) - (b.live?.spreadValue ?? 0),
+      render: (_, r) => r.live ? (
+        <FlashValue value={r.live.spreadValue}>
+          <span style={{ color: r.live.spreadValue >= 0 ? '#3ddc84' : '#ff5c5c', fontWeight: 600 }}>
+            {r.live.spreadValue.toFixed(2)}
+          </span>
+        </FlashValue>
+      ) : '—',
+    },
+    {
+      title: 'Near price',
+      key: 'nearPrice',
+      render: (_, r) => {
+        if (!r.live) return '—'
+        const usesBid = r.live.direction === 'SellNear/BuyFar'
+        return <FlashValue value={r.live.nearPrice}>{`${r.live.nearPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`}</FlashValue>
+      },
+    },
+    {
+      title: 'Far price',
+      key: 'farPrice',
+      render: (_, r) => {
+        if (!r.live) return '—'
+        const usesBid = r.live.direction === 'BuyNear/SellFar'
+        return <FlashValue value={r.live.farPrice}>{`${r.live.farPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`}</FlashValue>
+      },
+    },
     { title: 'Direction', key: 'direction', render: (_, r) => r.live ? <DirectionTag direction={r.live.direction} /> : '—' },
+    // Near/Far leg (the raw tradingsymbols) are supporting detail, not the headline - pushed to
+    // the end, right before Updated, rather than up near Underlying/Spread %/Spread.
+    { title: 'Near leg', key: 'near', render: (_, r) => r.nearLeg.tradingSymbol },
+    { title: 'Far leg', key: 'far', render: (_, r) => r.farLeg.tradingSymbol },
     { title: 'Updated', key: 'updated', render: (_, r) => r.live ? new Date(r.live.updatedAt).toLocaleTimeString() : '—' },
   ]
 
