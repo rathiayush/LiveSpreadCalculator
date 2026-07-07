@@ -75,6 +75,9 @@ public sealed class TriggersController : ControllerBase
         if (request.Lots <= 0)
             return BadRequest("Lots must be greater than zero.");
 
+        if (request.SlippagePercent <= 0)
+            return BadRequest("SlippagePercent must be greater than zero.");
+
         // Near and far month contracts on the same underlying always share the same lot size,
         // so either leg's resolved LotSize works - fall back to the far leg in case only that
         // one has been resolved yet. TriggerRule.Quantity is always the real, exchange-valid
@@ -111,6 +114,7 @@ public sealed class TriggersController : ControllerBase
             OrderType = request.OrderType,
             OneShot = request.OneShot,
             RearmBuffer = request.RearmBuffer,
+            SlippagePercent = request.SlippagePercent,
             // Only set for exit rules created from the Positions & PNL page - see
             // TriggerRule.LinkedPositionTradingSymbol and PositionsController.SquareOff, which
             // deletes any rule matching these three fields the moment that position is manually
@@ -165,12 +169,17 @@ public sealed class TriggersController : ControllerBase
         if (request.Lots <= 0)
             return BadRequest("Lots must be greater than zero.");
 
+        if (request.SlippagePercent is { } newSlippage && newSlippage <= 0)
+            return BadRequest("SlippagePercent must be greater than zero.");
+
         var lotSize = spread.NearLeg.LotSize > 0 ? spread.NearLeg.LotSize : spread.FarLeg.LotSize;
         if (lotSize <= 0)
             return BadRequest("Lot size not resolved yet for this spread - build/resolve the universe first.");
 
         rule.Quantity = request.Lots * lotSize;
         rule.ThresholdIsPercent = request.ThresholdIsPercent;
+        if (request.SlippagePercent is { } slippage)
+            rule.SlippagePercent = slippage;
 
         if (rule.Operator == TriggerOperator.AbsoluteGreaterThanOrEqual)
         {
@@ -215,6 +224,8 @@ public sealed class TriggersController : ControllerBase
             return BadRequest("At least one of NearLegAction / FarLegAction must be set - otherwise the rule would fire and place no orders.");
         if (request.LotsPerTrade <= 0)
             return BadRequest("LotsPerTrade must be greater than zero.");
+        if (request.SlippagePercent <= 0)
+            return BadRequest("SlippagePercent must be greater than zero.");
 
         var result = _bulkTemplate.Apply(
             request.SpreadIds,
@@ -226,7 +237,8 @@ public sealed class TriggersController : ControllerBase
             request.Product,
             request.OrderType,
             request.OneShot,
-            request.RearmBufferPercent);
+            request.RearmBufferPercent,
+            request.SlippagePercent);
 
         return Ok(result);
     }

@@ -1,5 +1,4 @@
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 
@@ -10,9 +9,17 @@ namespace SpreadTrader.Engine.Services;
 /// plain OrderType=MARKET leg for F&amp;O outright with "Market orders without market protection
 /// are not allowed via API", and there's no market_protection parameter on the order-placement
 /// endpoint itself to opt back in, so a bounded-slippage LIMIT order is the supported workaround:
-/// priced EngineOptions.MarketProtectionPercent through a reference price (best-ask*(1+pct) for a
+/// priced <paramref name="slippagePercent"/> through a reference price (best-ask*(1+pct) for a
 /// BUY, best-bid*(1-pct) for a SELL), aligned to the instrument's tick size, sent IOC so it fills
 /// what it can immediately and cancels the rest rather than resting.
+///
+/// The slippage percent is supplied per call, not read from a single app-wide setting - triggered
+/// baskets pass their own TriggerRule.SlippagePercent (user-chosen per rule, since a thinly-traded
+/// far-month contract may need more headroom than a liquid near-month one - see TriggerRule's doc
+/// comment), applied identically to whichever leg is being protected at the time, so both legs of
+/// a fired rule get the same percentage band, each off its own reference price. Callers with no
+/// rule to draw from (PositionsController's manual square-off) fall back to
+/// EngineOptions.MarketProtectionPercent as a fixed default.
 ///
 /// Extracted as its own service (rather than living only on OrderDispatchHostedService, where
 /// this logic originated) so every place in this app that fires a MARKET-type order - triggered
@@ -29,13 +36,11 @@ public sealed class MarketProtectionService
     private const decimal DefaultTickSize = 0.05m;
 
     private readonly ITickStore _tickStore;
-    private readonly EngineOptions _options;
     private readonly ILogger<MarketProtectionService> _logger;
 
-    public MarketProtectionService(ITickStore tickStore, IOptions<EngineOptions> options, ILogger<MarketProtectionService> logger)
+    public MarketProtectionService(ITickStore tickStore, ILogger<MarketProtectionService> logger)
     {
         _tickStore = tickStore;
-        _options = options.Value;
         _logger = logger;
     }
 
@@ -46,7 +51,7 @@ public sealed class MarketProtectionService
     /// band/rounding math. Returns <paramref name="leg"/> unchanged if it isn't OrderType=MARKET,
     /// or if no tick data has arrived yet for this instrument (Kite will then likely reject it,
     /// but there's no better price reference available to send instead).</summary>
-    public OrderLegRequest Protect(OrderLegRequest leg, uint instrumentToken, decimal tickSize, string context)
+    public OrderLegRequest Protect(OrderLegRequest leg, uint instrumentToken, decimal tickSize, string context, decimal slippagePercent)
     {
         if (!string.Equals(leg.OrderType, "MARKET", StringComparison.OrdinalIgnoreCase))
             return leg;
@@ -64,7 +69,7 @@ public sealed class MarketProtectionService
             ? (tick.BestAskPrice > 0 ? tick.BestAskPrice : tick.LastPrice)
             : (tick.BestBidPrice > 0 ? tick.BestBidPrice : tick.LastPrice);
 
-        return ProtectFromReference(leg, reference, tickSize, context);
+        return ProtectFromReference(leg, reference, tickSize, context, slippagePercent);
     }
 
     /// <summary>Reference-price variant, for callers that already have an up-to-date price
@@ -75,7 +80,7 @@ public sealed class MarketProtectionService
     ///
     /// Returns <paramref name="leg"/> unchanged if it isn't OrderType=MARKET, or if
     /// <paramref name="referencePrice"/> is not a usable (&gt; 0) price.</summary>
-    public OrderLegRequest ProtectFromReference(OrderLegRequest leg, decimal referencePrice, decimal tickSize, string context)
+    public OrderLegRequest ProtectFromReference(OrderLegRequest leg, decimal referencePrice, decimal tickSize, string context, decimal slippagePercent)
     {
         if (!string.Equals(leg.OrderType, "MARKET", StringComparison.OrdinalIgnoreCase))
             return leg;
@@ -87,7 +92,7 @@ public sealed class MarketProtectionService
         }
 
         var isBuy = string.Equals(leg.TransactionType, "BUY", StringComparison.OrdinalIgnoreCase);
-        var band = _options.MarketProtectionPercent / 100m;
+        var band = slippagePercent / 100m;
         var rawPrice = isBuy ? referencePrice * (1 + band) : referencePrice * (1 - band);
 
         var effectiveTickSize = tickSize > 0 ? tickSize : DefaultTickSize;
@@ -102,7 +107,7 @@ public sealed class MarketProtectionService
 
         _logger.LogInformation(
             "{Context}: {Symbol} MARKET -> protected LIMIT @ {Price} ({Percent}% band around {Reference}, tick size {TickSize})",
-            context, leg.TradingSymbol, protectedPrice, _options.MarketProtectionPercent, referencePrice, effectiveTickSize);
+            context, leg.TradingSymbol, protectedPrice, slippagePercent, referencePrice, effectiveTickSize);
 
         return new OrderLegRequest
         {

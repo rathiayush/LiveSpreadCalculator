@@ -137,7 +137,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         // Apply market protection before the margin check too, so the basket-margin figure
         // reflects what's actually about to be sent (a MARKET order and its protected-LIMIT
         // equivalent can price margin slightly differently).
-        var legs = legPlans.Select(plan => _marketProtection.Protect(plan.Request, plan.InstrumentToken, plan.TickSize, $"Rule {rule.Id}")).ToList();
+        var legs = legPlans.Select(plan => _marketProtection.Protect(plan.Request, plan.InstrumentToken, plan.TickSize, $"Rule {rule.Id}", rule.SlippagePercent)).ToList();
 
         // EngineOptions.VerifyMarginBeforeDispatch gates whether the margin service is called
         // at all here, not just whether its result can block dispatch - when it's off, this
@@ -185,7 +185,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
             await CancelStrayOpenOrdersAsync(rule.Id, legs, placements, stoppingToken);
 
             if (legPlans.Count > 1)
-                legResults.AddRange(await SquareOffPartialFillAsync(rule.Id, legPlans, placements, stoppingToken));
+                legResults.AddRange(await SquareOffPartialFillAsync(rule, legPlans, placements, stoppingToken));
         }
 
         await _executionSink.PublishAsync(
@@ -358,9 +358,13 @@ public sealed class OrderDispatchHostedService : BackgroundService
     /// here too); if even the square-off fails, that's logged as Critical since it means the
     /// account is left with a naked position needing manual attention. Returns the square-off
     /// attempts (IsSquareOff=true) so they're included in the published BasketExecutionEvent
-    /// alongside the original legs.</summary>
-    private async Task<List<OrderLegResult>> SquareOffPartialFillAsync(string ruleId, List<LegPlan> legPlans, OrderResult[] results, CancellationToken cancellationToken)
+    /// alongside the original legs. Takes the full TriggerRule (not just its id) so the flatten
+    /// leg can be protected with the SAME SlippagePercent the rule fired with, rather than some
+    /// separate default - this is cleanup for a basket that rule just placed, not a new,
+    /// independently-configured order.</summary>
+    private async Task<List<OrderLegResult>> SquareOffPartialFillAsync(TriggerRule rule, List<LegPlan> legPlans, OrderResult[] results, CancellationToken cancellationToken)
     {
+        var ruleId = rule.Id;
         var squareOffResults = new List<OrderLegResult>();
         // Paired with the actually-confirmed filled quantity (OrderResult.FilledQuantity, now
         // that PlaceOrderAsync verifies a real fill instead of just placement acceptance) -
@@ -398,7 +402,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
                 Tag = leg.Tag,
             };
 
-            var flatten = _marketProtection.Protect(flattenLeg, plan.InstrumentToken, plan.TickSize, $"Rule {ruleId} auto-square-off");
+            var flatten = _marketProtection.Protect(flattenLeg, plan.InstrumentToken, plan.TickSize, $"Rule {ruleId} auto-square-off", rule.SlippagePercent);
             var result = await _orderGateway.PlaceOrderAsync(flatten, cancellationToken);
             squareOffResults.Add(new OrderLegResult(flatten.TradingSymbol, flatten.TransactionType, flatten.Quantity, result.Success, result.OrderId, result.ErrorMessage, IsSquareOff: true, FilledQuantity: result.FilledQuantity, Price: flatten.Price, OrderType: flatten.OrderType, Status: result.Status));
 

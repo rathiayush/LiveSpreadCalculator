@@ -67,6 +67,16 @@ public sealed class TriggerRule
     public string Product { get; set; } = "NRML"; // NRML, MIS, CNC
     public string OrderType { get; set; } = "MARKET"; // MARKET, LIMIT
 
+    /// <summary>How far past the current best bid/ask (as a percent of that price) MarketProtectionService
+    /// is allowed to price the protected LIMIT order it substitutes for a MARKET leg (Kite rejects plain
+    /// MARKET orders on F&amp;O - see MarketProtectionService's doc comment). User-chosen per rule instead of
+    /// a single app-wide EngineOptions.MarketProtectionPercent, since a thinly-traded far-month contract
+    /// may need more headroom to fill immediately than a liquid near-month one. Applied identically to
+    /// BOTH legs when the rule fires - each leg is protected off its own reference price (its own best
+    /// bid/ask), so e.g. 0.10% widens the near leg's fill price by 0.10% of the near leg's price AND the
+    /// far leg's fill price by 0.10% of the far leg's (different rupee amount, same percentage).</summary>
+    public decimal SlippagePercent { get; set; } = 0.10m;
+
     /// <summary>If true, the rule disables itself after firing once. If false, it re-arms once
     /// the spread moves back across the threshold by RearmBufferValue.</summary>
     public bool OneShot { get; set; } = true;

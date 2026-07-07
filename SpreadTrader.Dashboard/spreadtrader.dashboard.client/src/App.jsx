@@ -438,8 +438,11 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
 
 function App() {
   const [mode, setMode] = useState(() => {
-    if (typeof window === 'undefined') return 'dark'
-    return window.localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark'
+    // Light is the default for anyone who hasn't picked a theme yet (no THEME_STORAGE_KEY in
+    // localStorage) - previously defaulted to dark. Once a user has toggled it either way, their
+    // explicit choice (stored below) always wins over this default.
+    if (typeof window === 'undefined') return 'light'
+    return window.localStorage.getItem(THEME_STORAGE_KEY) === 'dark' ? 'dark' : 'light'
   })
 
   // Mirrors the mode onto <html data-theme="..."> so index.css can flip the hand-written CSS

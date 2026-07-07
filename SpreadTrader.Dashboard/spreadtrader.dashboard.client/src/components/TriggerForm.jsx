@@ -33,6 +33,7 @@ const emptyForm = {
   lots: '',
   product: 'NRML',
   orderType: 'MARKET',
+  slippagePercent: 0.10,
   oneShot: true,
   rearmBuffer: '0',
 }
@@ -78,6 +79,10 @@ export default function TriggerForm({ spreads, onCreated }) {
       setError('Enter a target spread value.')
       return
     }
+    if (form.slippagePercent === '' || Number(form.slippagePercent) <= 0) {
+      setError('Enter a slippage % greater than 0.')
+      return
+    }
     setBusy(true)
     setError(null)
     try {
@@ -99,6 +104,7 @@ export default function TriggerForm({ spreads, onCreated }) {
         orderType: form.orderType,
         oneShot: form.oneShot,
         rearmBuffer: Number(form.rearmBuffer || 0),
+        slippagePercent: Number(form.slippagePercent),
       })
       setForm({ ...emptyForm, spreadId: form.spreadId })
       onCreated()
@@ -217,7 +223,7 @@ export default function TriggerForm({ spreads, onCreated }) {
           )}
 
           <Row gutter={[12, 12]}>
-            <Col xs={24} sm={8}>
+            <Col xs={24} sm={6}>
               <InputNumber
                 min={1}
                 placeholder="Lots"
@@ -232,7 +238,7 @@ export default function TriggerForm({ spreads, onCreated }) {
                   : 'Select a spread to see its lot size'}
               </Typography.Text>
             </Col>
-            <Col xs={24} sm={8}>
+            <Col xs={24} sm={6}>
               <Select
                 value={form.product}
                 onChange={set('product')}
@@ -240,13 +246,27 @@ export default function TriggerForm({ spreads, onCreated }) {
                 options={[{ value: 'NRML', label: 'NRML' }, { value: 'MIS', label: 'MIS' }]}
               />
             </Col>
-            <Col xs={24} sm={8}>
+            <Col xs={24} sm={6}>
               <Select
                 value={form.orderType}
                 onChange={set('orderType')}
                 style={{ width: '100%' }}
                 options={[{ value: 'MARKET', label: 'MARKET' }, { value: 'LIMIT', label: 'LIMIT' }]}
               />
+            </Col>
+            <Col xs={24} sm={6}>
+              <InputNumber
+                min={0.05}
+                step={0.05}
+                addonAfter="%"
+                placeholder="Slippage"
+                value={form.slippagePercent === '' ? null : form.slippagePercent}
+                onChange={(v) => set('slippagePercent')(v ?? '')}
+                style={{ width: '100%' }}
+              />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                How far past the current price we're allowed to fill at, on both legs, so the order goes through right away instead of possibly sitting unfilled. Steps in 0.05% increments - type any value.
+              </Typography.Text>
             </Col>
           </Row>
 
