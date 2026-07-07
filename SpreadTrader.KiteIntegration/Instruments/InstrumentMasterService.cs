@@ -8,10 +8,23 @@ using SpreadTrader.KiteIntegration;
 namespace SpreadTrader.KiteIntegration.Instruments;
 
 /// <summary>
-/// Downloads and caches Kite's full instrument master (a CSV dump of every tradeable
-/// instrument across all exchanges) so tradingsymbols like "RELIANCE26JULFUT" can be resolved
-/// to the numeric instrument_token the WebSocket API and instrument lookups require.
+/// Downloads and caches Kite's instrument master so tradingsymbols like "RELIANCE26JULFUT" can
+/// be resolved to the numeric instrument_token the WebSocket API and instrument lookups require.
 /// https://kite.trade/docs/connect/v3/market-quotes/#retrieving-the-full-instrument-list
+///
+/// Kite's full multi-exchange dump (GET /instruments) is 80,000-100,000+ rows across every
+/// exchange and instrument type - equities, every option strike/expiry, commodities, currencies,
+/// the lot. This app is exclusively NFO calendar-SPREAD FUTURES (see SpreadDefinition,
+/// KitePositionsService's NFO-only filter, every "exchange = NFO" comment in this codebase) - it
+/// never resolves, looks up, or displays anything else. So two things keep memory down to only
+/// what's actually needed instead of caching the entire market:
+///  1. Fetches GET /instruments/NFO (Kite's exchange-scoped endpoint) instead of the full
+///     multi-exchange dump - smaller download and less to parse up front.
+///  2. ParseCsv discards every row that isn't InstrumentType=="FUT" as it reads, rather than
+///     keeping the NFO options chain (the bulk of NFO's own row count - every strike x every
+///     expiry x every underlying) in memory and filtering it out later. The retained set ends up
+///     a few hundred rows (all NFO futures contracts) instead of tens of thousands.
+/// If this app ever needs another exchange/instrument type, both of those need revisiting.
 /// </summary>
 public sealed class InstrumentMasterService
 {
@@ -47,13 +60,15 @@ public sealed class InstrumentMasterService
             if (_instruments.Count > 0 && DateTimeOffset.UtcNow - _loadedAt < TimeSpan.FromHours(12))
                 return;
 
-            _logger.LogInformation("Downloading Kite instrument master...");
-            using var response = await _httpClient.GetAsync($"{_options.RestBaseUrl}/instruments", cancellationToken);
+            _logger.LogInformation("Downloading Kite NFO instrument master...");
+            // Exchange-scoped endpoint (NFO only) rather than the full multi-exchange dump - see
+            // the class doc comment for why this app never needs anything outside NFO futures.
+            using var response = await _httpClient.GetAsync($"{_options.RestBaseUrl}/instruments/NFO", cancellationToken);
             response.EnsureSuccessStatusCode();
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             _instruments = ParseCsv(stream);
             _loadedAt = DateTimeOffset.UtcNow;
-            _logger.LogInformation("Loaded {Count} instruments from Kite", _instruments.Count);
+            _logger.LogInformation("Loaded {Count} NFO futures instruments from Kite (options/other exchanges discarded during parse)", _instruments.Count);
         }
         finally
         {
@@ -160,6 +175,12 @@ public sealed class InstrumentMasterService
     {
         // Columns: instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,
         //          tick_size,lot_size,instrument_type,segment,exchange
+        //
+        // Even scoped to GET /instruments/NFO, most rows are the options chain (every strike x
+        // every expiry x every underlying) - this app only ever resolves/displays NFO FUTURES
+        // (see the class doc comment), so non-FUT rows are discarded right here rather than kept
+        // in the returned list and filtered out later by every caller. This is what keeps the
+        // retained set at a few hundred rows instead of tens of thousands.
         var result = new List<KiteInstrument>();
         using var reader = new StreamReader(stream);
         _ = reader.ReadLine(); // header
@@ -170,6 +191,7 @@ public sealed class InstrumentMasterService
             if (line.Length == 0) continue;
             var fields = SplitCsvLine(line);
             if (fields.Length < 12) continue;
+            if (!string.Equals(fields[9], "FUT", StringComparison.OrdinalIgnoreCase)) continue;
             if (!uint.TryParse(fields[0], out var token)) continue;
 
             DateOnly? expiry = DateOnly.TryParse(fields[5], out var exp) ? exp : null;
