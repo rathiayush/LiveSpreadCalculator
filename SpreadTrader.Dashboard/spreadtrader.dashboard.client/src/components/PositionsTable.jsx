@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Card, Table, Tag, Typography, Space, InputNumber, Button, Modal, Switch, Segmented, message, Alert, Tooltip, Grid, Checkbox, Divider } from 'antd'
+import { Card, Table, Tag, Typography, Space, InputNumber, Button, Modal, Switch, message, Alert, Tooltip, Grid, Checkbox, Divider } from 'antd'
 import { CloseCircleOutlined, ScissorOutlined, ReloadOutlined, ThunderboltOutlined, BellOutlined, ArrowDownOutlined, ArrowUpOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
@@ -707,35 +707,34 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
           style={{ width: '100%' }}
         />
         <div style={{ marginTop: 10 }}>
-          {/* Short labels + icon + red/green (same convention as PNL/Side coloring elsewhere in
-              this table) instead of a full sentence - antd's Segmented ellipsis-truncates long
-              labels rather than wrapping them, which was quietly hiding the "or lower"/"or higher"
-              half of each option. Color alone also makes the choice scannable at a glance without
-              reading either label closely. */}
-          <Segmented
-            block
-            size="large"
-            value={alertDirection}
-            onChange={(v) => { setAlertDirection(v); setAlertDirectionTouched(true) }}
-            options={[
-              {
-                value: 'fall',
-                label: (
-                  <span style={{ color: alertDirection === 'fall' ? '#cf1322' : undefined, fontWeight: 600 }}>
-                    <ArrowDownOutlined /> Falls to
-                  </span>
-                ),
-              },
-              {
-                value: 'rise',
-                label: (
-                  <span style={{ color: alertDirection === 'rise' ? '#3f8600' : undefined, fontWeight: 600 }}>
-                    <ArrowUpOutlined /> Rises to
-                  </span>
-                ),
-              },
-            ]}
-          />
+          {/* Two plain Buttons instead of antd's Segmented - Segmented's "selected" pill is styled
+              off theme tokens (colorBgElevated etc.), which weren't customized for it here and so
+              rendered with basically no visible contrast against this app's dark surface, making
+              it impossible to tell which direction was actually picked. A solid fill (same
+              red/green used for PNL everywhere else in this table) is unambiguous regardless of
+              theme and doesn't depend on any token being set correctly. */}
+          <Space.Compact block>
+            <Button
+              block
+              type="primary"
+              danger={alertDirection === 'fall'}
+              ghost={alertDirection !== 'fall'}
+              icon={<ArrowDownOutlined />}
+              onClick={() => { setAlertDirection('fall'); setAlertDirectionTouched(true) }}
+            >
+              Falls to
+            </Button>
+            <Button
+              block
+              type="primary"
+              ghost={alertDirection !== 'rise'}
+              icon={<ArrowUpOutlined />}
+              style={alertDirection === 'rise' ? { background: '#3f8600', borderColor: '#3f8600' } : { color: '#3f8600', borderColor: '#3f8600' }}
+              onClick={() => { setAlertDirection('rise'); setAlertDirectionTouched(true) }}
+            >
+              Rises to
+            </Button>
+          </Space.Compact>
           <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
             {alertDirection === 'fall'
               ? 'Fires once combined Exit PNL drops to your target or below.'
