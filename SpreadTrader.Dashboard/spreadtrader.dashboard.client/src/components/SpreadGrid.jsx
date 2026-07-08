@@ -64,6 +64,9 @@ export default function SpreadGrid({ definitions, liveValues }) {
         const pctB = b.live?.nearPrice ? (b.live.spreadValue / b.live.nearPrice) * 100 : 0
         return pctA - pctB
       },
+      // Default view: most negative spread % first, ascending up to most positive - still fully
+      // re-sortable/reversible by clicking the header.
+      defaultSortOrder: 'ascend',
       render: (_, r) => {
         if (!r.live || !r.live.nearPrice) return '—'
         const pct = (r.live.spreadValue / r.live.nearPrice) * 100

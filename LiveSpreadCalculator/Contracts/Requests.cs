@@ -138,6 +138,12 @@ public sealed class SquareOffPositionRequest
     /// position's own resolved LotSize (from GET /api/positions) and capped at however much of
     /// the position is actually open.</summary>
     public required int Lots { get; set; }
+
+    /// <summary>How far past the live reference price this MARKET-protection order may fill at -
+    /// user-entered on the square-off confirmation popup now, same convention as
+    /// TriggerRule.SlippagePercent, instead of always falling back to the app-wide
+    /// EngineOptions.MarketProtectionPercent default.</summary>
+    public decimal SlippagePercent { get; set; } = 0.10m;
 }
 
 /// <summary>One template applied across many spreads at once - see
@@ -181,4 +187,17 @@ public sealed class BulkTriggerTemplateRequest
     /// <summary>Same convention as CreateTriggerRuleRequest.SlippagePercent, applied identically
     /// to every rule created by this batch.</summary>
     public decimal SlippagePercent { get; set; } = 0.10m;
+}
+
+/// <summary>POST /api/pnl-alerts - see PnlAlertRule. Underlying is NOT accepted from the client;
+/// the controller resolves it itself from SpreadId via ISpreadDefinitionStore, same reasoning as
+/// SquareOffPositionRequest re-deriving side from the position's own sign rather than trusting the
+/// caller.</summary>
+public sealed class CreatePnlAlertRequest
+{
+    public required string Id { get; set; }
+    public required string SpreadId { get; set; }
+    public decimal TargetExitPnl { get; set; }
+    public bool FireWhenGreaterOrEqual { get; set; } = true;
+    public bool OneShot { get; set; } = true;
 }
