@@ -23,6 +23,13 @@ Write-Host "==> Copying built dashboard into wwwroot..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path "./publish/wwwroot" | Out-Null
 Copy-Item -Path "$ClientDir\dist\*" -Destination "./publish/wwwroot" -Recurse -Force
 
+# App_Data\** (see the .csproj's Content Include comment) copies EVERY App_Data file into every
+# publish output - that now includes the independent instances' own users.pradeep-1.csv /
+# users.pradeep-2.csv login files (see deploy-pradeep-1.ps1/deploy-pradeep-2.ps1), which have no
+# business in Production's deployment package. Production keeps using the tracked App_Data\
+# users.csv as-is (untouched); this just strips the other instances' files out of this zip.
+Get-ChildItem "./publish/App_Data/users.pradeep-*.csv" -ErrorAction SilentlyContinue | Remove-Item -Force
+
 Set-Location ./publish
 
 $zipPath = "../deploy.zip"
