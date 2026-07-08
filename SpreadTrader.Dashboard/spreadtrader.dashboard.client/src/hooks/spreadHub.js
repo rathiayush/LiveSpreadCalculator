@@ -328,6 +328,24 @@ export function useLiveSpreads() {
   return useSyncExternalStore(subscribeSpreads, getSpreadsSnapshot)
 }
 
+// Drops any spreadsMap entry whose id is no longer in the current spread definition list.
+// spreadsMap only ever gets entries added (from "spreadUpdate" pushes) - nothing removes one
+// when the underlying spread is deleted via Configured Spreads, so without this it grows a stale
+// key per deleted-then-recreated spread for the lifetime of the tab (bounded by universe size in
+// practice, but unbounded over a long enough session of add/delete churn). Mirrors the backend's
+// own self-prune of _lastValues in SpreadCalculationHostedService. Call this any time the current
+// spread id list is freshly known - see AppShell's loadSpreads().
+export function pruneSpreads(currentIds) {
+  const idSet = currentIds instanceof Set ? currentIds : new Set(currentIds)
+  const staleKeys = Object.keys(spreadsMap).filter((id) => !idSet.has(id))
+  if (staleKeys.length === 0) return
+
+  const next = { ...spreadsMap }
+  for (const id of staleKeys) delete next[id]
+  spreadsMap = next
+  notify(spreadsListeners)
+}
+
 // Full spread list sorted by |spread %| descending. Low frequency (every few minutes).
 export function useSpreadRanking() {
   return useSyncExternalStore(subscribeRanking, getRankingSnapshot)

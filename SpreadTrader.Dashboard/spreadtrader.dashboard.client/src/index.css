@@ -255,6 +255,17 @@ html[data-theme='light'] .stat-card:hover {
   background: var(--scrollbar-thumb-hover);
 }
 
+/* antd's InputNumber up/down stepper (the little arrows on the right, e.g. the Slippage % field
+   in the square-off popup, trigger forms, and Add exit trigger) is opacity:0 by default and only
+   reveals itself on `:hover` via `.ant-input-number:hover .ant-input-number-handler-wrap` - fine
+   with a mouse, but touch devices have no hover state at all, so on a phone/tablet the arrows
+   never show up regardless of screen width. Forcing it visible everywhere (not just below a
+   mobile breakpoint) since there's no real downside on desktop either - hover-to-reveal was never
+   a deliberate feature, just antd's default, and always-visible is one less thing to discover. */
+.ant-input-number-handler-wrap {
+  opacity: 1 !important;
+}
+
 /* Brief highlight on any live price/spread cell when its value changes - see
    components/FlashValue.jsx. Runs as a background-color animation (not a layout-affecting
    property) so it can't cause reflow/jank in a table re-rendering several times a second. */

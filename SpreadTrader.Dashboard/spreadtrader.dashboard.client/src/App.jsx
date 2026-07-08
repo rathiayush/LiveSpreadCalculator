@@ -19,7 +19,7 @@ import {
 } from '@ant-design/icons'
 import { api } from './api'
 import { useAuth, clearSession } from './auth'
-import { useSpreadHubConnectionState, useKiteAuthInvalidated, clearKiteAuthInvalidated, stopConnection } from './hooks/spreadHub'
+import { useSpreadHubConnectionState, useKiteAuthInvalidated, clearKiteAuthInvalidated, stopConnection, pruneSpreads } from './hooks/spreadHub'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import SpreadsPage from './pages/SpreadsPage'
@@ -322,7 +322,15 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
   const isDesktopNav = screens.lg ?? true
 
   const loadSpreads = useCallback(() => {
-    api.getSpreads().then(setSpreads).catch(() => {})
+    api.getSpreads()
+      .then((list) => {
+        setSpreads(list)
+        // Whenever we get a fresh definition list (mount, kiteLogin redirect, universe rebuild,
+        // or a spread being removed on Configured Spreads), drop any live-tick entries for ids
+        // that no longer exist - see pruneSpreads' doc comment in hooks/spreadHub.js.
+        pruneSpreads(list.map((s) => s.id))
+      })
+      .catch(() => {})
   }, [])
 
   const loadAuthStatus = useCallback(() => {

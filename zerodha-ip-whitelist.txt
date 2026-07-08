@@ -1,91 +1,12 @@
-https://livespreadcalculator-hmgsc4ddf9hba7gv.southindia-01.azurewebsites.net/api/auth/callback
-74.224.96.31
-104.211.225.167
+Production (LiveSpreadCalculator)
+IPs: 74.224.96.31, 104.211.225.167
+Redirect URL: https://livespreadcalculator-hmgsc4ddf9hba7gv.southindia-01.azurewebsites.net/api/auth/callback
 
+pradeep-1 (P1-LiveSpreadCalculator)
+IPs: 104.211.224.252, 104.211.224.253
+Redirect URL: https://p1-livespreadcalculator-bggucycqavegaset.southindia-01.azurewebsites.net/api/auth/callback
 
-
-
-
-
-
-
-
-
-Zerodha Kite Connect - IP Whitelist Reference
-==============================================
-(Kite Connect's IP Whitelist field accepts at most 2 IP addresses.)
-
-USE THESE (Azure Web App "LiveSpreadCalculator" outbound IPs - orders are placed from here):
-74.224.96.31
-104.211.225.167
-
-NOT USED (your own computer's IPv6 address, detected by Kite's console when browsing from
-your home/mobile network - not relevant unless you also place live orders by running the
-app locally instead of on Azure):
-2405:201:5c33:b847:e23a:93f9:da7c:d65
-2405:201:5c33:b847:8de2:b9f7:7351:388d
-
-Notes:
-- Only ORDER-PLACEMENT calls require IP whitelisting (per NSE rule effective 1 Apr 2025).
-  Market data, positions, quotes, etc. work from any IP.
-- Zerodha only allows one IP whitelist change per calendar week - avoid changing the Azure
-  App Service plan tier casually once these are set, since a tier change can change the
-  app's outbound IPs and force a re-whitelist.
-- Set in Kite Connect developer console: My Apps -> your app -> Profile -> IP Whitelist.
-
-
-Redirect URL (Kite Connect app settings)
-==========================================
-https://livespreadcalculator-hmgsc4ddf9hba7gv.southindia-01.azurewebsites.net/api/auth/callback
-
-This is AuthController.Callback in the code - Kite redirects the browser here with
-request_token after a successful login, and it's the only endpoint Zerodha itself needs to
-reach. Set it in the developer console under: My Apps -> your app -> Redirect URL.
-
-Local (dev) equivalent - from launchSettings.json:
-https://localhost:7105/api/auth/callback
-(http://localhost:5159/api/auth/callback if running the http profile instead of https)
-
-IMPORTANT: Kite Connect only supports ONE Redirect URL per app/API key - you can't list both
-the production and local URLs on the same app. If you want to test the Kite login flow
-locally without disturbing the production app, create a second app in the Kite Connect
-developer console (a separate API key/secret) with the localhost Redirect URL above, and use
-that key only in local appsettings/user-secrets - never in appsettings.Production.json.
-
-Postback URL: not implemented in this app (no endpoint receives Kite's order-update POSTs) -
-leave that field blank unless/until such an endpoint is added.
-
-
-================================================================
-pradeep-1 instance ("P1-LiveSpreadCalculator" Azure Web App)
-================================================================
-Separate Azure Web App = separate outbound IPs = its own Kite Connect app/IP whitelist entry,
-independent of Production's above.
-
-USE THESE:
-104.211.224.252
-104.211.224.253
-
-CAVEAT - unverified: a later check of Azure Portal -> P1-LiveSpreadCalculator -> Networking
-showed "Outbound IP addresses" as FIVE addresses (104.211.224.252/.253/.254/.255,
-104.211.225.0), not the 2-address list first seen (20.235.176.58, 104.211.224.252) - these two
-were picked from that list of 5 without confirming the app only ever actually sends from these
-two. If order placement gets randomly rejected by Kite after whitelisting these, it's most
-likely because Azure routed that particular request through one of the other three unlisted
-IPs (.254, .255, or 225.0) - check the App Service Plan tier/instance count, since a plan with
-multiple outbound IPs rotating across requests can't be reliably narrowed to 2 without either a
-tier change (to a plan with a short, stable outbound IP list) or NAT Gateway/VNet integration
-for a single dedicated outbound IP.
-
-Redirect URL (pradeep-1's own Kite Connect app):
-https://p1-livespreadcalculator-bggucycqavegaset.southindia-01.azurewebsites.net/api/auth/callback
-
-Notes:
-- Same rules as Production above: max 2 IPs, only order placement needs whitelisting, one
-  change per calendar week, and a change of App Service plan tier can change these IPs.
-- If pradeep-1's Kite Connect app is still Production's app (shared ApiKey), these IPs need to
-  be added there too, alongside Production's - Kite's whitelist is per-app, and the two-IP cap
-  is per app, not per Web App, so Production + pradeep-1 sharing one Kite app would need all 4
-  IPs whitelisted, which doesn't fit in 2. This is exactly why pradeep-1 was given its own Kite
-  Connect app/ApiKey (see appsettings.pradeep-1.json's Kite section) - so it has its own
-  independent 2-IP whitelist slot.
+Local dev
+Redirect URL: https://localhost:7105/api/auth/callback
+ 2405:201:5c33:b847:e23a:93f9:da7c:d65
+2405:201:5c33:b847:dd77:2b76:ab7d:bed9

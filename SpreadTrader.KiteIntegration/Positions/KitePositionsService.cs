@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 using SpreadTrader.KiteIntegration.Auth;
 using SpreadTrader.KiteIntegration.Instruments;
@@ -25,6 +26,7 @@ public sealed class KitePositionsService
     private readonly KiteSession _session;
     private readonly KiteAuthFailureHandler _authFailureHandler;
     private readonly InstrumentMasterService _instrumentMaster;
+    private readonly ITickStore _tickStore;
     private readonly ILogger<KitePositionsService> _logger;
 
     public KitePositionsService(
@@ -33,6 +35,7 @@ public sealed class KitePositionsService
         KiteSession session,
         KiteAuthFailureHandler authFailureHandler,
         InstrumentMasterService instrumentMaster,
+        ITickStore tickStore,
         ILogger<KitePositionsService> logger)
     {
         _httpClient = httpClient;
@@ -40,6 +43,7 @@ public sealed class KitePositionsService
         _session = session;
         _authFailureHandler = authFailureHandler;
         _instrumentMaster = instrumentMaster;
+        _tickStore = tickStore;
         _logger = logger;
     }
 
@@ -99,9 +103,16 @@ public sealed class KitePositionsService
                 var lastPrice = p.TryGetProperty("last_price", out var lp) && lp.TryGetDecimal(out var lpv) ? lpv : 0m;
                 var pnl = p.TryGetProperty("pnl", out var pn) && pn.TryGetDecimal(out var pnv) ? pnv : 0m;
 
-                var lotSize = _instrumentMaster.Find(tradingSymbol, exchange)?.LotSize ?? 0;
+                var instrument = _instrumentMaster.Find(tradingSymbol, exchange);
+                var lotSize = instrument?.LotSize ?? 0;
 
-                positions.Add(new PositionSnapshot(tradingSymbol, exchange, product, quantity, avgPrice, lastPrice, pnl, lotSize));
+                // Best-effort - see PositionExitPricing.Compute. Instrument token not resolved
+                // yet, or no tick received for it yet, both just fall back to (0, 0) rather than
+                // blocking the rest of this position's data from showing.
+                Tick? tick = instrument is { } i && _tickStore.TryGet(i.InstrumentToken, out var t) ? t : null;
+                var (exitPrice, exitPnl) = PositionExitPricing.Compute(quantity, avgPrice, tick);
+
+                positions.Add(new PositionSnapshot(tradingSymbol, exchange, product, quantity, avgPrice, lastPrice, pnl, lotSize, exitPrice, exitPnl));
             }
 
             return new PositionsResult(true, positions, null);

@@ -114,8 +114,11 @@ export const api = {
   // KitePositionsService. { success, positions: [...], errorMessage }.
   getPositions: () => authFetch('/api/positions').then(handle),
   // Exits `lots` lots of an open position (product must match - Kite nets down by product).
-  // Backend derives BUY vs SELL itself from the position's actual current sign.
-  squareOffPosition: (position, lots) =>
+  // Backend derives BUY vs SELL itself from the position's actual current sign. slippagePercent
+  // is whatever the user entered on the square-off confirmation popup (see PositionsTable.jsx) -
+  // required by the backend now (SquareOffPositionRequest.SlippagePercent), no more silent
+  // fallback to the app-wide EngineOptions default.
+  squareOffPosition: (position, lots, slippagePercent) =>
     authFetch('/api/positions/square-off', {
       method: 'POST',
       headers: jsonHeaders,
@@ -124,6 +127,14 @@ export const api = {
         exchange: position.exchange,
         product: position.product,
         lots,
+        slippagePercent,
       }),
     }).then(handle),
+
+  // Standing "notify me on Telegram" watches on a spread's combined Exit PNL - see PnlAlertRule /
+  // PnlAlertHostedService. No Update endpoint - PositionsTable.jsx deletes + recreates to change one.
+  getPnlAlerts: () => authFetch('/api/pnl-alerts').then(handle),
+  createPnlAlert: (alert) =>
+    authFetch('/api/pnl-alerts', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(alert) }).then(handle),
+  deletePnlAlert: (id) => authFetch(`/api/pnl-alerts/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
 }

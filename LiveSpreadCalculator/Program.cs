@@ -35,6 +35,10 @@ builder.Services.Configure<EngineOptions>(builder.Configuration.GetSection(Engin
 // deliberate stopgap, not a real database.
 var triggersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:TriggersCsvPath"] ?? "App_Data/triggers.csv");
+// PNL alerts (see PnlAlertRule/CsvPnlAlertStore) - same "small CSV so it survives a restart"
+// treatment as trigger rules, kept in its own file since the row shape is unrelated.
+var pnlAlertsCsvPath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:PnlAlertsCsvPath"] ?? "App_Data/pnl-alerts.csv");
 var futuresCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:FuturesCsvPath"] ?? "App_Data/futures_instruments.csv");
 // The universe builder pulls its symbol list live from the Kite instrument master (every stock
@@ -51,6 +55,8 @@ var usersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 builder.Services.AddSingleton<ITickStore, InMemoryTickStore>();
 builder.Services.AddSingleton<ITriggerRuleStore>(sp =>
     new CsvTriggerRuleStore(triggersCsvPath, sp.GetRequiredService<ILogger<CsvTriggerRuleStore>>()));
+builder.Services.AddSingleton<IPnlAlertStore>(sp =>
+    new CsvPnlAlertStore(pnlAlertsCsvPath, sp.GetRequiredService<ILogger<CsvPnlAlertStore>>()));
 builder.Services.AddSingleton<ISpreadDefinitionStore, InMemorySpreadDefinitionStore>();
 builder.Services.AddSingleton<ISpreadSnapshotCache, InMemorySpreadSnapshotCache>();
 builder.Services.AddSingleton<ISpreadRankingStore, InMemorySpreadRankingStore>();
@@ -106,6 +112,7 @@ builder.Services.AddSingleton(sp => new KitePositionsService(
     sp.GetRequiredService<KiteSession>(),
     sp.GetRequiredService<KiteAuthFailureHandler>(),
     sp.GetRequiredService<InstrumentMasterService>(),
+    sp.GetRequiredService<ITickStore>(),
     sp.GetRequiredService<ILogger<KitePositionsService>>()));
 
 // Shared MARKET -> protected-LIMIT conversion (Kite rejects raw MARKET orders for F&O - see
@@ -129,11 +136,19 @@ builder.Services.AddHostedService<SpreadRankingHostedService>();
 builder.Services.AddSingleton<ISpreadPublisher, SignalRSpreadPublisher>();
 builder.Services.AddSingleton<ITriggerEventSink, SignalRTriggerEventSink>();
 
-// Live PNL for the Positions & PNL dashboard page - see LivePositionsHostedService's doc comment
-// for how this gets an exact live figure from Kite's ticker/order-postback streams instead of
-// polling GET /api/positions on a timer. PositionsViewerTracker is the shared singleton SpreadHub
-// (JoinPositions/LeavePositions) and LivePositionsHostedService both depend on, so the hosted
-// service can skip its resync/push work entirely while no browser tab has that page open.
+// The single Kite positions poller for the whole process - see PositionsCache's doc comment for
+// why this was extracted out of LivePositionsHostedService (so PnlAlertHostedService below doesn't
+// need its own independent REST-polling loop hitting the same endpoint). Registered as itself (not
+// just IHostedService), same reasoning/pattern as TickIngestionHostedService just above, so both
+// LivePositionsHostedService and PnlAlertHostedService can inject the concrete type and call
+// GetProjected() directly.
+builder.Services.AddSingleton<PositionsCache>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<PositionsCache>());
+
+// Live PNL for the Positions & PNL dashboard page - see LivePositionsHostedService's doc comment.
+// PositionsViewerTracker is the shared singleton SpreadHub (JoinPositions/LeavePositions) and
+// LivePositionsHostedService both depend on, so the SignalR push can skip itself entirely while no
+// browser tab has that page open - PositionsCache above keeps resyncing regardless.
 builder.Services.AddSingleton<PositionsViewerTracker>();
 builder.Services.AddSingleton<IPositionsPublisher, SignalRPositionsPublisher>();
 builder.Services.AddHostedService<LivePositionsHostedService>();
@@ -159,6 +174,16 @@ builder.Services.AddSingleton<IOrderExecutionSink>(sp =>
 
     return new CompositeOrderExecutionSink(sinks, sp.GetRequiredService<ILogger<CompositeOrderExecutionSink>>());
 });
+
+// Standing "notify me on Telegram" watches on a spread's combined Exit PNL - see PnlAlertRule /
+// PnlAlertHostedService. Reads from PositionsCache above (zero extra Kite REST calls of its own).
+// Reuses the same TelegramOptions section configured above, through the generic IPnlAlertNotifier
+// abstraction rather than TelegramOrderExecutionSink, since Engine (where PnlAlertHostedService
+// lives) can't reference this web project's Notifications namespace directly - see
+// IPnlAlertNotifier's doc comment.
+builder.Services.AddHttpClient(nameof(TelegramNotifier), c => c.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddSingleton<IPnlAlertNotifier, TelegramNotifier>();
+builder.Services.AddHostedService<PnlAlertHostedService>();
 
 // ---- Universe builder + bulk trigger template ---------------------------------------------
 builder.Services.AddSingleton(sp => new UniverseBuilderService(
