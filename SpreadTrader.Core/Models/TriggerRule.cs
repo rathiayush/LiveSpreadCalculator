@@ -37,9 +37,12 @@ public sealed class TriggerRule
     public decimal Threshold { get; set; }
 
     /// <summary>When true, Threshold and RearmBuffer are read as a percentage of the near leg's
-    /// ask price (SpreadSnapshot.SpreadPercent) instead of an absolute rupee price difference
-    /// (SpreadSnapshot.SpreadValue). Needed for a single rule template to make sense across many
-    /// stocks trading at very different price levels - see the bulk trigger template endpoint.
+    /// price (SpreadSnapshot.SpreadPercent) instead of an absolute rupee price difference
+    /// (SpreadSnapshot.SpreadValue). The near leg's price here is whichever side of the book
+    /// you'd actually trade it at - its ask if buying, its bid if selling (see
+    /// SpreadCalculationHostedService.RunCycleAsync and SpreadSnapshot's own doc comment) - not
+    /// always the ask. Needed for a single rule template to make sense across many stocks trading
+    /// at very different price levels - see the bulk trigger template endpoint.
     /// </summary>
     public bool ThresholdIsPercent { get; set; }
 

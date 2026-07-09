@@ -122,7 +122,9 @@ export default function TriggerForm({ spreads, onCreated }) {
       <form onSubmit={submit}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <Typography.Text type="secondary">
-            Evaluated against each leg's best ask price, recomputed live - see the Dashboard page.
+            Evaluated against the live spread value - each leg priced at the side you'd actually
+            trade it (ask if you'd buy it, bid if you'd sell it), recomputed live - see the
+            Dashboard page.
           </Typography.Text>
 
           <Row gutter={[12, 12]}>
