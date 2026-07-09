@@ -194,9 +194,11 @@ public sealed class OrderDispatchHostedService : BackgroundService
     }
 
     /// <summary>Places the basket hedge-first: all BUY (long/hedge) legs go in first and only once
-    /// they've resolved to a fill are the SELL (short) legs sent. Returns an OrderResult[] aligned
-    /// to the input <paramref name="legs"/> order (same indices), so the caller's result mapping,
-    /// stray-order cancel, and partial-fill square-off logic are unchanged.
+    /// they've resolved to a FULL fill (every leg's FilledQuantity reaches its requested Quantity,
+    /// not merely OrderResult.Success - see the comment inline below) are the SELL (short) legs
+    /// sent. Returns an OrderResult[] aligned to the input <paramref name="legs"/> order (same
+    /// indices), so the caller's result mapping, stray-order cancel, and partial-fill square-off
+    /// logic are unchanged.
     ///
     /// Why sequence instead of firing everything at once: at placement time Kite blocks margin
     /// per order. A naked short leg reaching Kite before its hedge exists is charged the full
@@ -206,9 +208,10 @@ public sealed class OrderDispatchHostedService : BackgroundService
     /// low "final" margin) and goes through. The short side is also the risky/expensive side to be
     /// caught naked on, so doing buy-first keeps the brief inter-leg window on the safe long side.
     ///
-    /// If a hedge leg fails to fill, the short legs are deliberately NOT sent (placing a naked
-    /// short is exactly what this ordering exists to avoid) - they come back as skipped results,
-    /// and any hedge that did fill is flattened by the caller's partial-fill square-off.</summary>
+    /// If a hedge leg fails to fill - fully OR partially - the short legs are deliberately NOT sent
+    /// (placing a naked/undersized-hedge short is exactly what this ordering exists to avoid) -
+    /// they come back as skipped results, and any hedge quantity that did fill is flattened by the
+    /// caller's partial-fill square-off.</summary>
     private async Task<OrderResult[]> PlaceHedgeFirstAsync(List<OrderLegRequest> legs, string ruleId, CancellationToken cancellationToken)
     {
         var results = new OrderResult[legs.Count];
@@ -230,10 +233,15 @@ public sealed class OrderDispatchHostedService : BackgroundService
         if (sellIndices.Count == 0)
             return results;
 
-        // 2. Short (SELL) legs only once every hedge leg is confirmed filled (OrderResult.Success
-        //    is true only on a real fill - see OrderResult). No buy legs at all (a sell-only rule)
-        //    trivially passes: there's no hedge to wait for.
-        var hedgeInPlace = buyIndices.Count == 0 || buyIndices.All(i => results[i].Success);
+        // 2. Short (SELL) legs only once every hedge leg is confirmed filled AT ITS FULL
+        //    REQUESTED QUANTITY - not merely OrderResult.Success, which is true on ANY fill
+        //    greater than zero (see OrderResult.Success/FilledQuantity's own doc comments: an
+        //    IOC hedge leg can genuinely partial-fill, e.g. 10 of 20 lots on thin liquidity, and
+        //    still report Success=true). Treating that as "hedge in place" would send the SELL
+        //    leg(s) at their original full quantity, opening a naked short for the unhedged
+        //    difference - exactly what hedge-first sequencing exists to prevent. No buy legs at
+        //    all (a sell-only rule) trivially passes: there's no hedge to wait for.
+        var hedgeInPlace = buyIndices.Count == 0 || buyIndices.All(i => results[i].Success && results[i].FilledQuantity >= legs[i].Quantity);
         if (hedgeInPlace)
         {
             var sellResults = await Task.WhenAll(sellIndices.Select(i => _orderGateway.PlaceOrderAsync(legs[i], cancellationToken)));
@@ -243,7 +251,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         else
         {
             _logger.LogError(
-                "Rule {RuleId}: hedge (BUY) leg did not fill - NOT placing the SELL leg(s) to avoid opening a naked short. Any hedge that did fill will be squared off.",
+                "Rule {RuleId}: hedge (BUY) leg did not fully fill - NOT placing the SELL leg(s) to avoid opening a naked short. Any hedge quantity that did fill will be squared off.",
                 ruleId);
             foreach (var i in sellIndices)
                 results[i] = new OrderResult
@@ -251,7 +259,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
                     Success = false,
                     FilledQuantity = 0,
                     Status = "SKIPPED",
-                    ErrorMessage = "Skipped: hedge (BUY) leg did not fill, so the SELL leg was not placed (would have been a naked short).",
+                    ErrorMessage = "Skipped: hedge (BUY) leg did not fully fill, so the SELL leg was not placed (would have opened a naked short for the unhedged difference).",
                 };
         }
 

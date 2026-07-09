@@ -155,6 +155,10 @@ export default function AddPositionExitTriggerPage() {
       setSubmitError('Enter a target spread value.')
       return
     }
+    if (lots === '' || Number(lots) <= 0) {
+      setSubmitError('Enter a lots quantity greater than 0.')
+      return
+    }
     if (slippagePercent === '' || Number(slippagePercent) <= 0) {
       setSubmitError('Enter a slippage % greater than 0.')
       return

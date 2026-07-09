@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Card, Table, Button, Popconfirm, Tag, Typography, Space, Modal, InputNumber, Switch, Radio, Alert, Tooltip } from 'antd'
+import { Card, Table, Button, Popconfirm, Tag, Typography, Space, Modal, InputNumber, Switch, Radio, Alert, Tooltip, message } from 'antd'
 import {
   ThunderboltOutlined,
   CheckCircleOutlined,
@@ -36,19 +36,31 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
   }
 
   const toggle = async (rule) => {
-    if (rule.enabled) await api.disableTrigger(rule.id)
-    else await api.enableTrigger(rule.id)
-    onChanged()
+    try {
+      if (rule.enabled) await api.disableTrigger(rule.id)
+      else await api.enableTrigger(rule.id)
+      onChanged()
+    } catch (err) {
+      message.error(err.message || `Failed to ${rule.enabled ? 'disable' : 'enable'} trigger.`)
+    }
   }
 
   const remove = async (id) => {
-    await api.deleteTrigger(id)
-    onChanged()
+    try {
+      await api.deleteTrigger(id)
+      onChanged()
+    } catch (err) {
+      message.error(err.message || 'Failed to remove trigger.')
+    }
   }
 
   const removeAll = async () => {
-    await api.deleteAllTriggers()
-    onChanged()
+    try {
+      await api.deleteAllTriggers()
+      onChanged()
+    } catch (err) {
+      message.error(err.message || 'Failed to delete all triggers.')
+    }
   }
 
   const openEdit = (rule) => {
@@ -82,6 +94,14 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
 
   const saveEdit = async () => {
     if (!editing) return
+    if (editForm.lots === '' || Number(editForm.lots) <= 0) {
+      setEditError('Enter a lots quantity greater than 0.')
+      return
+    }
+    if (editForm.threshold === '') {
+      setEditError('Enter a target/threshold value.')
+      return
+    }
     if (editForm.slippagePercent === '' || Number(editForm.slippagePercent) <= 0) {
       setEditError('Enter a slippage % greater than 0.')
       return

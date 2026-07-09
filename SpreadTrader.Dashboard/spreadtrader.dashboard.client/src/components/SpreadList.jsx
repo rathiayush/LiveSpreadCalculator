@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Card, Table, Button, Popconfirm, Typography, Space, Input } from 'antd'
+import { Card, Table, Button, Popconfirm, Typography, Space, Input, message } from 'antd'
 import { UnorderedListOutlined, DeleteOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
@@ -26,8 +26,12 @@ export default function SpreadList({ spreads, onChanged }) {
   }, [spreads, search])
 
   const remove = async (id) => {
-    await api.deleteSpread(id)
-    onChanged()
+    try {
+      await api.deleteSpread(id)
+      onChanged()
+    } catch (err) {
+      message.error(err.message || 'Failed to remove spread.')
+    }
   }
 
   const columns = [

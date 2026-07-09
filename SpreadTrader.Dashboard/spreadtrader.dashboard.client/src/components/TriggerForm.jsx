@@ -79,6 +79,10 @@ export default function TriggerForm({ spreads, onCreated }) {
       setError('Enter a target spread value.')
       return
     }
+    if (form.lots === '' || Number(form.lots) <= 0) {
+      setError('Enter a lots quantity greater than 0.')
+      return
+    }
     if (form.slippagePercent === '' || Number(form.slippagePercent) <= 0) {
       setError('Enter a slippage % greater than 0.')
       return

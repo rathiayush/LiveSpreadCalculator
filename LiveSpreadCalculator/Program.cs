@@ -204,6 +204,31 @@ builder.Services.AddSingleton(sp =>
 builder.Services.AddSingleton<JwtTokenService>();
 
 var jwtOptions = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+
+// Fail startup outright rather than silently accepting a known-bad signing key in a real
+// deployment - the committed appsettings.json/appsettings.Production.json value is a dev-only
+// placeholder (see JwtOptions' doc comment), and anyone who has read the source can already see
+// it. If it's still in place outside Development, every endpoint behind the JWT fallback policy
+// (including order placement/square-off) is forgeable by anyone, not just logged-in users - that
+// must be caught here, at boot, not discovered later. Only applies outside Development so local
+// `dotnet run` without any override keeps working with the placeholder as before.
+if (!builder.Environment.IsDevelopment())
+{
+    const string KnownPlaceholderKey = "CHANGE_ME_dev_only_2f8b0c5a9e14d7360bd4a1f6c8e239105a7bce4d0f1928";
+    if (string.IsNullOrEmpty(jwtOptions.Key) || jwtOptions.Key == KnownPlaceholderKey || jwtOptions.Key.StartsWith("CHANGE_ME", StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException(
+            "Jwt:Key is missing or still set to the committed dev-only placeholder. Set a real, random " +
+            "secret via the Jwt__Key environment variable (or an equivalent secret store) before running " +
+            "outside Development - see JwtOptions' doc comment and DEPLOYMENT.md.");
+    }
+    if (jwtOptions.Key.Length < 32)
+    {
+        throw new InvalidOperationException(
+            "Jwt:Key is shorter than the minimum 32 characters (256 bits) required for HMAC-SHA256 signing.");
+    }
+}
+
 var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.Key));
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)

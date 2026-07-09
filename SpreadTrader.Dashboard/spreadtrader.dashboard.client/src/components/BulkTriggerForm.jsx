@@ -39,6 +39,10 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
       setError('Pick a Buy/Sell action for at least one leg.')
       return
     }
+    if (form.lotsPerTrade === '' || form.lotsPerTrade === null || Number(form.lotsPerTrade) <= 0) {
+      setError('Enter a lots-per-trade quantity greater than 0.')
+      return
+    }
     if (form.slippagePercent === '' || Number(form.slippagePercent) <= 0) {
       setError('Enter a slippage % greater than 0.')
       return
