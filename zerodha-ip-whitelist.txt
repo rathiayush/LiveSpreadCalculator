@@ -6,6 +6,10 @@ pradeep-1 (P1-LiveSpreadCalculator)
 IPs: 104.211.224.252, 104.211.224.253
 Redirect URL: https://p1-livespreadcalculator-bggucycqavegaset.southindia-01.azurewebsites.net/api/auth/callback
 
+pradeep-2 (P2-LiveSpreadCalculator)
+IPs: 13.71.123.138, 13.71.112.75, 13.71.113.249, 13.71.116.201, 13.71.123.138
+Redirect URL: https://p2-livespreadcalculator-eqawhkg9ffe0eje4.southindia-01.azurewebsites.net/api/auth/callback
+
 Local dev
 Redirect URL: https://localhost:7105/api/auth/callback
  2405:201:5c33:b847:e23a:93f9:da7c:d65
