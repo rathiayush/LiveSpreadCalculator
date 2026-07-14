@@ -1,5 +1,6 @@
 using System.Net.Http.Json;
 using System.Text;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
@@ -22,15 +23,18 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly TelegramOptions _options;
+    private readonly IHostEnvironment _environment;
     private readonly ILogger<TelegramOrderExecutionSink> _logger;
 
     public TelegramOrderExecutionSink(
         IHttpClientFactory httpClientFactory,
         IOptions<TelegramOptions> options,
+        IHostEnvironment environment,
         ILogger<TelegramOrderExecutionSink> logger)
     {
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
+        _environment = environment;
         _logger = logger;
     }
 
@@ -55,13 +59,18 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
 
     private async Task SendAsync(string text, string ruleId)
     {
+        // Prepend which deployed instance (Production / pradeep-1 / pradeep-2 / Development) this
+        // came from - see TelegramEnvTag - so an order fill on pradeep-1 can't be mistaken for one
+        // on Production when they share the same Telegram chat.
+        var taggedText = $"{TelegramEnvTag.Build(_environment)}{text}";
+
         var url = $"{_options.ApiBaseUrl.TrimEnd('/')}/bot{_options.BotToken}/sendMessage";
         try
         {
             var client = _httpClientFactory.CreateClient(nameof(TelegramOrderExecutionSink));
             using var response = await client.PostAsJsonAsync(
                 url,
-                new { chat_id = _options.ChatId, parse_mode = "HTML", text },
+                new { chat_id = _options.ChatId, parse_mode = "HTML", text = taggedText },
                 CancellationToken.None);
 
             if (!response.IsSuccessStatusCode)

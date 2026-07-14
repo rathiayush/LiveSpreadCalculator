@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Threading;
 
 namespace LiveSpreadCalculator.Auth;
 
@@ -49,14 +50,34 @@ public sealed class CsvUserStore
             yield break;
         }
 
-        string[] lines;
-        try
+        // Retried a few times with a short backoff, same as CsvTriggerRuleStore's WithRetry: on
+        // Windows/Azure App Service, App_Data\users.csv can be transiently locked by an antivirus
+        // scanner, a sync client, the search indexer, or (in this case) another request/process
+        // that has the file briefly open. Without a retry, that transient lock throws here, gets
+        // swallowed below, and this single login attempt sees "zero users" and gets a spurious 401
+        // - "correct password, sometimes fails" is exactly what that looks like from the outside.
+        // A plain retry on the next login attempt happens to "fix" it too, which is why this was
+        // easy to write off as flaky rather than a real bug.
+        string[]? lines = null;
+        Exception? lastError = null;
+        const int maxAttempts = 6;
+        for (var attempt = 1; attempt <= maxAttempts && lines is null; attempt++)
         {
-            lines = File.ReadAllLines(_csvPath);
+            try
+            {
+                lines = File.ReadAllLines(_csvPath);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                lastError = ex;
+                if (attempt < maxAttempts)
+                    Thread.Sleep(150 * attempt);
+            }
         }
-        catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+
+        if (lines is null)
         {
-            _logger.LogError(ex, "Could not read users CSV at {Path}", _csvPath);
+            _logger.LogError(lastError, "Could not read users CSV at {Path} after {Attempts} attempt(s)", _csvPath, maxAttempts);
             yield break;
         }
 

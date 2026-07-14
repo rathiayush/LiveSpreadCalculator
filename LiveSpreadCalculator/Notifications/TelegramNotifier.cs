@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Abstractions;
 
@@ -21,12 +22,18 @@ public sealed class TelegramNotifier : IPnlAlertNotifier
 {
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly TelegramOptions _options;
+    private readonly IHostEnvironment _environment;
     private readonly ILogger<TelegramNotifier> _logger;
 
-    public TelegramNotifier(IHttpClientFactory httpClientFactory, IOptions<TelegramOptions> options, ILogger<TelegramNotifier> logger)
+    public TelegramNotifier(
+        IHttpClientFactory httpClientFactory,
+        IOptions<TelegramOptions> options,
+        IHostEnvironment environment,
+        ILogger<TelegramNotifier> logger)
     {
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
+        _environment = environment;
         _logger = logger;
     }
 
@@ -38,13 +45,19 @@ public sealed class TelegramNotifier : IPnlAlertNotifier
             return;
         }
 
+        // Prepend which deployed instance (Production / pradeep-1 / pradeep-2 / Development) this
+        // came from - ASPNETCORE_ENVIRONMENT, set per-instance by deploy.ps1/deploy-pradeep-*.ps1 -
+        // so a PNL alert firing on pradeep-1 can't be mistaken for one on Production when they share
+        // the same Telegram chat.
+        var taggedText = $"{TelegramEnvTag.Build(_environment)}{text}";
+
         var url = $"{_options.ApiBaseUrl.TrimEnd('/')}/bot{_options.BotToken}/sendMessage";
         try
         {
             var client = _httpClientFactory.CreateClient(nameof(TelegramNotifier));
             using var response = await client.PostAsJsonAsync(
                 url,
-                new { chat_id = _options.ChatId, parse_mode = "HTML", text },
+                new { chat_id = _options.ChatId, parse_mode = "HTML", text = taggedText },
                 cancellationToken);
 
             if (!response.IsSuccessStatusCode)
