@@ -67,6 +67,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
     private readonly KiteMarginService _marginService;
     private readonly IOrderExecutionSink _executionSink;
     private readonly MarketProtectionService _marketProtection;
+    private readonly TriggerInFlightTracker _inFlightTracker;
     private readonly EngineOptions _options;
     private readonly ILogger<OrderDispatchHostedService> _logger;
 
@@ -78,6 +79,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         KiteMarginService marginService,
         IOrderExecutionSink executionSink,
         MarketProtectionService marketProtection,
+        TriggerInFlightTracker inFlightTracker,
         IOptions<EngineOptions> options,
         ILogger<OrderDispatchHostedService> logger)
     {
@@ -88,6 +90,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         _marginService = marginService;
         _executionSink = executionSink;
         _marketProtection = marketProtection;
+        _inFlightTracker = inFlightTracker;
         _options = options.Value;
         _logger = logger;
     }
@@ -96,6 +99,12 @@ public sealed class OrderDispatchHostedService : BackgroundService
     {
         await foreach (var triggerEvent in _triggerChannel.Reader.ReadAllAsync(stoppingToken))
         {
+            // Marked in flight for the whole duration of DispatchAsync (margin check, hedge-first
+            // placement, partial-fill square-off - everything), cleared in `finally` regardless of
+            // outcome, so TriggerInFlightTracker.IsInFlight reflects "still resolving" vs "outcome
+            // known" accurately for the bounded multi-shot trigger mode - see
+            // SpreadCalculationHostedService.EvaluateTriggersAsync.
+            _inFlightTracker.MarkInFlight(triggerEvent.RuleId);
             try
             {
                 await DispatchAsync(triggerEvent, stoppingToken);
@@ -106,6 +115,10 @@ public sealed class OrderDispatchHostedService : BackgroundService
                 // Underlying/order kind aren't known here (the exception could have come from
                 // anywhere in DispatchAsync) - fall back to the spread id and "Unknown".
                 await PublishBlockedAsync(triggerEvent, triggerEvent.SpreadId, "Unknown", $"Dispatch threw: {ex.Message}", stoppingToken);
+            }
+            finally
+            {
+                _inFlightTracker.MarkComplete(triggerEvent.RuleId);
             }
         }
     }

@@ -77,10 +77,29 @@ public sealed class TriggerRule
     /// far leg's fill price by 0.10% of the far leg's (different rupee amount, same percentage).</summary>
     public decimal SlippagePercent { get; set; } = 0.10m;
 
-    /// <summary>If true, the rule disables itself after firing once. If false, it re-arms once
-    /// the spread moves back across the threshold by RearmBufferValue.</summary>
+    /// <summary>If true, the rule disables itself after firing once. If false and MaxFireCount is
+    /// 0, it re-arms once the spread moves back across the threshold by RearmBuffer (the
+    /// "standing" mode - see SpreadCalculationHostedService.EvaluateTriggersAsync). If false and
+    /// MaxFireCount is greater than 0, RearmBuffer/IsArmed are ignored entirely - see MaxFireCount.</summary>
     public bool OneShot { get; set; } = true;
     public decimal RearmBuffer { get; set; }
+
+    /// <summary>Bounded "N sequential shots" mode - only consulted when OneShot is false. 0 (the
+    /// default) means "not using this mode", i.e. the standing/RearmBuffer behavior above applies
+    /// unchanged. A positive value schedules exactly that many total fires with NO re-arm/
+    /// hysteresis requirement at all: as soon as the condition is true again AND the previous
+    /// shot's basket dispatch has resolved (filled or rejected - see TriggerInFlightTracker) AND
+    /// EngineOptions.MinFireIntervalPerRuleMs has elapsed, the next shot fires immediately - it
+    /// does NOT wait for the spread to retreat past a buffer first. If the condition happens to be
+    /// false when checked, that check is simply skipped without losing progress; the count picks
+    /// back up next time the condition is true again. The rule disables itself once FireCount
+    /// reaches MaxFireCount, same as a plain one-shot rule does after its single fire.</summary>
+    public int MaxFireCount { get; set; }
+
+    /// <summary>How many of MaxFireCount's scheduled shots have fired so far. Persisted so a
+    /// restart doesn't lose progress or re-fire shots that already went out. Only meaningful when
+    /// MaxFireCount > 0.</summary>
+    public int FireCount { get; set; }
 
     public bool Enabled { get; set; } = true;
 

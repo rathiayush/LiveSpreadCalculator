@@ -18,13 +18,13 @@ namespace SpreadTrader.Core.Store;
 /// </summary>
 public sealed class CsvTriggerRuleStore : ITriggerRuleStore
 {
-    // AutoDirectionFromSpreadSign, ThresholdIsPercent, the three LinkedPosition* columns, and
-    // SlippagePercent were all added after the first version of this file shipped, so they're
-    // appended at the end and ParseLine treats them as optional (defaulting to true / false /
-    // null / 0.10 respectively, matching the model defaults) - older CSVs without those columns
-    // still load fine.
+    // AutoDirectionFromSpreadSign, ThresholdIsPercent, the three LinkedPosition* columns,
+    // SlippagePercent, and MaxFireCount/FireCount were all added after the first version of this
+    // file shipped, so they're appended at the end and ParseLine treats them as optional
+    // (defaulting to true / false / null / 0.10 / 0 / 0 respectively, matching the model
+    // defaults) - older CSVs without those columns still load fine.
     private const string Header =
-        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent,LinkedPositionTradingSymbol,LinkedPositionExchange,LinkedPositionProduct,SlippagePercent";
+        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent,LinkedPositionTradingSymbol,LinkedPositionExchange,LinkedPositionProduct,SlippagePercent,MaxFireCount,FireCount";
 
     private readonly string _filePath;
     private readonly object _fileLock = new();
@@ -208,7 +208,9 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
         Escape(r.LinkedPositionTradingSymbol ?? ""),
         Escape(r.LinkedPositionExchange ?? ""),
         Escape(r.LinkedPositionProduct ?? ""),
-        r.SlippagePercent.ToString(CultureInfo.InvariantCulture));
+        r.SlippagePercent.ToString(CultureInfo.InvariantCulture),
+        r.MaxFireCount.ToString(CultureInfo.InvariantCulture),
+        r.FireCount.ToString(CultureInfo.InvariantCulture));
 
     private TriggerRule? ParseLine(string line)
     {
@@ -252,6 +254,12 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
                 SlippagePercent = fields.Length > 19 && !string.IsNullOrEmpty(fields[19])
                     ? decimal.Parse(fields[19], CultureInfo.InvariantCulture)
                     : 0.10m,
+                MaxFireCount = fields.Length > 20 && !string.IsNullOrEmpty(fields[20])
+                    ? int.Parse(fields[20], CultureInfo.InvariantCulture)
+                    : 0,
+                FireCount = fields.Length > 21 && !string.IsNullOrEmpty(fields[21])
+                    ? int.Parse(fields[21], CultureInfo.InvariantCulture)
+                    : 0,
             };
         }
         catch (Exception ex)

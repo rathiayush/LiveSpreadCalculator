@@ -35,7 +35,7 @@ const emptyForm = {
   orderType: 'MARKET',
   slippagePercent: 0.10,
   oneShot: true,
-  rearmBuffer: '0',
+  maxFireCount: 3,
 }
 
 // Every trigger created here is now the same simple shape: a plain SIGNED absolute spread target
@@ -83,6 +83,10 @@ export default function TriggerForm({ spreads, onCreated }) {
       setError('Enter a slippage % greater than 0.')
       return
     }
+    if (!form.oneShot && (form.maxFireCount === '' || Number(form.maxFireCount) <= 0)) {
+      setError('Enter a number of shots (1-15).')
+      return
+    }
     setBusy(true)
     setError(null)
     try {
@@ -103,7 +107,13 @@ export default function TriggerForm({ spreads, onCreated }) {
         product: form.product,
         orderType: form.orderType,
         oneShot: form.oneShot,
-        rearmBuffer: Number(form.rearmBuffer || 0),
+        // The old "leave blank for unlimited, gated by a re-arm buffer" mode isn't offered by
+        // this form any more - RearmBuffer is still a real field on the backend (existing rules
+        // created before this change may still use it), just always 0 (unused) for anything
+        // created here from now on. See TriggerRule.MaxFireCount for the mode this form uses
+        // instead: a required, bounded shot count with no buffer needed.
+        rearmBuffer: 0,
+        maxFireCount: Number(form.maxFireCount || 0),
         slippagePercent: Number(form.slippagePercent),
       })
       setForm({ ...emptyForm, spreadId: form.spreadId })
@@ -271,23 +281,37 @@ export default function TriggerForm({ spreads, onCreated }) {
           </Row>
 
           <Row gutter={[12, 12]} align="middle">
-            <Col xs={24} sm={12}>
+            <Col xs={24}>
               <Space>
                 <Switch checked={form.oneShot} onChange={set('oneShot')} />
                 <Typography.Text>One-shot (disable after firing)</Typography.Text>
               </Space>
-            </Col>
-            <Col xs={24} sm={12}>
-              <InputNumber
-                step={0.05}
-                placeholder="Re-arm buffer"
-                value={form.rearmBuffer === '' ? null : form.rearmBuffer}
-                onChange={(v) => set('rearmBuffer')(v ?? '')}
-                disabled={form.oneShot}
-                style={{ width: '100%' }}
-              />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                {form.oneShot
+                  ? `Fires once when the spread first crosses ${form.target === '' ? 'your target' : form.target}${unit}, then disables itself - it won't fire again until you re-enable it. Turn this off to fire more than once (see Number of shots below).`
+                  : `Fires up to ${form.maxFireCount || 'N'} time(s) total. Each shot fires as soon as the spread crosses ${form.target === '' ? 'your target' : form.target}${unit} again AND the previous shot's order has actually filled or been rejected - no need for the spread to retreat first. If it's briefly not crossed when checked, that's just skipped - the count picks up again next time it crosses, it isn't lost. Disables itself automatically after the last shot.`}
+              </Typography.Text>
             </Col>
           </Row>
+
+          {!form.oneShot && (
+            <Row gutter={[12, 12]} align="middle">
+              <Col xs={24} sm={12}>
+                <InputNumber
+                  min={1}
+                  max={15}
+                  step={1}
+                  addonBefore="Shots"
+                  value={form.maxFireCount === '' ? null : form.maxFireCount}
+                  onChange={(v) => set('maxFireCount')(v ?? '')}
+                  style={{ width: '100%' }}
+                />
+                <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                  How many times this rule fires in total (1-15), one right after another completes.
+                </Typography.Text>
+              </Col>
+            </Row>
+          )}
 
           {error && <Alert type="error" message={error} showIcon />}
           <Button type="primary" htmlType="submit" loading={busy}>Add trigger</Button>
