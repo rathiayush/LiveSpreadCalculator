@@ -41,4 +41,31 @@
     <Content Include="App_Data\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- 2026-07-15: Microsoft.NET.Sdk.Web has a built-in, unrestricted, recursive rule that copies
+       every appsettings*.json file it finds ANYWHERE under the project directory into the publish
+       output - it does NOT skip a folder just because it looks like previous build output (unlike
+       bin/obj, which the SDK excludes by default). deploy*.ps1 used to run `dotnet publish -o
+       ./publish` - a folder INSIDE this project directory - so once that folder existed and
+       contained its own appsettings.Development.json (copied there on the very first run, as
+       intended), every SUBSEQUENT run's appsettings glob matched that nested copy too and
+       recreated it one level deeper inside the new output: publish\publish\, then
+       publish\publish\publish\, and so on, forever, completely silently, until it exceeded
+       Windows' 260-character path limit and Kudu's zip deploy started failing outright with
+       PathTooLongException. The deploy scripts now publish OUTSIDE this project directory
+       entirely (see $PublishDir in deploy.ps1/deploy-pradeep-1.ps1/deploy-pradeep-2.ps1), but that
+       alone wasn't sufficient - a leftover, already-corrupted "publish" folder sitting inside this
+       project directory from before that fix was STILL being scanned as a source of
+       appsettings*.json files and reproduced the exact same nesting inside the new output on the
+       very next run. This exclusion is the actual fix: it tells MSBuild to never treat anything
+       under a "publish" folder anywhere in this project as a source item, regardless of how deep
+       or corrupted it is or ever becomes again - so this class of bug can't resurface even if a
+       stray "publish" folder reappears here by accident (e.g. someone runs a bare `dotnet publish`
+       with no -o from this directory). -->
+  <ItemGroup>
+    <Content Remove="publish\**" />
+    <None Remove="publish\**" />
+    <Compile Remove="publish\**" />
+    <EmbeddedResource Remove="publish\**" />
+  </ItemGroup>
+
 </Project>

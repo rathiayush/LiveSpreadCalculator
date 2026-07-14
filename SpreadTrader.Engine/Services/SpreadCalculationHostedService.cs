@@ -101,12 +101,13 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             // Then price each leg on the side you'd actually trade it - ask for the leg you're
             // buying (what you'd pay), bid for the leg you're selling (what you'd receive) -
             // instead of comparing ask to ask, which overstates how good the spread really is
-            // since it ignores the bid/ask cost of actually executing it. This exact Direction
-            // string is carried through to OrderDispatchHostedService via TriggerEvent.Direction
-            // rather than re-derived from SpreadValue's sign there, since pricing the sell leg at
-            // its (lower) bid can occasionally narrow or even flip the sign of SpreadValue versus
-            // the ask-ask call that decided direction - the direction decided here is always the
-            // one that's actually used, with no risk of the two disagreeing.
+            // since it ignores the bid/ask cost of actually executing it. This Direction string is
+            // purely informational now - it's carried on TriggerEvent/SpreadSnapshot for display
+            // (the Dashboard grid and the Trigger Activity feed - see InMemoryTriggerActivityStore)
+            // but is NOT consulted by OrderDispatchHostedService.BuildLegs to decide which leg to
+            // buy/sell any more; that always comes straight from the rule's own fixed
+            // NearLegAction/FarLegAction (the old "auto-direction" mode that used this string to
+            // decide order direction live was removed - see TriggerRule's doc comments).
             var askAskDiff = farTick.BestAskPrice - nearTick.BestAskPrice;
             decimal nearPrice, farPrice;
             string direction;
