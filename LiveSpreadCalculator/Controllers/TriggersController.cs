@@ -58,19 +58,8 @@ public sealed class TriggersController : ControllerBase
         if (spread is null)
             return BadRequest($"Unknown spread id: {request.SpreadId}");
 
-        if (!request.AutoDirectionFromSpreadSign &&
-            request.NearLegAction == TriggerLegAction.None && request.FarLegAction == TriggerLegAction.None)
-            return BadRequest("At least one of NearLegAction / FarLegAction must be set when AutoDirectionFromSpreadSign is false - otherwise the rule would fire and place no orders.");
-
-        // WatchBothSides fires on whichever side of zero the spread happens to cross, so a fixed
-        // manual leg action would be wrong exactly half the time (it can't flip to match
-        // whichever side actually triggered) - only auto-direction, which decides the trade live
-        // from the real direction at fire time, makes sense here.
-        if (request.WatchBothSides && !request.AutoDirectionFromSpreadSign)
-            return BadRequest("WatchBothSides requires AutoDirectionFromSpreadSign - a fixed manual leg action can't correctly handle a deviation that might fire from either side.");
-
-        if (request.WatchBothSides && request.Threshold == 0)
-            return BadRequest("Threshold must be non-zero when WatchBothSides is true.");
+        if (request.NearLegAction == TriggerLegAction.None && request.FarLegAction == TriggerLegAction.None)
+            return BadRequest("At least one of NearLegAction / FarLegAction must be set - otherwise the rule would fire and place no orders.");
 
         if (request.Lots <= 0)
             return BadRequest("Lots must be greater than zero.");
@@ -94,38 +83,25 @@ public sealed class TriggersController : ControllerBase
         {
             Id = request.Id,
             SpreadId = request.SpreadId,
-            // WatchBothSides -> AbsoluteGreaterThanOrEqual with Threshold forced positive (its
-            // sign is meaningless in this mode - see CreateTriggerRuleRequest.WatchBothSides).
-            // Otherwise: FireWhenGreaterOrEqual, if the client sent one, wins outright - it exists
+            // FireWhenGreaterOrEqual, if the client sent one, wins outright - it exists
             // specifically because sign-inference can't represent every valid rule (a negative
             // target you're waiting for the spread to RISE to, e.g. an exit rule recovering from
             // -15 toward -7 - see CreateTriggerRuleRequest.FireWhenGreaterOrEqual). Falls back to
             // the original sign-of-Threshold inference when it's null, for every existing caller
             // (TriggerForm.jsx's ordinary Add Trigger page) that never sends it.
-            Operator = request.WatchBothSides
-                ? TriggerOperator.AbsoluteGreaterThanOrEqual
-                : request.FireWhenGreaterOrEqual is { } explicitDirection
-                    ? (explicitDirection ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual)
-                    : request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual,
-            Threshold = request.WatchBothSides ? Math.Abs(request.Threshold) : request.Threshold,
+            Operator = request.FireWhenGreaterOrEqual is { } explicitDirection
+                ? (explicitDirection ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual)
+                : request.Threshold >= 0 ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual,
+            Threshold = request.Threshold,
             ThresholdIsPercent = request.ThresholdIsPercent,
             NearLegAction = request.NearLegAction,
             FarLegAction = request.FarLegAction,
-            AutoDirectionFromSpreadSign = request.AutoDirectionFromSpreadSign,
             Quantity = request.Lots * lotSize,
             Product = request.Product,
             OrderType = request.OrderType,
             OneShot = request.OneShot,
-            RearmBuffer = request.RearmBuffer,
             MaxFireCount = request.MaxFireCount,
             SlippagePercent = request.SlippagePercent,
-            // Only set for exit rules created from the Positions & PNL page - see
-            // TriggerRule.LinkedPositionTradingSymbol and PositionsController.SquareOff, which
-            // deletes any rule matching these three fields the moment that position is manually
-            // squared off.
-            LinkedPositionTradingSymbol = request.LinkedPositionTradingSymbol,
-            LinkedPositionExchange = request.LinkedPositionExchange,
-            LinkedPositionProduct = request.LinkedPositionProduct,
         };
 
         if (!TryUpsert(rule, out var problem)) return problem!;
@@ -240,6 +216,8 @@ public sealed class TriggersController : ControllerBase
             return BadRequest("LotsPerTrade must be greater than zero.");
         if (request.SlippagePercent <= 0)
             return BadRequest("SlippagePercent must be greater than zero.");
+        if (request.MaxFireCount < 0)
+            return BadRequest("MaxFireCount cannot be negative.");
 
         var result = _bulkTemplate.Apply(
             request.SpreadIds,
@@ -251,8 +229,8 @@ public sealed class TriggersController : ControllerBase
             request.Product,
             request.OrderType,
             request.OneShot,
-            request.RearmBufferPercent,
-            request.SlippagePercent);
+            request.SlippagePercent,
+            request.MaxFireCount);
 
         return Ok(result);
     }

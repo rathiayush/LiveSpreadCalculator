@@ -15,7 +15,7 @@ const emptyForm = {
   orderType: 'MARKET',
   slippagePercent: 0.10,
   oneShot: true,
-  rearmBufferPercent: 0.1,
+  maxFireCount: 3,
 }
 
 // Configures ONE rule for however many spreads are currently defined (e.g. the whole built
@@ -43,6 +43,10 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
       setError('Enter a slippage % greater than 0.')
       return
     }
+    if (!form.oneShot && (form.maxFireCount === '' || Number(form.maxFireCount) <= 0)) {
+      setError('Enter a number of shots (1-15).')
+      return
+    }
     setBusy(true)
     setError(null)
     setResult(null)
@@ -56,7 +60,7 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
         product: form.product,
         orderType: form.orderType,
         oneShot: form.oneShot,
-        rearmBufferPercent: Number(form.rearmBufferPercent || 0),
+        maxFireCount: Number(form.maxFireCount || 0),
         slippagePercent: Number(form.slippagePercent),
       })
       setResult(res)
@@ -193,24 +197,37 @@ export default function BulkTriggerForm({ spreadCount, onCreated }) {
           </Row>
 
           <Row gutter={[12, 12]} align="middle">
-            <Col xs={24} sm={12}>
+            <Col xs={24}>
               <Space>
                 <Switch checked={form.oneShot} onChange={set('oneShot')} />
                 <Typography.Text>One-shot (disable after firing)</Typography.Text>
               </Space>
-            </Col>
-            <Col xs={24} sm={12}>
-              <InputNumber
-                min={0}
-                step={0.05}
-                addonBefore="Re-arm %"
-                value={form.rearmBufferPercent}
-                onChange={set('rearmBufferPercent')}
-                disabled={form.oneShot}
-                style={{ width: '100%' }}
-              />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                {form.oneShot
+                  ? 'Each rule fires once, then disables itself. Turn this off to let every rule in the batch fire more than once (see Number of shots below).'
+                  : `Every rule created by this batch fires up to ${form.maxFireCount || 'N'} time(s) total. Each shot fires as soon as its spread crosses the target again AND the previous shot's order has actually filled or been rejected - no need to retreat first.`}
+              </Typography.Text>
             </Col>
           </Row>
+
+          {!form.oneShot && (
+            <Row gutter={[12, 12]} align="middle">
+              <Col xs={24} sm={12}>
+                <InputNumber
+                  min={1}
+                  max={15}
+                  step={1}
+                  addonBefore="Shots"
+                  value={form.maxFireCount === '' ? null : form.maxFireCount}
+                  onChange={(v) => set('maxFireCount')(v ?? '')}
+                  style={{ width: '100%' }}
+                />
+                <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                  How many times each rule in the batch fires in total (1-15), one right after another completes.
+                </Typography.Text>
+              </Col>
+            </Row>
+          )}
 
           {error && <Alert type="error" message={error} showIcon />}
           <Button type="primary" icon={<ThunderboltOutlined />} htmlType="submit" loading={busy} disabled={spreadCount === 0}>

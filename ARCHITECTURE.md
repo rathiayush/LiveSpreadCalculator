@@ -141,34 +141,26 @@ further.
 
 ## 6. Trigger evaluation and order direction
 
-A `TriggerRule` has an `Operator` (`>=` or `<=`) and a `Threshold` against `SpreadValue`. Two
-extra pieces of state make repeated firing safe:
+A `TriggerRule` has an `Operator` (`>=` or `<=`) and a `Threshold` against `SpreadValue` (or
+`SpreadPercent`, when `ThresholdIsPercent` is set) - a plain signed comparison value, not a
+deviation magnitude. Two extra pieces of state make repeated firing safe:
 
-- **`IsArmed`** - a rule only fires while armed. After firing, it disarms. If `OneShot` is
-  true (the default), it also disables itself entirely. If `OneShot` is false, it re-arms once
-  the spread value moves back past `Threshold` by `RearmBuffer` - this stops a rule from firing
-  again on every single recalculation cycle while the spread sits right at the threshold.
+- **`IsArmed`** - a rule only fires while armed. After firing, it disarms. If `OneShot` is true
+  (the default), it also disables itself entirely and needs a manual re-enable (which re-arms
+  it) before it can fire again. If `OneShot` is false, `MaxFireCount` takes over instead: the
+  rule schedules exactly that many total shots, firing the next one as soon as the condition is
+  true again and the previous shot's basket dispatch has resolved (filled or rejected - see
+  `TriggerInFlightTracker`), with no re-arm/hysteresis wait required. (An older "stand
+  indefinitely, re-arm once the spread retreats past a buffer" mode - `RearmBuffer` - existed
+  here previously and has since been removed, including its column in `triggers.csv`.)
 - **`MinFireIntervalPerRuleMs`** - a floor on how often *any* rule can re-fire, independent of
   arming, as a last-resort guard against a burst of duplicate orders off one noisy price move.
 
-**Order direction** defaults to `AutoDirectionFromSpreadSign = true`: at fire time, the engine
-sells whichever leg is trading rich and buys whichever leg is trading cheap (classic
-calendar-spread arbitrage - the position profits as the spread converges back toward fair
-value) -
-
-- near (current month) leg **in premium** (near ask > far ask) -> **sell near, buy far**
-- near (current month) leg **at a discount** (near ask < far ask) -> **buy near, sell far**
-
-This direction is decided once, by `SpreadCalculationHostedService`, at the same moment it
-computes the snapshot (see §5 - the leg being bought is priced at its ask, the leg being sold at
-its bid) and carried through verbatim on `TriggerEvent.Direction` all the way to
-`OrderDispatchHostedService`. It is deliberately **not** re-derived from `SpreadValue`'s sign at
-dispatch time: because the sell leg is priced at its bid rather than its ask, `SpreadValue` can
-occasionally narrow or even flip sign relative to the ask-ask comparison that decided direction
-(when a leg's bid/ask spread is wide) - carrying the explicit direction avoids any chance of
-placing an order in the wrong direction from the one actually implied by the premium/discount
-call. Set `AutoDirectionFromSpreadSign = false` on a rule to instead pin fixed
-`NearLegAction`/`FarLegAction` values that ignore direction entirely.
+**Order direction** is always taken directly from the rule's fixed `NearLegAction`/`FarLegAction`
+(`None`/`Buy`/`Sell`, set explicitly when the rule is created) - `OrderDispatchHostedService.
+BuildLegs` uses them as-is. An earlier "auto-direction" mode (`AutoDirectionFromSpreadSign`),
+which instead decided which leg to buy/sell live from the spread's premium/discount sign at fire
+time, has since been removed from the model, the CSV, and every trigger-creation UI.
 
 Every rule mutation (fired, re-armed, enabled/disabled) calls `ITriggerRuleStore.Upsert(rule)`
 again, which is what keeps the CSV file (§7) in sync with runtime state, not just rule

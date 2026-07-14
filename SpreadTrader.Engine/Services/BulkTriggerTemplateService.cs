@@ -43,8 +43,8 @@ public sealed class BulkTriggerTemplateService
         string product,
         string orderType,
         bool oneShot,
-        decimal rearmBufferPercent,
-        decimal slippagePercent)
+        decimal slippagePercent,
+        int maxFireCount = 0)
     {
         var targets = spreadIds is { Count: > 0 }
             ? spreadIds.Select(_spreadStore.Get).Where(s => s is not null).Select(s => s!).ToArray()
@@ -80,14 +80,13 @@ public sealed class BulkTriggerTemplateService
                 Operator = fireWhenGreaterOrEqual ? TriggerOperator.GreaterThanOrEqual : TriggerOperator.LessThanOrEqual,
                 Threshold = targetPercent,
                 ThresholdIsPercent = true,
-                AutoDirectionFromSpreadSign = false,
                 NearLegAction = nearLegAction,
                 FarLegAction = farLegAction,
                 Quantity = quantity,
                 Product = product,
                 OrderType = orderType,
                 OneShot = oneShot,
-                RearmBuffer = rearmBufferPercent,
+                MaxFireCount = maxFireCount,
                 SlippagePercent = slippagePercent,
             });
 

@@ -18,13 +18,25 @@ namespace SpreadTrader.Core.Store;
 /// </summary>
 public sealed class CsvTriggerRuleStore : ITriggerRuleStore
 {
-    // AutoDirectionFromSpreadSign, ThresholdIsPercent, the three LinkedPosition* columns,
-    // SlippagePercent, and MaxFireCount/FireCount were all added after the first version of this
-    // file shipped, so they're appended at the end and ParseLine treats them as optional
-    // (defaulting to true / false / null / 0.10 / 0 / 0 respectively, matching the model
+    // ThresholdIsPercent, SlippagePercent, and MaxFireCount/FireCount were all added after the
+    // first version of this file shipped, so they're appended at the end and ParseLine treats
+    // them as optional (defaulting to false / 0.10 / 0 / 0 respectively, matching the model
     // defaults) - older CSVs without those columns still load fine.
+    //
+    // TriggerRule.RearmBuffer, AutoDirectionFromSpreadSign, LinkedPositionTradingSymbol,
+    // LinkedPositionExchange, and LinkedPositionProduct (the re-arm/standing fire mode, the
+    // auto-direction/watch-both-sides mode, and position-linked auto-delete-on-square-off) were
+    // retired from the app and, as of 2026-07-15, physically removed from this file's column
+    // layout too - confirmed first that every deployed triggers.csv (Production, pradeep-1,
+    // pradeep-2) had zero data rows at the time, so there was nothing an index shift could
+    // corrupt. If a new column ever needs retiring again in the future while any environment has
+    // real rows, do NOT repeat a straight delete - go back to the inert-placeholder-column
+    // approach (rename to *_Unused, write a constant, ignore on read) instead, exactly like this
+    // block used to describe, since a live Production triggers.csv is never overwritten by a
+    // deploy (see deploy.ps1) and its actual current contents generally can't be verified from
+    // this repo.
     private const string Header =
-        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent,LinkedPositionTradingSymbol,LinkedPositionExchange,LinkedPositionProduct,SlippagePercent,MaxFireCount,FireCount";
+        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,Enabled,IsArmed,LastFiredAt,ThresholdIsPercent,SlippagePercent,MaxFireCount,FireCount";
 
     private readonly string _filePath;
     private readonly object _fileLock = new();
@@ -199,15 +211,10 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
         Escape(r.Product),
         Escape(r.OrderType),
         r.OneShot,
-        r.RearmBuffer.ToString(CultureInfo.InvariantCulture),
         r.Enabled,
         r.IsArmed,
         r.LastFiredAt?.ToString("O", CultureInfo.InvariantCulture) ?? "",
-        r.AutoDirectionFromSpreadSign,
         r.ThresholdIsPercent,
-        Escape(r.LinkedPositionTradingSymbol ?? ""),
-        Escape(r.LinkedPositionExchange ?? ""),
-        Escape(r.LinkedPositionProduct ?? ""),
         r.SlippagePercent.ToString(CultureInfo.InvariantCulture),
         r.MaxFireCount.ToString(CultureInfo.InvariantCulture),
         r.FireCount.ToString(CultureInfo.InvariantCulture));
@@ -215,11 +222,11 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
     private TriggerRule? ParseLine(string line)
     {
         var fields = SplitCsvLine(line);
-        if (fields.Length < 14)
+        if (fields.Length < 13)
         {
             _logger?.LogWarning(
                 "CsvTriggerRuleStore: dropping a row in {Path} with only {FieldCount} column(s) " +
-                "(need at least 14) - raw line: {Line}", _filePath, fields.Length, line);
+                "(need at least 13) - raw line: {Line}", _filePath, fields.Length, line);
             return null;
         }
 
@@ -237,28 +244,21 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
                 Product = fields[7],
                 OrderType = fields[8],
                 OneShot = bool.Parse(fields[9]),
-                RearmBuffer = decimal.Parse(fields[10], CultureInfo.InvariantCulture),
-                Enabled = bool.Parse(fields[11]),
-                IsArmed = bool.Parse(fields[12]),
-                LastFiredAt = string.IsNullOrEmpty(fields[13])
+                Enabled = bool.Parse(fields[10]),
+                IsArmed = bool.Parse(fields[11]),
+                LastFiredAt = string.IsNullOrEmpty(fields[12])
                     ? null
-                    : DateTimeOffset.Parse(fields[13], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-                AutoDirectionFromSpreadSign = fields.Length > 14 && !string.IsNullOrEmpty(fields[14])
-                    ? bool.Parse(fields[14])
-                    : true,
-                ThresholdIsPercent = fields.Length > 15 && !string.IsNullOrEmpty(fields[15])
-                    && bool.Parse(fields[15]),
-                LinkedPositionTradingSymbol = fields.Length > 16 && !string.IsNullOrEmpty(fields[16]) ? fields[16] : null,
-                LinkedPositionExchange = fields.Length > 17 && !string.IsNullOrEmpty(fields[17]) ? fields[17] : null,
-                LinkedPositionProduct = fields.Length > 18 && !string.IsNullOrEmpty(fields[18]) ? fields[18] : null,
-                SlippagePercent = fields.Length > 19 && !string.IsNullOrEmpty(fields[19])
-                    ? decimal.Parse(fields[19], CultureInfo.InvariantCulture)
+                    : DateTimeOffset.Parse(fields[12], CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                ThresholdIsPercent = fields.Length > 13 && !string.IsNullOrEmpty(fields[13])
+                    && bool.Parse(fields[13]),
+                SlippagePercent = fields.Length > 14 && !string.IsNullOrEmpty(fields[14])
+                    ? decimal.Parse(fields[14], CultureInfo.InvariantCulture)
                     : 0.10m,
-                MaxFireCount = fields.Length > 20 && !string.IsNullOrEmpty(fields[20])
-                    ? int.Parse(fields[20], CultureInfo.InvariantCulture)
+                MaxFireCount = fields.Length > 15 && !string.IsNullOrEmpty(fields[15])
+                    ? int.Parse(fields[15], CultureInfo.InvariantCulture)
                     : 0,
-                FireCount = fields.Length > 21 && !string.IsNullOrEmpty(fields[21])
-                    ? int.Parse(fields[21], CultureInfo.InvariantCulture)
+                FireCount = fields.Length > 16 && !string.IsNullOrEmpty(fields[16])
+                    ? int.Parse(fields[16], CultureInfo.InvariantCulture)
                     : 0,
             };
         }

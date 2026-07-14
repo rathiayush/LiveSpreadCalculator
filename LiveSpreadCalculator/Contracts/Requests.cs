@@ -30,11 +30,9 @@ public sealed class CreateTriggerRuleRequest
     public required string Id { get; set; }
     public required string SpreadId { get; set; }
 
-    /// <summary>Signed threshold when WatchBothSides is false (the default) - by convention
-    /// (and, unless FireWhenGreaterOrEqual is set - see below - the ONLY way TriggersController
-    /// can tell), positive fires when the spread rises to/above this value, negative fires when
-    /// it falls to/below this value. When WatchBothSides is true, send this as a plain positive
-    /// magnitude instead (its sign is ignored - see WatchBothSides).</summary>
+    /// <summary>Signed threshold - by convention (and, unless FireWhenGreaterOrEqual is set - see
+    /// below - the ONLY way TriggersController can tell), positive fires when the spread rises
+    /// to/above this value, negative fires when it falls to/below this value.</summary>
     public decimal Threshold { get; set; }
 
     /// <summary>Overrides the sign-based Operator inference above. Needed for a target that
@@ -44,30 +42,15 @@ public sealed class CreateTriggerRuleRequest
     /// would produce (a negative threshold would otherwise always mean LessThanOrEqual). See
     /// AddPositionExitTriggerPage.jsx, which always sends this explicitly rather than relying on
     /// Threshold's sign. Null (the default, and what TriggerForm.jsx's ordinary Add Trigger page
-    /// still sends) preserves the original sign-inference behavior for backward compatibility.
-    /// Ignored when WatchBothSides is true.</summary>
+    /// still sends) preserves the original sign-inference behavior for backward compatibility.</summary>
     public bool? FireWhenGreaterOrEqual { get; set; }
 
-    /// <summary>When true, Threshold/RearmBuffer are a percentage of the near leg's ask price
-    /// instead of an absolute rupee difference.</summary>
+    /// <summary>When true, Threshold is a percentage of the near leg's ask price instead of an
+    /// absolute rupee difference.</summary>
     public bool ThresholdIsPercent { get; set; }
-
-    /// <summary>When true, Threshold is treated as an unsigned magnitude and the rule fires
-    /// when the spread deviates that much in EITHER direction (TriggerOperator.
-    /// AbsoluteGreaterThanOrEqual) - no sign to guess at, since AutoDirectionFromSpreadSign
-    /// (required when this is true - see TriggersController.Create) decides which leg to buy/
-    /// sell live from the spread's actual direction at fire time regardless of which side
-    /// crossed the threshold. False (the default) keeps the one-sided signed-threshold
-    /// behavior.</summary>
-    public bool WatchBothSides { get; set; }
 
     public TriggerLegAction NearLegAction { get; set; } = TriggerLegAction.None;
     public TriggerLegAction FarLegAction { get; set; } = TriggerLegAction.None;
-
-    /// <summary>When true (the default), NearLegAction/FarLegAction are ignored and the engine
-    /// instead buys the current-month leg / sells the next-month leg when the spread value is
-    /// negative at fire time, and does the opposite when it's positive.</summary>
-    public bool AutoDirectionFromSpreadSign { get; set; } = true;
 
     /// <summary>Number of exchange lots, not raw share/contract quantity - Kite (and NSE F&amp;O
     /// generally) only accepts order quantities that are whole multiples of the contract's lot
@@ -79,12 +62,11 @@ public sealed class CreateTriggerRuleRequest
     public string Product { get; set; } = "NRML";
     public string OrderType { get; set; } = "MARKET";
     public bool OneShot { get; set; } = true;
-    public decimal RearmBuffer { get; set; }
 
     /// <summary>Bounded "N sequential shots" mode - only takes effect when OneShot is false. 0
-    /// (the default) leaves RearmBuffer above in charge (the standing/re-arm mode). A positive
-    /// value schedules exactly that many total fires with no re-arm buffer needed at all - see
-    /// TriggerRule.MaxFireCount for the full semantics.</summary>
+    /// means the rule won't fire again after a manual re-enable resets it. A positive value
+    /// schedules exactly that many total fires - see TriggerRule.MaxFireCount for the full
+    /// semantics.</summary>
     public int MaxFireCount { get; set; }
 
     /// <summary>How far past the best bid/ask (as a percent) MarketProtectionService may price the
@@ -93,16 +75,6 @@ public sealed class CreateTriggerRuleRequest
     /// of 0.05/0.10/0.15/0.20/0.25/0.30) instead of a single app-wide setting - see
     /// TriggerRule.SlippagePercent.</summary>
     public decimal SlippagePercent { get; set; } = 0.10m;
-
-    /// <summary>Set only when this rule is created from the Positions & PNL page's "Add trigger"
-    /// action on an open position (see AddPositionExitTriggerPage.jsx) - identifies the exact
-    /// position this exit rule protects, so PositionsController.SquareOff can find and delete it
-    /// automatically the moment that position is manually squared off. Leave all three null for
-    /// an ordinary entry-style rule created from the Triggers page - see TriggerRule.
-    /// LinkedPositionTradingSymbol.</summary>
-    public string? LinkedPositionTradingSymbol { get; set; }
-    public string? LinkedPositionExchange { get; set; }
-    public string? LinkedPositionProduct { get; set; }
 }
 
 /// <summary>Retunes an existing trigger's lots/threshold in place (leaving its id, enabled/armed
@@ -198,7 +170,12 @@ public sealed class BulkTriggerTemplateRequest
     public string Product { get; set; } = "NRML";
     public string OrderType { get; set; } = "MARKET";
     public bool OneShot { get; set; } = true;
-    public decimal RearmBufferPercent { get; set; }
+
+    /// <summary>Same convention as CreateTriggerRuleRequest.MaxFireCount - only takes effect when
+    /// OneShot is false. 0 (the default) means each rule won't fire again after a manual
+    /// re-enable; a positive value schedules that many total fires per rule - see
+    /// TriggerRule.MaxFireCount.</summary>
+    public int MaxFireCount { get; set; }
 
     /// <summary>Same convention as CreateTriggerRuleRequest.SlippagePercent, applied identically
     /// to every rule created by this batch.</summary>
