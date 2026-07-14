@@ -7,7 +7,6 @@ import {
   StopOutlined,
   PoweroffOutlined,
   DeleteOutlined,
-  AimOutlined,
   EditOutlined,
 } from '@ant-design/icons'
 import { api } from '../api'
@@ -156,9 +155,7 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
     {
       title: 'Legs',
       key: 'legs',
-      render: (_, t) => t.autoDirectionFromSpreadSign ? (
-        <Tag icon={<AimOutlined />} color="blue">auto (by spread sign)</Tag>
-      ) : (
+      render: (_, t) => (
         <>
           {t.nearLegAction !== 'None' && `near ${t.nearLegAction}`}
           {t.nearLegAction !== 'None' && t.farLegAction !== 'None' && ', '}

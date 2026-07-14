@@ -137,7 +137,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
             return;
         }
 
-        var legPlans = BuildLegs(rule, spread, triggerEvent.Direction);
+        var legPlans = BuildLegs(rule, spread);
         if (legPlans.Count == 0)
         {
             _logger.LogWarning("Rule {RuleId} fired but has no leg actions configured - nothing to place", rule.Id);
@@ -442,11 +442,9 @@ public sealed class OrderDispatchHostedService : BackgroundService
     /// MarketProtectionService.Protect.</summary>
     private readonly record struct LegPlan(OrderLegRequest Request, uint InstrumentToken, decimal TickSize);
 
-    private static List<LegPlan> BuildLegs(TriggerRule rule, SpreadDefinition spread, string direction)
+    private static List<LegPlan> BuildLegs(TriggerRule rule, SpreadDefinition spread)
     {
-        var (nearAction, farAction) = rule.AutoDirectionFromSpreadSign
-            ? ResolveAutoDirection(direction)
-            : (rule.NearLegAction, rule.FarLegAction);
+        var (nearAction, farAction) = (rule.NearLegAction, rule.FarLegAction);
 
         var legs = new List<LegPlan>();
         var tag = BuildTag(rule.Id);
@@ -487,22 +485,6 @@ public sealed class OrderDispatchHostedService : BackgroundService
 
         return legs;
     }
-
-    /// <summary>
-    /// The calendar-spread arbitrage rule, decided by SpreadCalculationHostedService and carried
-    /// here verbatim via TriggerEvent.Direction (never re-derived from SpreadValueAtTrigger's
-    /// sign - see the comment on TriggerEvent for why that would be unsafe): if the current
-    /// (near) month is in premium, sell it and buy the next (far) month; if it's at a discount,
-    /// buy it and sell the far month. "Flat" (or a direction string this switch doesn't
-    /// recognize) is treated as "nothing to do" since there's no direction to take a position in.
-    /// </summary>
-    private static (TriggerLegAction Near, TriggerLegAction Far) ResolveAutoDirection(string direction) =>
-        direction switch
-        {
-            "BuyNear/SellFar" or "BuyNear/SellFar (bid pending)" => (TriggerLegAction.Buy, TriggerLegAction.Sell),
-            "SellNear/BuyFar" or "SellNear/BuyFar (bid pending)" => (TriggerLegAction.Sell, TriggerLegAction.Buy),
-            _ => (TriggerLegAction.None, TriggerLegAction.None),
-        };
 
     private static string BuildTag(string ruleId)
     {

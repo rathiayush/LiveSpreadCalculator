@@ -99,20 +99,12 @@ export default function TriggerForm({ spreads, onCreated }) {
         threshold: Number(form.target),
         fireWhenGreaterOrEqual: form.operator === 'gte',
         thresholdIsPercent: form.thresholdIsPercent,
-        watchBothSides: false,
-        autoDirectionFromSpreadSign: false,
         nearLegAction: form.nearLegAction,
         farLegAction: form.farLegAction,
         lots: Number(form.lots),
         product: form.product,
         orderType: form.orderType,
         oneShot: form.oneShot,
-        // The old "leave blank for unlimited, gated by a re-arm buffer" mode isn't offered by
-        // this form any more - RearmBuffer is still a real field on the backend (existing rules
-        // created before this change may still use it), just always 0 (unused) for anything
-        // created here from now on. See TriggerRule.MaxFireCount for the mode this form uses
-        // instead: a required, bounded shot count with no buffer needed.
-        rearmBuffer: 0,
         maxFireCount: Number(form.maxFireCount || 0),
         slippagePercent: Number(form.slippagePercent),
       })

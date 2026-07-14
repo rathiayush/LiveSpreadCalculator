@@ -23,7 +23,6 @@ public sealed class PositionsController : ControllerBase
     private readonly MarketProtectionService _marketProtection;
     private readonly InstrumentMasterService _instrumentMaster;
     private readonly IOrderExecutionSink _executionSink;
-    private readonly ITriggerRuleStore _ruleStore;
     private readonly ILogger<PositionsController> _logger;
 
     public PositionsController(
@@ -32,7 +31,6 @@ public sealed class PositionsController : ControllerBase
         MarketProtectionService marketProtection,
         InstrumentMasterService instrumentMaster,
         IOrderExecutionSink executionSink,
-        ITriggerRuleStore ruleStore,
         ILogger<PositionsController> logger)
     {
         _positionsService = positionsService;
@@ -40,7 +38,6 @@ public sealed class PositionsController : ControllerBase
         _marketProtection = marketProtection;
         _instrumentMaster = instrumentMaster;
         _executionSink = executionSink;
-        _ruleStore = ruleStore;
         _logger = logger;
     }
 
@@ -162,35 +159,6 @@ public sealed class PositionsController : ControllerBase
                 DateTimeOffset.UtcNow),
             cancellationToken);
 
-        // Only once the exit order actually went through - a rejected/failed square-off leaves
-        // the position exactly as it was, so any exit trigger protecting it is still valid and
-        // must stay armed. See TriggerRule.LinkedPositionTradingSymbol / AddPositionExitTriggerPage.jsx.
-        if (result.Success)
-            DeleteLinkedTriggers(position.TradingSymbol, position.Exchange, position.Product);
-
         return Ok(result);
-    }
-
-    /// <summary>Deletes every trigger rule explicitly linked to this exact position (symbol +
-    /// exchange + product - see TriggerRule.LinkedPositionTradingSymbol) once it's been manually
-    /// squared off. Deliberately only matches rules created via the "Add trigger" action on the
-    /// Positions page, not every rule that happens to reference the same underlying/spread - an
-    /// ordinary entry-style trigger from the Triggers page is untouched by a manual square-off,
-    /// since it's not tied to this specific position at all.</summary>
-    private void DeleteLinkedTriggers(string tradingSymbol, string exchange, string product)
-    {
-        var linked = _ruleStore.GetAll().Where(r =>
-            string.Equals(r.LinkedPositionTradingSymbol, tradingSymbol, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(r.LinkedPositionExchange, exchange, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(r.LinkedPositionProduct, product, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        foreach (var rule in linked)
-        {
-            _ruleStore.Remove(rule.Id);
-            _logger.LogInformation(
-                "Deleted exit trigger {RuleId} linked to {Symbol}/{Exchange}/{Product} - position was just manually squared off.",
-                rule.Id, tradingSymbol, exchange, product);
-        }
     }
 }

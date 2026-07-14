@@ -1,1 +1,1 @@
-Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,RearmBuffer,Enabled,IsArmed,LastFiredAt,AutoDirectionFromSpreadSign,ThresholdIsPercent,LinkedPositionTradingSymbol,LinkedPositionExchange,LinkedPositionProduct,SlippagePercent
+Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,Enabled,IsArmed,LastFiredAt,ThresholdIsPercent,SlippagePercent,MaxFireCount,FireCount

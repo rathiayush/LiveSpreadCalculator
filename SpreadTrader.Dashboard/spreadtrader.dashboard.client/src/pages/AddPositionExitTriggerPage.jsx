@@ -31,10 +31,9 @@ function fmt(v) {
 // on the backend would otherwise always read a negative threshold as "falls to" - see
 // CreateTriggerRuleRequest.FireWhenGreaterOrEqual, which this page sends explicitly to avoid
 // that trap). Near/far leg actions default to whatever CLOSES what's currently open (long ->
-// Sell, short -> Buy). The created rule is linked to this exact position (see TriggerRule.
-// LinkedPositionTradingSymbol) so PositionsController.SquareOff deletes it automatically the
-// moment you manually square off - an exit rule left armed against a position you already closed
-// by hand no longer makes sense.
+// Sell, short -> Buy). The created rule is a plain, ordinary trigger like any other from here on -
+// it is NOT linked back to this specific position, so squaring off the position manually does not
+// delete it; disable or remove it yourself from the Triggers page if it's no longer needed.
 export default function AddPositionExitTriggerPage() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -68,7 +67,7 @@ export default function AddPositionExitTriggerPage() {
   const [orderType, setOrderType] = useState('MARKET')
   const [slippagePercent, setSlippagePercent] = useState(0.10)
   const [oneShot, setOneShot] = useState(true)
-  const [rearmBuffer, setRearmBuffer] = useState('0')
+  const [maxFireCount, setMaxFireCount] = useState(3)
   const [busy, setBusy] = useState(false)
   const [submitError, setSubmitError] = useState(null)
 
@@ -163,6 +162,10 @@ export default function AddPositionExitTriggerPage() {
       setSubmitError('Waiting for a live spread value to determine fire direction - try again in a moment.')
       return
     }
+    if (!oneShot && (maxFireCount === '' || Number(maxFireCount) <= 0)) {
+      setSubmitError('Enter a number of shots (1-15).')
+      return
+    }
     setBusy(true)
     setSubmitError(null)
     try {
@@ -176,8 +179,6 @@ export default function AddPositionExitTriggerPage() {
         threshold: Number(target),
         fireWhenGreaterOrEqual,
         thresholdIsPercent,
-        watchBothSides: false,
-        autoDirectionFromSpreadSign: false,
         nearLegAction,
         farLegAction,
         lots: Number(lots),
@@ -185,10 +186,7 @@ export default function AddPositionExitTriggerPage() {
         orderType,
         slippagePercent: Number(slippagePercent),
         oneShot,
-        rearmBuffer: Number(rearmBuffer || 0),
-        linkedPositionTradingSymbol: position.tradingSymbol,
-        linkedPositionExchange: position.exchange,
-        linkedPositionProduct: position.product,
+        maxFireCount: Number(maxFireCount || 0),
       })
       navigate('/positions')
     } catch (err) {
@@ -382,23 +380,37 @@ export default function AddPositionExitTriggerPage() {
           </Row>
 
           <Row gutter={[12, 12]} align="middle">
-            <Col xs={24} sm={12}>
+            <Col xs={24}>
               <Space>
                 <Switch checked={oneShot} onChange={setOneShot} />
                 <Typography.Text>One-shot (disable after firing)</Typography.Text>
               </Space>
-            </Col>
-            <Col xs={24} sm={12}>
-              <InputNumber
-                step={0.05}
-                placeholder="Re-arm buffer"
-                value={rearmBuffer === '' ? null : rearmBuffer}
-                onChange={(v) => setRearmBuffer(v ?? '')}
-                disabled={oneShot}
-                style={{ width: '100%' }}
-              />
+              <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                {oneShot
+                  ? "Fires once when the spread reaches this target, then disables itself - it won't fire again until you re-enable it. Turn this off to fire more than once (see Number of shots below)."
+                  : `Fires up to ${maxFireCount || 'N'} time(s) total. Each shot fires as soon as the spread crosses the target again AND the previous shot's order has actually filled or been rejected - no need to retreat first.`}
+              </Typography.Text>
             </Col>
           </Row>
+
+          {!oneShot && (
+            <Row gutter={[12, 12]} align="middle">
+              <Col xs={24} sm={12}>
+                <InputNumber
+                  min={1}
+                  max={15}
+                  step={1}
+                  addonBefore="Shots"
+                  value={maxFireCount === '' ? null : maxFireCount}
+                  onChange={(v) => setMaxFireCount(v ?? '')}
+                  style={{ width: '100%' }}
+                />
+                <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                  How many times this rule fires in total (1-15), one right after another completes.
+                </Typography.Text>
+              </Col>
+            </Row>
+          )}
 
           {submitError && <Alert type="error" message={submitError} showIcon />}
           <Space>

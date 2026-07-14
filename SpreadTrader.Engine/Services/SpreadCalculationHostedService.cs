@@ -204,7 +204,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             };
 
             // ---- Bounded "N sequential shots" mode (TriggerRule.MaxFireCount > 0) -------------
-            // Deliberately bypasses IsArmed/RearmBuffer entirely: the point of this mode is that
+            // Deliberately bypasses IsArmed entirely: the point of this mode is that
             // each of the N scheduled shots fires as soon as the condition is true again AND the
             // previous shot's basket has actually resolved (filled or rejected, via
             // TriggerInFlightTracker) - not after the spread has retreated past some buffer first.
@@ -234,27 +234,14 @@ public sealed class SpreadCalculationHostedService : BackgroundService
                 continue;
             }
 
-            // ---- Standard one-shot / standing+RearmBuffer modes (unchanged) -------------------
-            if (!crossed)
-            {
-                if (!rule.IsArmed)
-                {
-                    var rearmed = rule.Operator switch
-                    {
-                        TriggerOperator.GreaterThanOrEqual => measured <= rule.Threshold - rule.RearmBuffer,
-                        TriggerOperator.LessThanOrEqual => measured >= rule.Threshold + rule.RearmBuffer,
-                        TriggerOperator.AbsoluteGreaterThanOrEqual => Math.Abs(measured) <= rule.Threshold - rule.RearmBuffer,
-                        _ => false,
-                    };
-                    if (rearmed)
-                    {
-                        rule.IsArmed = true;
-                        _ruleStore.Upsert(rule); // persist the re-arm (CSV store rewrites the file)
-                    }
-                }
-                continue;
-            }
-
+            // ---- Standard one-shot mode (also covers a bare OneShot=false/MaxFireCount=0 rule,
+            // which just fires once and then sits dormant until manually re-armed - see
+            // TriggersController.Enable) -----------------------------------------------------
+            // No re-arm/hysteresis logic any more: the old "stand indefinitely, re-arm once the
+            // spread retreats past a buffer" mode was removed. IsArmed is now purely "has this
+            // fired since it was last (re-)enabled" - once false, only TriggersController.Enable
+            // (which resets it to true) can make this rule eligible to fire again.
+            if (!crossed) continue;
             if (!rule.IsArmed) continue;
             if (rule.LastFiredAt is { } lastFired &&
                 DateTimeOffset.UtcNow - lastFired < TimeSpan.FromMilliseconds(_options.MinFireIntervalPerRuleMs))
