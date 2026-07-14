@@ -129,6 +129,10 @@ builder.Services.AddSingleton<KiteTickerClient>();
 builder.Services.AddSingleton<TriggerEventChannel>();
 builder.Services.AddSingleton<TickIngestionHostedService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TickIngestionHostedService>());
+// Shared between SpreadCalculationHostedService (checks it before firing the next shot of a
+// bounded multi-shot trigger) and OrderDispatchHostedService (marks/clears it around each
+// dispatch) - see TriggerInFlightTracker's doc comment.
+builder.Services.AddSingleton<TriggerInFlightTracker>();
 builder.Services.AddHostedService<SpreadCalculationHostedService>();
 builder.Services.AddHostedService<OrderDispatchHostedService>();
 builder.Services.AddHostedService<SpreadRankingHostedService>();

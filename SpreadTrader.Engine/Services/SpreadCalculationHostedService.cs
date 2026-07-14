@@ -30,6 +30,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
     private readonly ITriggerEventSink _triggerSink;
     private readonly TriggerEventChannel _triggerChannel;
     private readonly ISpreadSnapshotCache _snapshotCache;
+    private readonly TriggerInFlightTracker _inFlightTracker;
     private readonly EngineOptions _options;
     private readonly ILogger<SpreadCalculationHostedService> _logger;
 
@@ -43,6 +44,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
         ITriggerEventSink triggerSink,
         TriggerEventChannel triggerChannel,
         ISpreadSnapshotCache snapshotCache,
+        TriggerInFlightTracker inFlightTracker,
         IOptions<EngineOptions> options,
         ILogger<SpreadCalculationHostedService> logger)
     {
@@ -53,6 +55,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
         _triggerSink = triggerSink;
         _triggerChannel = triggerChannel;
         _snapshotCache = snapshotCache;
+        _inFlightTracker = inFlightTracker;
         _options = options.Value;
         _logger = logger;
     }
@@ -200,6 +203,38 @@ public sealed class SpreadCalculationHostedService : BackgroundService
                 _ => false,
             };
 
+            // ---- Bounded "N sequential shots" mode (TriggerRule.MaxFireCount > 0) -------------
+            // Deliberately bypasses IsArmed/RearmBuffer entirely: the point of this mode is that
+            // each of the N scheduled shots fires as soon as the condition is true again AND the
+            // previous shot's basket has actually resolved (filled or rejected, via
+            // TriggerInFlightTracker) - not after the spread has retreated past some buffer first.
+            // If the condition happens to be false on a given cycle, that check is just skipped -
+            // FireCount isn't touched, so it resumes from wherever it left off the next time the
+            // condition is true again, rather than losing progress or needing to re-arm.
+            if (!rule.OneShot && rule.MaxFireCount > 0)
+            {
+                if (rule.FireCount >= rule.MaxFireCount) continue; // guards a stale/hand-edited row; Enabled is normally cleared on the last shot
+                if (!crossed) continue;
+                if (_inFlightTracker.IsInFlight(rule.Id)) continue; // previous shot's order outcome isn't known yet
+                if (rule.LastFiredAt is { } lastSeqFired &&
+                    DateTimeOffset.UtcNow - lastSeqFired < TimeSpan.FromMilliseconds(_options.MinFireIntervalPerRuleMs))
+                    continue;
+
+                rule.FireCount++;
+                rule.LastFiredAt = DateTimeOffset.UtcNow;
+                if (rule.FireCount >= rule.MaxFireCount) rule.Enabled = false;
+                _ruleStore.Upsert(rule); // persist shot count/fired/disabled state so a restart doesn't lose or repeat a shot
+
+                var seqTriggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow);
+                _logger.LogInformation("Trigger fired (shot {FireCount}/{MaxFireCount}): rule={RuleId} spread={SpreadId} value={Value} direction={Direction}",
+                    rule.FireCount, rule.MaxFireCount, rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction);
+
+                await _triggerSink.PublishAsync(seqTriggerEvent, stoppingToken);
+                await _triggerChannel.Writer.WriteAsync(seqTriggerEvent, stoppingToken);
+                continue;
+            }
+
+            // ---- Standard one-shot / standing+RearmBuffer modes (unchanged) -------------------
             if (!crossed)
             {
                 if (!rule.IsArmed)

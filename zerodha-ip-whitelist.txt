@@ -1,5 +1,6 @@
 Production (LiveSpreadCalculator)
-IPs: 74.224.96.31, 104.211.225.167
+IPs: 104.211.228.24
+104.211.225.167
 Redirect URL: https://livespreadcalculator-hmgsc4ddf9hba7gv.southindia-01.azurewebsites.net/api/auth/callback
 
 pradeep-1 (P1-LiveSpreadCalculator)

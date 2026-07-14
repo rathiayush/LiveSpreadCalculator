@@ -78,6 +78,9 @@ public sealed class TriggersController : ControllerBase
         if (request.SlippagePercent <= 0)
             return BadRequest("SlippagePercent must be greater than zero.");
 
+        if (request.MaxFireCount < 0)
+            return BadRequest("MaxFireCount cannot be negative.");
+
         // Near and far month contracts on the same underlying always share the same lot size,
         // so either leg's resolved LotSize works - fall back to the far leg in case only that
         // one has been resolved yet. TriggerRule.Quantity is always the real, exchange-valid
@@ -114,6 +117,7 @@ public sealed class TriggersController : ControllerBase
             OrderType = request.OrderType,
             OneShot = request.OneShot,
             RearmBuffer = request.RearmBuffer,
+            MaxFireCount = request.MaxFireCount,
             SlippagePercent = request.SlippagePercent,
             // Only set for exit rules created from the Positions & PNL page - see
             // TriggerRule.LinkedPositionTradingSymbol and PositionsController.SquareOff, which
@@ -172,6 +176,9 @@ public sealed class TriggersController : ControllerBase
         if (request.SlippagePercent is { } newSlippage && newSlippage <= 0)
             return BadRequest("SlippagePercent must be greater than zero.");
 
+        if (request.MaxFireCount is { } newMaxFireCount && newMaxFireCount < 0)
+            return BadRequest("MaxFireCount cannot be negative.");
+
         var lotSize = spread.NearLeg.LotSize > 0 ? spread.NearLeg.LotSize : spread.FarLeg.LotSize;
         if (lotSize <= 0)
             return BadRequest("Lot size not resolved yet for this spread - build/resolve the universe first.");
@@ -180,6 +187,13 @@ public sealed class TriggersController : ControllerBase
         rule.ThresholdIsPercent = request.ThresholdIsPercent;
         if (request.SlippagePercent is { } slippage)
             rule.SlippagePercent = slippage;
+        if (request.OneShot is { } oneShot)
+            rule.OneShot = oneShot;
+        // Deliberately does NOT reset FireCount - raising MaxFireCount on a rule that already used
+        // up its shots (and disabled itself as a result) just extends how many more it can fire;
+        // re-enable it separately via the Enable/Disable action if it's currently disabled.
+        if (request.MaxFireCount is { } maxFireCount)
+            rule.MaxFireCount = maxFireCount;
 
         if (rule.Operator == TriggerOperator.AbsoluteGreaterThanOrEqual)
         {

@@ -1,4 +1,5 @@
-import { Card, List, Typography, Space, Button, Popconfirm, Tag, Tooltip, Alert } from 'antd'
+import { useMemo, useState } from 'react'
+import { Card, List, Typography, Space, Button, Popconfirm, Tag, Tooltip, Alert, Select, Row, Col } from 'antd'
 import {
   ThunderboltOutlined,
   ClearOutlined,
@@ -8,8 +9,30 @@ import {
   StopOutlined,
   SwapOutlined,
   AppstoreOutlined,
+  FilterOutlined,
 } from '@ant-design/icons'
 import DirectionTag from './DirectionTag'
+
+// Outcome bucket for a single fired trigger, matching exactly what ExecutionStatus below already
+// renders (Blocked/pending/no-action/filled/rejected) - used to power the Outcome filter so
+// "what can I filter by" never drifts out of sync with "what does a row actually show".
+//   - Blocked: margin check failed, nothing was placed at all.
+//   - Pending: triggerFired arrived but the matching basketExecuted push hasn't yet (legs===null).
+//   - No action: rule fired but resolved to zero leg actions (legs===[]).
+//   - Filled: every leg in the basket succeeded.
+//   - Partial: some legs succeeded, some didn't (a genuine partial fill/failure mix).
+//   - Failed: every leg failed (what the "Not filled: ..." tooltip in LegPill reports).
+function getOutcome(e) {
+  if (e.marginBlocked) return 'Blocked'
+  if (e.legs === null || e.legs === undefined) return 'Pending'
+  if (e.legs.length === 0) return 'No action'
+  const successCount = e.legs.filter((l) => l.success).length
+  if (successCount === e.legs.length) return 'Filled'
+  if (successCount === 0) return 'Failed'
+  return 'Partial'
+}
+
+const OUTCOME_OPTIONS = ['Filled', 'Failed', 'Partial', 'Blocked', 'Pending', 'No action']
 
 const ORDER_KIND_COLORS = {
   Basket: 'geekblue',
@@ -88,9 +111,35 @@ function ExecutionStatus({ e }) {
 }
 
 export default function TriggerFeed({ events, onClear, clearError }) {
+  // Both filters default to an empty array - i.e. nothing selected, so the feed shows everything
+  // until you actually pick something. Multi-select rather than single-select since you might
+  // want e.g. both "Filled" and "Partial" at once, or several underlyings side by side.
+  const [underlyingFilter, setUnderlyingFilter] = useState([])
+  const [outcomeFilter, setOutcomeFilter] = useState([])
+
+  const underlyingOptions = useMemo(() => {
+    const names = new Set(events.map((e) => e.underlying || e.spreadId))
+    return Array.from(names).sort((a, b) => a.localeCompare(b)).map((name) => ({ value: name, label: name }))
+  }, [events])
+
+  const filtered = useMemo(() => {
+    return events.filter((e) => {
+      if (underlyingFilter.length > 0 && !underlyingFilter.includes(e.underlying || e.spreadId)) return false
+      if (outcomeFilter.length > 0 && !outcomeFilter.includes(getOutcome(e))) return false
+      return true
+    })
+  }, [events, underlyingFilter, outcomeFilter])
+
+  const hasFilters = underlyingFilter.length > 0 || outcomeFilter.length > 0
+
   return (
     <Card
-      title={<Space><ThunderboltOutlined style={{ color: '#f5a623' }} /> Recent trigger fires ({events.length})</Space>}
+      title={
+        <Space>
+          <ThunderboltOutlined style={{ color: '#f5a623' }} />
+          Recent trigger fires ({filtered.length}{filtered.length !== events.length ? ` of ${events.length}` : ''})
+        </Space>
+      }
       style={{ marginBottom: 16 }}
       extra={
         onClear && (
@@ -116,12 +165,46 @@ export default function TriggerFeed({ events, onClear, clearError }) {
           style={{ marginBottom: 12 }}
         />
       )}
+
+      {events.length > 0 && (
+        <Row gutter={[12, 12]} style={{ marginBottom: 12 }}>
+          <Col xs={24} sm={12}>
+            <Select
+              mode="multiple"
+              allowClear
+              showSearch
+              placeholder={<Space size={6}><FilterOutlined />Filter by symbol (e.g. KPIT, WIPRO)</Space>}
+              value={underlyingFilter}
+              onChange={setUnderlyingFilter}
+              style={{ width: '100%' }}
+              optionFilterProp="label"
+              options={underlyingOptions}
+            />
+          </Col>
+          <Col xs={24} sm={12}>
+            <Select
+              mode="multiple"
+              allowClear
+              placeholder={<Space size={6}><FilterOutlined />Filter by outcome (Filled, Rejected...)</Space>}
+              value={outcomeFilter}
+              onChange={setOutcomeFilter}
+              style={{ width: '100%' }}
+              options={OUTCOME_OPTIONS.map((o) => ({ value: o, label: o }))}
+            />
+          </Col>
+        </Row>
+      )}
+
       {events.length === 0 ? (
         <Typography.Text type="secondary">No triggers fired yet.</Typography.Text>
+      ) : filtered.length === 0 ? (
+        <Typography.Text type="secondary">
+          No trigger fires match the current filter{hasFilters ? 's' : ''}.
+        </Typography.Text>
       ) : (
         <List
           size="small"
-          dataSource={events}
+          dataSource={filtered}
           style={{ maxHeight: 460, overflowY: 'auto' }}
           renderItem={(e, i) => (
             <List.Item key={`${e.fireId ?? e.ruleId}-${e.triggeredAt}-${i}`}>

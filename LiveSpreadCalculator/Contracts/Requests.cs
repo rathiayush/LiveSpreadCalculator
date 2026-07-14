@@ -81,6 +81,12 @@ public sealed class CreateTriggerRuleRequest
     public bool OneShot { get; set; } = true;
     public decimal RearmBuffer { get; set; }
 
+    /// <summary>Bounded "N sequential shots" mode - only takes effect when OneShot is false. 0
+    /// (the default) leaves RearmBuffer above in charge (the standing/re-arm mode). A positive
+    /// value schedules exactly that many total fires with no re-arm buffer needed at all - see
+    /// TriggerRule.MaxFireCount for the full semantics.</summary>
+    public int MaxFireCount { get; set; }
+
     /// <summary>How far past the best bid/ask (as a percent) MarketProtectionService may price the
     /// protected LIMIT order it substitutes for a MARKET leg when this rule fires - applied to
     /// BOTH legs, each off its own reference price. User-chosen in the trigger-creation UI (one
@@ -119,6 +125,16 @@ public sealed class UpdateTriggerRuleRequest
     /// rule's existing SlippagePercent untouched, so callers that don't offer a slippage editor
     /// don't need to round-trip the current value just to patch lots/threshold.</summary>
     public decimal? SlippagePercent { get; set; }
+
+    /// <summary>Null leaves the rule's existing OneShot untouched - see TriggerRule.OneShot.</summary>
+    public bool? OneShot { get; set; }
+
+    /// <summary>Null leaves the rule's existing MaxFireCount untouched - see
+    /// TriggerRule.MaxFireCount. Only takes effect when OneShot (after this same update, if also
+    /// being changed) is false. Changing this does NOT reset FireCount - raising it on a rule
+    /// that already used up its shots just extends how many more it can fire, it doesn't restart
+    /// the count from zero.</summary>
+    public int? MaxFireCount { get; set; }
 }
 
 /// <summary>Exits (fully or partially) an existing open position - see POST

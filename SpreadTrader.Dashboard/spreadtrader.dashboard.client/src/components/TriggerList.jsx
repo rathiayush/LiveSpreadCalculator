@@ -12,7 +12,7 @@ import {
 } from '@ant-design/icons'
 import { api } from '../api'
 
-const emptyEdit = { lots: '', threshold: '', thresholdIsPercent: false, operator: 'gte', slippagePercent: 0.10 }
+const emptyEdit = { lots: '', threshold: '', thresholdIsPercent: false, operator: 'gte', slippagePercent: 0.10, oneShot: true, maxFireCount: 3 }
 
 export default function TriggerList({ triggers, onChanged, spreads }) {
   // The rule currently open in the edit modal, or null - available regardless of enabled/armed/
@@ -71,6 +71,11 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
       thresholdIsPercent: rule.thresholdIsPercent,
       operator: rule.operator === 'LessThanOrEqual' ? 'lte' : 'gte',
       slippagePercent: rule.slippagePercent,
+      oneShot: rule.oneShot,
+      // Existing rules created before this field existed have maxFireCount 0 (unlimited/unused) -
+      // show 3 as a sensible starting point rather than 0, same default as Add trigger, in case
+      // they flip oneShot off here and want a shot count already filled in.
+      maxFireCount: rule.maxFireCount > 0 ? rule.maxFireCount : 3,
     })
     setEditError(null)
   }
@@ -109,6 +114,8 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
         fireWhenGreaterOrEqual,
         thresholdIsPercent: editForm.thresholdIsPercent,
         slippagePercent: Number(editForm.slippagePercent),
+        oneShot: editForm.oneShot,
+        maxFireCount: editForm.oneShot ? 0 : Number(editForm.maxFireCount || 0),
       })
       setEditing(null)
       onChanged()
@@ -171,6 +178,16 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
       key: 'status',
       render: (_, t) => {
         if (!t.enabled) return <Tag icon={<StopOutlined />}>disabled</Tag>
+        // Bounded multi-shot mode (see TriggerRule.MaxFireCount) doesn't use IsArmed/re-arm at
+        // all, so "armed"/"fired" wouldn't reflect anything real for it - show shot progress
+        // instead.
+        if (!t.oneShot && t.maxFireCount > 0) {
+          return (
+            <Tag icon={<ThunderboltOutlined />} color="processing">
+              {t.fireCount ?? 0}/{t.maxFireCount} fired
+            </Tag>
+          )
+        }
         return t.isArmed
           ? <Tag icon={<CheckCircleOutlined />} color="success">armed</Tag>
           : <Tag icon={<ClockCircleOutlined />} color="warning">fired</Tag>
@@ -319,6 +336,34 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
               />
               <Typography.Text>Threshold is a % of the near leg's price (instead of a rupee amount)</Typography.Text>
             </Space>
+
+            <Space>
+              <Switch
+                checked={editForm.oneShot}
+                onChange={(v) => setEditForm((f) => ({ ...f, oneShot: v }))}
+              />
+              <Typography.Text>One-shot (disable after firing)</Typography.Text>
+            </Space>
+
+            {!editForm.oneShot && (
+              <div>
+                <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>
+                  Number of shots
+                </Typography.Text>
+                <InputNumber
+                  min={1}
+                  max={15}
+                  step={1}
+                  addonBefore="Shots"
+                  value={editForm.maxFireCount === '' ? null : editForm.maxFireCount}
+                  onChange={(v) => setEditForm((f) => ({ ...f, maxFireCount: v ?? '' }))}
+                  style={{ width: '100%' }}
+                />
+                <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+                  Fires this many times total, one right after another resolves, for as long as the condition keeps being true. Raising this on a rule that already used up its shots just adds more - it doesn't restart the count.
+                </Typography.Text>
+              </div>
+            )}
 
             <div>
               <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Slippage</Typography.Text>

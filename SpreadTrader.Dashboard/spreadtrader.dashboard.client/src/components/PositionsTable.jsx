@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Card, Table, Tag, Typography, Space, InputNumber, Button, Modal, Switch, message, Alert, Tooltip, Grid, Checkbox, Divider } from 'antd'
-import { CloseCircleOutlined, ScissorOutlined, ReloadOutlined, ThunderboltOutlined, BellOutlined, ArrowDownOutlined, ArrowUpOutlined } from '@ant-design/icons'
+import { CloseCircleOutlined, ScissorOutlined, ReloadOutlined, ThunderboltOutlined, BellOutlined, ArrowDownOutlined, ArrowUpOutlined, ExclamationCircleOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
 // Stable row identity - symbol|exchange|product - used both as the antd rowKey for leg rows and
@@ -147,7 +147,11 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
     }
   }
 
-  const confirmSquareOff = async () => {
+  // Validates the lots/slippage typed into the square-off modal, then hands off to a SECOND,
+  // explicit "are you sure" (see runSquareOff) before anything is actually sent to the exchange.
+  // The first modal is really a form - easy to hit Enter or click through without re-reading the
+  // numbers you just typed - so nothing gets placed until this separate confirm is accepted.
+  const confirmSquareOff = () => {
     if (!target) return
     setError(null)
 
@@ -169,6 +173,33 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
       }
     }
 
+    Modal.confirm({
+      title: 'Confirm square-off',
+      icon: <ExclamationCircleOutlined style={{ color: '#cf1322' }} />,
+      okText: 'Yes, square off',
+      okButtonProps: { danger: true },
+      cancelText: 'Cancel',
+      content: (
+        <div>
+          {target.legs.map((p) => {
+            const key = rowKey(p)
+            return (
+              <div key={key} style={{ marginBottom: 4 }}>
+                {p.quantity > 0 ? 'SELL' : 'BUY'} <strong>{Number(modalLots[key])}</strong> lot(s) of <strong>{p.tradingSymbol}</strong>
+              </div>
+            )
+          })}
+          <div style={{ marginTop: 8 }}>Slippage: {slip}%</div>
+          <div style={{ marginTop: 8 }}>
+            <Typography.Text type="secondary">This places real order(s) immediately and cannot be undone.</Typography.Text>
+          </div>
+        </div>
+      ),
+      onOk: () => runSquareOff(slip),
+    })
+  }
+
+  const runSquareOff = async (slip) => {
     setModalBusy(true)
     try {
       // Exit every SELL-side leg (closing a long position) before any BUY-side leg (covering a
