@@ -142,7 +142,14 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
 
         // The price the order was actually placed at: the protection-band LIMIT price for a
         // MARKET-converted leg, or "MKT" when it went as a raw market order with no price reference.
-        var priceText = l.Price is { } p ? $"@ {p:0.##}" : "@ MKT";
+        // The parenthetical after it is which live price that protection band was anchored to -
+        // "Bid/Ask" (best ask for a BUY / best bid for a SELL, from the live ticker) or "LTP"
+        // (last traded price - either a fallback when depth hadn't arrived yet, or the only
+        // reference available at all for a manual square-off) - see
+        // OrderLegRequest.PriceReference/MarketProtectionService.
+        var priceText = l.Price is { } p
+            ? $"@ {p:0.##}{(string.IsNullOrWhiteSpace(l.PriceReference) ? "" : $" ({Esc(l.PriceReference!)})")}"
+            : "@ MKT";
 
         string status;
         if (!l.Success)
@@ -154,7 +161,7 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
         else
             status = $"⭕ Not filled 0/{l.Quantity}";
 
-        // e.g. "🟢 NIFTY25JULFUT BUY ×75 @ 1190.35 (LIMIT) - ✅ Filled 75/75  [COMPLETE]  #2507...".
+        // e.g. "🟢 NIFTY25JULFUT BUY ×75 @ 1190.35 (Bid/Ask) (LIMIT) - ✅ Filled 75/75  [COMPLETE]  #2507...".
         var orderType = string.IsNullOrWhiteSpace(l.OrderType) ? "" : $" ({Esc(l.OrderType!)})";
         var line = $"{sideEmoji} <b>{Esc(l.TradingSymbol)}</b> {Esc(l.TransactionType)} ×{l.Quantity} <b>{priceText}</b>{orderType} - {status}";
         if (!string.IsNullOrWhiteSpace(l.Status))

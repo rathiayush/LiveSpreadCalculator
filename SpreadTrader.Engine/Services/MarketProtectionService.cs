@@ -35,6 +35,13 @@ public sealed class MarketProtectionService
     /// entirely.</summary>
     private const decimal DefaultTickSize = 0.05m;
 
+    /// <summary>OrderLegRequest.PriceReference values - live best bid/ask from the ticker, or
+    /// last traded price. Kept as named constants (rather than free-floating string literals) so
+    /// Protect/ProtectFromReference and every caller that reads them back (Telegram/dashboard
+    /// formatting) can't drift out of sync on the exact text.</summary>
+    public const string ReferenceBidAsk = "Bid/Ask";
+    public const string ReferenceLtp = "LTP";
+
     private readonly ITickStore _tickStore;
     private readonly ILogger<MarketProtectionService> _logger;
 
@@ -65,11 +72,16 @@ public sealed class MarketProtectionService
         }
 
         var isBuy = string.Equals(leg.TransactionType, "BUY", StringComparison.OrdinalIgnoreCase);
+        var bidAskAvailable = isBuy ? tick.BestAskPrice > 0 : tick.BestBidPrice > 0;
         var reference = isBuy
             ? (tick.BestAskPrice > 0 ? tick.BestAskPrice : tick.LastPrice)
             : (tick.BestBidPrice > 0 ? tick.BestBidPrice : tick.LastPrice);
+        // Best ask/bid whenever depth has actually arrived for this instrument; LTP only as the
+        // fallback used above when it hasn't (0) - see the field doc comment on
+        // OrderLegRequest.PriceReference for why this is tracked through to the placed order.
+        var referenceKind = bidAskAvailable ? ReferenceBidAsk : ReferenceLtp;
 
-        return ProtectFromReference(leg, reference, tickSize, context, slippagePercent);
+        return ProtectFromReference(leg, reference, tickSize, context, slippagePercent, referenceKind);
     }
 
     /// <summary>Reference-price variant, for callers that already have an up-to-date price
@@ -79,8 +91,11 @@ public sealed class MarketProtectionService
     /// may have no data for it at all even though Kite itself has a perfectly good LTP.
     ///
     /// Returns <paramref name="leg"/> unchanged if it isn't OrderType=MARKET, or if
-    /// <paramref name="referencePrice"/> is not a usable (&gt; 0) price.</summary>
-    public OrderLegRequest ProtectFromReference(OrderLegRequest leg, decimal referencePrice, decimal tickSize, string context, decimal slippagePercent)
+    /// <paramref name="referencePrice"/> is not a usable (&gt; 0) price. <paramref name="referenceKind"/>
+    /// defaults to <see cref="ReferenceLtp"/> since every caller that doesn't come through
+    /// <see cref="Protect"/> (i.e. manual square-off, via PositionsController) is already passing
+    /// Kite's REST last_price rather than live ticker depth.</summary>
+    public OrderLegRequest ProtectFromReference(OrderLegRequest leg, decimal referencePrice, decimal tickSize, string context, decimal slippagePercent, string referenceKind = ReferenceLtp)
     {
         if (!string.Equals(leg.OrderType, "MARKET", StringComparison.OrdinalIgnoreCase))
             return leg;
@@ -106,8 +121,8 @@ public sealed class MarketProtectionService
         var protectedPrice = RoundToTick(rawPrice, effectiveTickSize, roundUp: isBuy);
 
         _logger.LogInformation(
-            "{Context}: {Symbol} MARKET -> protected LIMIT @ {Price} ({Percent}% band around {Reference}, tick size {TickSize})",
-            context, leg.TradingSymbol, protectedPrice, slippagePercent, referencePrice, effectiveTickSize);
+            "{Context}: {Symbol} MARKET -> protected LIMIT @ {Price} ({Percent}% band around {ReferenceKind} {Reference}, tick size {TickSize})",
+            context, leg.TradingSymbol, protectedPrice, slippagePercent, referenceKind, referencePrice, effectiveTickSize);
 
         return new OrderLegRequest
         {
@@ -118,6 +133,7 @@ public sealed class MarketProtectionService
             Product = leg.Product,
             OrderType = "LIMIT",
             Price = protectedPrice,
+            PriceReference = referenceKind,
             // IOC instead of the DAY default: fill whatever it can immediately and cancel the
             // rest right away, rather than resting in the book if price moves past the
             // protection band - see OrderDispatchHostedService's class doc comment for why this

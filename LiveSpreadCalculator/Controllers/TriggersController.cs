@@ -246,6 +246,14 @@ public sealed class TriggersController : ControllerBase
         return Ok(rule);
     }
 
+    /// <summary>Manually re-enables a rule - including one that disabled itself after using up
+    /// every bounded shot (FireCount reached MaxFireCount - see TriggerRule.MaxFireCount) or after
+    /// its single OneShot fire. FireCount is reset to 0 here (not just Enabled/IsArmed) - without
+    /// this, a used-up bounded-shot rule would come back Enabled=true but still sitting at
+    /// FireCount==MaxFireCount, so SpreadCalculationHostedService.EvaluateTriggersAsync's bounded-
+    /// shots guard (`if (rule.FireCount >= rule.MaxFireCount) continue;`) would silently skip it
+    /// forever - it would look enabled in the UI but never actually fire again. A plain OneShot
+    /// rule's FireCount is always 0 already, so this is a no-op for that case.</summary>
     [HttpPost("{id}/enable")]
     public ActionResult<TriggerRule> Enable(string id)
     {
@@ -253,6 +261,7 @@ public sealed class TriggersController : ControllerBase
         if (rule is null) return NotFound();
         rule.Enabled = true;
         rule.IsArmed = true;
+        rule.FireCount = 0;
         if (!TryUpsert(rule, out var problem)) return problem!;
         return Ok(rule);
     }

@@ -162,6 +162,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
             if (blockReason is not null)
             {
                 await PublishBlockedAsync(triggerEvent, spread.Underlying, orderKind, blockReason, stoppingToken);
+                RestoreRuleIfNothingFilled(rule.Id); // nothing was placed at all - don't burn a shot on this
                 return; // fail-safe: nothing placed at all
             }
         }
@@ -177,7 +178,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         {
             var leg = legs[i];
             var result = placements[i];
-            legResults.Add(new OrderLegResult(leg.TradingSymbol, leg.TransactionType, leg.Quantity, result.Success, result.OrderId, result.ErrorMessage, FilledQuantity: result.FilledQuantity, Price: leg.Price, OrderType: leg.OrderType, Status: result.Status));
+            legResults.Add(new OrderLegResult(leg.TradingSymbol, leg.TransactionType, leg.Quantity, result.Success, result.OrderId, result.ErrorMessage, FilledQuantity: result.FilledQuantity, Price: leg.Price, OrderType: leg.OrderType, Status: result.Status, PriceReference: leg.PriceReference));
 
             if (!result.Success)
             {
@@ -185,6 +186,13 @@ public sealed class OrderDispatchHostedService : BackgroundService
                     rule.Id, leg.TradingSymbol, leg.TransactionType, result.ErrorMessage);
             }
         }
+
+        // Captured BEFORE any square-off cleanup is appended below, so this reflects only the
+        // ORIGINAL basket legs - true when nothing filled at all (every leg rejected, or skipped
+        // because the hedge leg didn't fill - see PlaceHedgeFirstAsync). A genuine partial fill
+        // that gets auto-squared-off is NOT "nothing filled" - real position was opened (and then
+        // unwound), so that attempt legitimately counts and the rule stays fired/consumed.
+        var anyLegFilled = legResults.Any(r => r.FilledQuantity > 0);
 
         if (_options.AutoSquareOffOnPartialFill)
         {
@@ -201,9 +209,44 @@ public sealed class OrderDispatchHostedService : BackgroundService
                 legResults.AddRange(await SquareOffPartialFillAsync(rule, legPlans, placements, stoppingToken));
         }
 
+        if (!anyLegFilled)
+            RestoreRuleIfNothingFilled(rule.Id); // fully rejected/unfilled - don't burn a shot on this
+
         await _executionSink.PublishAsync(
             new BasketExecutionEvent(triggerEvent.FireId, rule.Id, spread.Id, spread.Underlying, orderKind, legResults, MarginBlocked: false, BlockedReason: null, DateTimeOffset.UtcNow),
             stoppingToken);
+    }
+
+    /// <summary>Undoes the "this rule has fired" bookkeeping (IsArmed/Enabled/FireCount) that
+    /// SpreadCalculationHostedService.EvaluateTriggersAsync applies BEFORE the actual order
+    /// outcome is known, for the case where nothing from this attempt actually filled - the whole
+    /// basket was blocked on margin, or every leg was rejected/skipped (e.g. the hedge leg didn't
+    /// fill so the sell leg was never even sent - see PlaceHedgeFirstAsync). An attempt like that
+    /// didn't open or change any real position, so it shouldn't cost the rule its one shot
+    /// (OneShot) or one of its bounded shots (MaxFireCount) either - re-arms/re-enables it (and
+    /// gives the shot back) so the next crossing gets a genuine attempt instead of silently doing
+    /// nothing because the rule already looks "used up" from a fire that never actually placed
+    /// anything. Deliberately NOT called for a genuine partial fill that gets auto-squared-off -
+    /// see the anyLegFilled comment in DispatchAsync. LastFiredAt is deliberately left untouched
+    /// so EngineOptions.MinFireIntervalPerRuleMs still throttles an immediate retry (e.g. against
+    /// a persistently-insufficient-margin condition that won't resolve instantly).</summary>
+    private void RestoreRuleIfNothingFilled(string ruleId)
+    {
+        var rule = _ruleStore.Get(ruleId);
+        if (rule is null) return; // deleted since it fired - nothing to restore
+
+        var changed = false;
+        if (!rule.IsArmed) { rule.IsArmed = true; changed = true; }
+        if (!rule.Enabled) { rule.Enabled = true; changed = true; }
+        if (!rule.OneShot && rule.MaxFireCount > 0 && rule.FireCount > 0) { rule.FireCount--; changed = true; }
+
+        if (changed)
+        {
+            _ruleStore.Upsert(rule);
+            _logger.LogInformation(
+                "Rule {RuleId}: nothing filled on this fire (blocked or fully rejected) - re-armed/re-enabled so it can try again.",
+                ruleId);
+        }
     }
 
     /// <summary>Places the basket hedge-first: all BUY (long/hedge) legs go in first and only once
@@ -417,7 +460,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
 
             var flatten = _marketProtection.Protect(flattenLeg, plan.InstrumentToken, plan.TickSize, $"Rule {ruleId} auto-square-off", rule.SlippagePercent);
             var result = await _orderGateway.PlaceOrderAsync(flatten, cancellationToken);
-            squareOffResults.Add(new OrderLegResult(flatten.TradingSymbol, flatten.TransactionType, flatten.Quantity, result.Success, result.OrderId, result.ErrorMessage, IsSquareOff: true, FilledQuantity: result.FilledQuantity, Price: flatten.Price, OrderType: flatten.OrderType, Status: result.Status));
+            squareOffResults.Add(new OrderLegResult(flatten.TradingSymbol, flatten.TransactionType, flatten.Quantity, result.Success, result.OrderId, result.ErrorMessage, IsSquareOff: true, FilledQuantity: result.FilledQuantity, Price: flatten.Price, OrderType: flatten.OrderType, Status: result.Status, PriceReference: flatten.PriceReference));
 
             if (result.Success)
             {
