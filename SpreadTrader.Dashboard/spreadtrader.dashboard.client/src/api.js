@@ -110,6 +110,28 @@ export const api = {
   getAuthStatus: () => authFetch('/api/auth/status').then(handle),
   getLoginUrl: () => authFetch('/api/auth/login-url').then(handle),
 
+  // Changes the signed-in user's own password. On success the backend invalidates every existing
+  // token for this user (security-stamp bump), so the caller must clear the local session and send
+  // the user back to the login screen - see ProfileModal.jsx. Uses plain fetch instead of authFetch
+  // so a "current password is wrong" 400 surfaces its own message; a genuine 401 (already-dead
+  // token) still throws below.
+  changePassword: async (currentPassword, newPassword) => {
+    const response = await fetch('/api/auth/change-password', {
+      method: 'POST',
+      headers: authHeaders(jsonHeaders),
+      body: JSON.stringify({ currentPassword, newPassword }),
+    })
+    if (!response.ok) {
+      let msg = 'Could not change password.'
+      try {
+        const body = await response.json()
+        if (body?.error) msg = body.error
+      } catch { /* keep default */ }
+      throw new Error(msg)
+    }
+    return response.json() // { message }
+  },
+
   // Live open positions + PNL (GET /portfolio/positions under the hood) - see
   // KitePositionsService. { success, positions: [...], errorMessage }.
   getPositions: () => authFetch('/api/positions').then(handle),
