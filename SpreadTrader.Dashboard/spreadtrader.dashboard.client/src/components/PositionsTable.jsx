@@ -77,6 +77,27 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
         ? legs.reduce((sum, p) => sum + (p.exitPnl ?? 0), 0)
         : null
 
+      // The spread VALUE (not PNL) at entry and right now, in the same Far-minus-Near convention
+      // SpreadDefinition/SpreadSnapshot use everywhere else - lets you see how far the spread
+      // itself has actually moved since you got in, independent of quantity/lot size. Both need
+      // the FULL pair (near AND far) to mean anything; a naked single leg has no "spread" to
+      // measure, so these stay null/blank for a lone leg the same way combinedExitPnl does.
+      //   - Average entered at: each leg's own AveragePrice (Kite's fill-weighted average) -
+      //     mirrors AddPositionExitTriggerPage's identical entrySpreadValue calculation, so a
+      //     position shows the same "entered at" figure whether you're looking at it here or on
+      //     that page.
+      //   - Exit running spread: each leg's own ExitPrice (bid if long/selling-to-close, ask if
+      //     short/buying-to-close - see PositionExitPricing.Compute) - what the spread would
+      //     actually print if you closed both legs this instant, as opposed to the live-streamed
+      //     SpreadSnapshot value (which is priced for a fresh ENTRY, not for unwinding this
+      //     specific held position).
+      const averageEnteredAt = (nearPos && farPos)
+        ? farPos.averagePrice - nearPos.averagePrice
+        : null
+      const exitRunningSpread = (nearPos && farPos && nearPos.exitPrice && farPos.exitPrice)
+        ? farPos.exitPrice - nearPos.exitPrice
+        : null
+
       rows.push({
         key: `group|${s.id}`,
         isGroup: true,
@@ -86,6 +107,8 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
         hasFullPair: legs.length === 2,
         combinedPnl: legs.reduce((sum, p) => sum + (p.pnl ?? 0), 0),
         combinedExitPnl,
+        averageEnteredAt,
+        exitRunningSpread,
         children: legs,
       })
     }
@@ -397,6 +420,33 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
       },
     },
     {
+      // Group-only (see averageEnteredAt above) - a naked single leg has no spread value to show
+      // here, same as the blank cells combinedPnl/combinedExitPnl already leave for one.
+      title: (
+        <Tooltip title="Spread value (Far minus Near) at entry, from each leg's own average fill price - the same figure Add Exit Trigger shows as 'Entered at'.">
+          Entered at
+        </Tooltip>
+      ),
+      key: 'averageEnteredAt',
+      render: (_, r) => (r.isGroup && r.averageEnteredAt !== null) ? r.averageEnteredAt.toFixed(2) : (r.isGroup ? '—' : ''),
+      sorter: (a, b) => (a.isGroup ? (a.averageEnteredAt ?? 0) : 0) - (b.isGroup ? (b.averageEnteredAt ?? 0) : 0),
+    },
+    {
+      title: (
+        <Tooltip title="Spread value (Far minus Near) if you closed both legs right now, priced off each leg's own Exit price (bid if long, ask if short) - not the live-streamed spread value, which is priced for a fresh entry, not for unwinding this held position.">
+          Running spread
+        </Tooltip>
+      ),
+      key: 'exitRunningSpread',
+      render: (_, r) => {
+        if (!r.isGroup) return ''
+        return r.exitRunningSpread === null
+          ? '—'
+          : <Typography.Text strong>{r.exitRunningSpread.toFixed(2)}</Typography.Text>
+      },
+      sorter: (a, b) => (a.isGroup ? (a.exitRunningSpread ?? 0) : 0) - (b.isGroup ? (b.exitRunningSpread ?? 0) : 0),
+    },
+    {
       title: 'Qty (lots)',
       key: 'quantity',
       render: (_, r) => {
@@ -567,6 +617,14 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
             {r.combinedExitPnl >= 0 ? '+' : ''}{r.combinedExitPnl.toFixed(2)}
           </Typography.Text>
         )}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 2 }}>
+        <Typography.Text type="secondary">Entered at</Typography.Text>
+        <Typography.Text>{r.averageEnteredAt === null ? '—' : r.averageEnteredAt.toFixed(2)}</Typography.Text>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 2 }}>
+        <Typography.Text type="secondary">Running spread</Typography.Text>
+        <Typography.Text strong>{r.exitRunningSpread === null ? '—' : r.exitRunningSpread.toFixed(2)}</Typography.Text>
       </div>
 
       <Divider style={{ margin: '10px 0' }} />

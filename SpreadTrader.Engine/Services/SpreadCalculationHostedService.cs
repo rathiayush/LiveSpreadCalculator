@@ -144,8 +144,18 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             // SpreadSnapshot.SpreadPercent.
             var spreadPercent = nearPrice == 0 ? 0m : spreadValue / nearPrice * 100m;
 
+            // Both fixed directions' executable price, always both computed (unlike SpreadValue/
+            // Direction above, which only reflects whichever direction the ask-ask rule currently
+            // favors) - see SpreadSnapshot.BuySpreadValue/SellSpreadValue. Same bid-missing-yet
+            // fallback to that leg's own ask used everywhere else in this cycle.
+            var nearBidOrAsk = nearTick.BestBidPrice != 0 ? nearTick.BestBidPrice : nearTick.BestAskPrice;
+            var farBidOrAsk = farTick.BestBidPrice != 0 ? farTick.BestBidPrice : farTick.BestAskPrice;
+            var buySpreadValue = farBidOrAsk - nearTick.BestAskPrice; // BuyNear(ask) / SellFar(bid)
+            var sellSpreadValue = farTick.BestAskPrice - nearBidOrAsk; // SellNear(bid) / BuyFar(ask)
+
             var snapshot = new SpreadSnapshot(
-                spread.Id, spread.Underlying, nearPrice, farPrice, direction, spreadValue, spreadPercent, DateTimeOffset.UtcNow);
+                spread.Id, spread.Underlying, nearPrice, farPrice, direction, spreadValue, spreadPercent, DateTimeOffset.UtcNow,
+                buySpreadValue, sellSpreadValue);
 
             // Always kept fresh for the ranking job / GET /api/spreads/snapshot, independent of
             // whether the value actually changed since the last cycle.

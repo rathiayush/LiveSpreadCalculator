@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Card, Table, Typography, Input, Space } from 'antd'
+import { Card, Table, Typography, Input, Space, Tooltip } from 'antd'
 import { LineChartOutlined } from '@ant-design/icons'
 import DirectionTag from './DirectionTag'
 import FlashValue from './FlashValue'
@@ -90,6 +90,68 @@ export default function SpreadGrid({ definitions, liveValues }) {
           </span>
         </FlashValue>
       ) : '—',
+    },
+    {
+      // Always the BuyNear(ask)/SellFar(bid) price, regardless of which direction the Spread/
+      // Spread % columns currently favor - see SpreadSnapshot.BuySpreadValue. Shown alongside
+      // Sell spread as a two-way live quote on the spread itself, so you can see what going
+      // either direction costs right now instead of only the auto-picked one.
+      title: (
+        <Tooltip title="What Buy Near / Sell Far would cost right now (near leg at ask, far leg at bid) - always shown, regardless of which direction the Spread column is currently favoring.">
+          Buy spread
+        </Tooltip>
+      ),
+      key: 'buySpread',
+      sorter: (a, b) => (a.live?.buySpreadValue ?? 0) - (b.live?.buySpreadValue ?? 0),
+      render: (_, r) => !r.live ? '—' : (
+        <FlashValue value={r.live.buySpreadValue}>
+          <span style={{ color: r.live.buySpreadValue >= 0 ? '#3ddc84' : '#ff5c5c' }}>
+            {r.live.buySpreadValue.toFixed(2)}
+          </span>
+        </FlashValue>
+      ),
+    },
+    {
+      // Always the SellNear(bid)/BuyFar(ask) price - the other side of the two-way quote
+      // alongside Buy spread. See SpreadSnapshot.SellSpreadValue.
+      title: (
+        <Tooltip title="What Sell Near / Buy Far would net right now (near leg at bid, far leg at ask) - always shown, regardless of which direction the Spread column is currently favoring.">
+          Sell spread
+        </Tooltip>
+      ),
+      key: 'sellSpread',
+      sorter: (a, b) => (a.live?.sellSpreadValue ?? 0) - (b.live?.sellSpreadValue ?? 0),
+      render: (_, r) => !r.live ? '—' : (
+        <FlashValue value={r.live.sellSpreadValue}>
+          <span style={{ color: r.live.sellSpreadValue >= 0 ? '#3ddc84' : '#ff5c5c' }}>
+            {r.live.sellSpreadValue.toFixed(2)}
+          </span>
+        </FlashValue>
+      ),
+    },
+    {
+      // Plain gap between the two-way quote above - Sell spread minus Buy spread, no percentage
+      // (a raw rupee/point difference, same units as the two columns it's derived from).
+      title: (
+        <Tooltip title="Sell spread minus Buy spread - the gap between the two directions' executable prices right now.">
+          Spread difference
+        </Tooltip>
+      ),
+      key: 'spreadDifference',
+      sorter: (a, b) => {
+        const da = a.live ? a.live.sellSpreadValue - a.live.buySpreadValue : 0
+        const db = b.live ? b.live.sellSpreadValue - b.live.buySpreadValue : 0
+        return da - db
+      },
+      render: (_, r) => {
+        if (!r.live) return '—'
+        const diff = r.live.sellSpreadValue - r.live.buySpreadValue
+        return (
+          <FlashValue value={diff}>
+            <Typography.Text type="secondary">{diff.toFixed(2)}</Typography.Text>
+          </FlashValue>
+        )
+      },
     },
     {
       title: 'Near price',
