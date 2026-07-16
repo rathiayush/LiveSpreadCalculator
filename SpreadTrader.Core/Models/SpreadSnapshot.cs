@@ -25,7 +25,16 @@ public readonly record struct SpreadSnapshot(
     string Direction,
     decimal SpreadValue,
     decimal SpreadPercent,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    /// <summary>Always-computed BuyNear(ask)/SellFar(bid) price, regardless of which direction
+    /// SpreadValue/Direction currently favors - shown alongside SellSpreadValue as a two-way
+    /// live quote on the spread itself on the Live Spreads grid. Same bid-missing fallback to
+    /// that leg's own ask as the rest of this snapshot. Display only - not consulted by trigger
+    /// evaluation or order dispatch.</summary>
+    decimal BuySpreadValue = 0m,
+    /// <summary>Always-computed SellNear(bid)/BuyFar(ask) price - the other side of the two-way
+    /// quote alongside BuySpreadValue. Display only, same caveats.</summary>
+    decimal SellSpreadValue = 0m);
 
 /// <summary>
 /// A spread's snapshot with its rank (1 = biggest absolute spread %) among all currently
