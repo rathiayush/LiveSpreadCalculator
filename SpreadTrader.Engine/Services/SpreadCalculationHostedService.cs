@@ -236,7 +236,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
                 if (rule.FireCount >= rule.MaxFireCount) rule.Enabled = false;
                 _ruleStore.Upsert(rule); // persist shot count/fired/disabled state so a restart doesn't lose or repeat a shot
 
-                var seqTriggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow);
+                var seqTriggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow, rule.IsExitTrigger);
                 _logger.LogInformation("Trigger fired (shot {FireCount}/{MaxFireCount}): rule={RuleId} spread={SpreadId} value={Value} direction={Direction}",
                     rule.FireCount, rule.MaxFireCount, rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction);
 
@@ -263,7 +263,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             if (rule.OneShot) rule.Enabled = false;
             _ruleStore.Upsert(rule); // persist fired/disabled state so a restart doesn't re-fire it
 
-            var triggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow);
+            var triggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow, rule.IsExitTrigger);
             _logger.LogInformation("Trigger fired: rule={RuleId} spread={SpreadId} value={Value} direction={Direction}",
                 rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction);
 

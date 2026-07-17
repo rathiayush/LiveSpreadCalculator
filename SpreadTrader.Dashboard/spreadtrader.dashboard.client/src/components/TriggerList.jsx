@@ -13,7 +13,7 @@ import { api } from '../api'
 
 const emptyEdit = { lots: '', threshold: '', thresholdIsPercent: false, operator: 'gte', slippagePercent: 0.10, oneShot: true, maxFireCount: 3 }
 
-export default function TriggerList({ triggers, onChanged, spreads }) {
+export default function TriggerList({ triggers, onChanged, spreads, title = 'Configured triggers' }) {
   // The rule currently open in the edit modal, or null - available regardless of enabled/armed/
   // fired status, since a rule that already fired (one-shot, now disabled) is just as valid to
   // retune for next time as one that's still armed.
@@ -45,8 +45,11 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
     onChanged()
   }
 
+  // Deletes only what's actually shown in this table (already tab-filtered by the caller -
+  // TriggersPage passes only entry or only exit rules), one by one - NOT the global
+  // DELETE /api/triggers, which would wipe the other tab's rules too.
   const removeAll = async () => {
-    await api.deleteAllTriggers()
+    await Promise.all(triggers.map((t) => api.deleteTrigger(t.id)))
     onChanged()
   }
 
@@ -212,11 +215,11 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
   return (
     <>
       <Card
-        title={<Space><ThunderboltOutlined style={{ color: '#f5a623' }} /> Configured triggers ({triggers.length})</Space>}
+        title={<Space><ThunderboltOutlined style={{ color: '#f5a623' }} /> {title} ({triggers.length})</Space>}
         extra={triggers.length > 0 && (
           <Popconfirm
             title={`Delete all ${triggers.length} triggers?`}
-            description="This removes every trigger rule, not just the ones shown on this page. Cannot be undone."
+            description="Removes every trigger in this list (across all pages of this table). Cannot be undone."
             onConfirm={removeAll}
             okText="Delete all"
             okButtonProps={{ danger: true }}
