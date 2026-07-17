@@ -173,6 +173,28 @@ public sealed class OrderDispatchHostedService : BackgroundService
         // as a naked short, and keeps the brief between-legs window on the safe (long) side.
         var placements = await PlaceHedgeFirstAsync(legs, rule.Id, stoppingToken);
 
+        if (_options.AutoSquareOffOnPartialFill)
+        {
+            // A leg whose fill status came back "OPEN" (the post-placement poll gave up before
+            // Kite reached a terminal status - see KiteOrderGateway.PollOrderStatusAsync) is
+            // still live on the exchange and could fill later on its own, creating an untracked
+            // position with no square-off ever fired for it. Cancel those outright rather than
+            // leaving them to resolve unattended - this only ever affects DAY-validity legs
+            // (protected IOC legs resolve to a terminal status almost immediately, so they
+            // essentially never land here). Runs BEFORE the retry below so a leg is never
+            // retried while its original order might still be resting/fillable - that would
+            // risk placing two live orders for the same leg at once.
+            await CancelStrayOpenOrdersAsync(rule.Id, legs, placements, stoppingToken);
+
+            // One more shot at whichever leg(s) came back genuinely rejected/cancelled (NOT the
+            // hedge's deliberately-skipped partner - see RetryUnfilledLegsAsync) at a wider
+            // slippage band, before falling back to unwinding whatever else already filled.
+            // Mutates legs/placements in place, so legResults below and the square-off after it
+            // both see the retried outcome rather than the original rejection.
+            if (_options.RetryUnfilledLegOnPartialFill)
+                await RetryUnfilledLegsAsync(rule, legPlans, legs, placements, stoppingToken);
+        }
+
         var legResults = new List<OrderLegResult>(legs.Count);
         for (var i = 0; i < legs.Count; i++)
         {
@@ -187,27 +209,17 @@ public sealed class OrderDispatchHostedService : BackgroundService
             }
         }
 
-        // Captured BEFORE any square-off cleanup is appended below, so this reflects only the
-        // ORIGINAL basket legs - true when nothing filled at all (every leg rejected, or skipped
-        // because the hedge leg didn't fill - see PlaceHedgeFirstAsync). A genuine partial fill
-        // that gets auto-squared-off is NOT "nothing filled" - real position was opened (and then
-        // unwound), so that attempt legitimately counts and the rule stays fired/consumed.
+        // Captured AFTER the cancel/retry above but BEFORE any square-off cleanup is appended
+        // below, so this reflects the final outcome of the ORIGINAL basket legs (including a
+        // successful retry) - true only when nothing filled at all (every leg rejected, still
+        // rejected after retry, or skipped because the hedge leg didn't fill - see
+        // PlaceHedgeFirstAsync). A genuine partial fill that gets auto-squared-off is NOT
+        // "nothing filled" - real position was opened (and then unwound), so that attempt
+        // legitimately counts and the rule stays fired/consumed.
         var anyLegFilled = legResults.Any(r => r.FilledQuantity > 0);
 
-        if (_options.AutoSquareOffOnPartialFill)
-        {
-            // A leg whose fill status came back "OPEN" (the post-placement poll gave up before
-            // Kite reached a terminal status - see KiteOrderGateway.PollOrderStatusAsync) is
-            // still live on the exchange and could fill later on its own, creating an untracked
-            // position with no square-off ever fired for it. Cancel those outright rather than
-            // leaving them to resolve unattended - this only ever affects DAY-validity legs
-            // (protected IOC legs resolve to a terminal status almost immediately, so they
-            // essentially never land here).
-            await CancelStrayOpenOrdersAsync(rule.Id, legs, placements, stoppingToken);
-
-            if (legPlans.Count > 1)
-                legResults.AddRange(await SquareOffPartialFillAsync(rule, legPlans, placements, stoppingToken));
-        }
+        if (_options.AutoSquareOffOnPartialFill && legPlans.Count > 1)
+            legResults.AddRange(await SquareOffPartialFillAsync(rule, legPlans, placements, stoppingToken));
 
         if (!anyLegFilled)
             RestoreRuleIfNothingFilled(rule.Id); // fully rejected/unfilled - don't burn a shot on this
@@ -401,7 +413,83 @@ public sealed class OrderDispatchHostedService : BackgroundService
                 "Rule {RuleId}: {Symbol} order {OrderId} is still open/unconfirmed - cancelling it rather than leaving it to resolve unattended.",
                 ruleId, legs[i].TradingSymbol, result.OrderId);
 
-            await _orderGateway.CancelOrderAsync(result.OrderId, legs[i].Variety, cancellationToken);
+            var cancelled = await _orderGateway.CancelOrderAsync(result.OrderId, legs[i].Variety, cancellationToken);
+            if (cancelled)
+            {
+                // Confirmed cancelled - nothing left resting for this leg on the exchange, so
+                // it's now genuinely safe for RetryUnfilledLegsAsync to place a fresh order for
+                // it without risking the original also filling later and double-executing this
+                // leg. Left as "OPEN" if cancellation itself failed/couldn't be confirmed - see
+                // RetryUnfilledLegsAsync, which deliberately treats "OPEN" as not retry-eligible.
+                result.Success = false;
+                result.Status = "CANCELLED";
+                result.ErrorMessage = "Cancelled - status could not be confirmed as filled/rejected in time.";
+            }
+        }
+    }
+
+    /// <summary>One more attempt, at a wider slippage band, for whichever leg(s) of a genuinely
+    /// partial fill came back rejected/cancelled - tried BEFORE SquareOffPartialFillAsync
+    /// unwinds whatever else already filled, since a fill (even at worse pricing) keeps the
+    /// intended hedged spread intact, which is strictly better than flattening a leg that DID
+    /// fill and ending the attempt with no position at all. Only fires for a genuine partial
+    /// fill (at least one leg already filled - nothing to protect otherwise) and only retries
+    /// legs that are actually safe to retry:
+    ///  - NOT "SKIPPED" (the hedge's sell/buy partner deliberately never sent because the hedge
+    ///    leg itself didn't fill - see PlaceHedgeFirstAsync). Retrying that would defeat the
+    ///    entire point of hedge-first sequencing: it would risk placing a naked short/long
+    ///    exactly like PlaceHedgeFirstAsync exists to avoid.
+    ///  - NOT "OPEN" (CancelStrayOpenOrdersAsync, which runs immediately before this, couldn't
+    ///    confirm the original order was actually cancelled) - retrying that risks the original
+    ///    order ALSO filling later, double-executing this leg.
+    /// Mutates <paramref name="legs"/>/<paramref name="placements"/> in place at the retried
+    /// index/indices so every caller downstream (legResults, SquareOffPartialFillAsync) sees the
+    /// retry's outcome instead of the original rejection.</summary>
+    private async Task RetryUnfilledLegsAsync(TriggerRule rule, List<LegPlan> legPlans, List<OrderLegRequest> legs, OrderResult[] placements, CancellationToken cancellationToken)
+    {
+        var filledCount = 0;
+        var retryIndices = new List<int>();
+        for (var i = 0; i < placements.Length; i++)
+        {
+            if (placements[i].Success && placements[i].FilledQuantity > 0) { filledCount++; continue; }
+            if (string.Equals(placements[i].Status, "SKIPPED", StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.Equals(placements[i].Status, "OPEN", StringComparison.OrdinalIgnoreCase)) continue;
+            retryIndices.Add(i);
+        }
+
+        if (filledCount == 0 || retryIndices.Count == 0)
+            return; // nothing filled yet to protect, or nothing eligible to retry
+
+        var widerSlippage = rule.SlippagePercent * _options.RetryUnfilledLegSlippageMultiplier;
+
+        foreach (var i in retryIndices)
+        {
+            var plan = legPlans[i];
+            _logger.LogWarning(
+                "Rule {RuleId}: {Symbol} {Side} did not fill at {OriginalSlippage}% slippage ({Status}) - retrying once at {WiderSlippage}% before falling back to square-off.",
+                rule.Id, plan.Request.TradingSymbol, plan.Request.TransactionType, rule.SlippagePercent, placements[i].Status, widerSlippage);
+
+            // Re-priced fresh off whatever the tick store has right now (Protect reads it at
+            // call time) rather than reusing the original attempt's stale reference - the whole
+            // point of a wider band is to reach a price the market may have since moved to/past.
+            var retryLeg = _marketProtection.Protect(plan.Request, plan.InstrumentToken, plan.TickSize, $"Rule {rule.Id} retry", widerSlippage);
+            var retryResult = await _orderGateway.PlaceOrderAsync(retryLeg, cancellationToken);
+
+            legs[i] = retryLeg;
+            placements[i] = retryResult;
+
+            if (retryResult.Success)
+            {
+                _logger.LogInformation(
+                    "Rule {RuleId}: retry filled {Symbol} {Side} at {WiderSlippage}% slippage -> order {OrderId}",
+                    rule.Id, plan.Request.TradingSymbol, plan.Request.TransactionType, widerSlippage, retryResult.OrderId);
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Rule {RuleId}: retry at {WiderSlippage}% still did not fill {Symbol} {Side} - {Error}. Falling back to square-off.",
+                    rule.Id, widerSlippage, plan.Request.TradingSymbol, plan.Request.TransactionType, retryResult.ErrorMessage);
+            }
         }
     }
 
