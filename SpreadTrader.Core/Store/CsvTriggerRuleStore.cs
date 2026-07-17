@@ -16,12 +16,17 @@ namespace SpreadTrader.Core.Store;
 /// low hundreds of rules but wouldn't scale to a high write rate or many concurrent writers. If
 /// that ever matters, swap this for a real database behind the same ITriggerRuleStore interface.
 /// </summary>
-public sealed class CsvTriggerRuleStore : ITriggerRuleStore
+public class CsvTriggerRuleStore : ITriggerRuleStore
 {
-    // ThresholdIsPercent, SlippagePercent, MaxFireCount/FireCount, and IsExitTrigger were all
-    // added after the first version of this file shipped, so they're appended at the end and
-    // ParseLine treats them as optional (defaulting to false / 0.10 / 0 / 0 / false respectively,
-    // matching the model defaults) - older CSVs without those columns still load fine.
+    // ThresholdIsPercent, SlippagePercent, and MaxFireCount/FireCount were all added after the
+    // first version of this file shipped, so they're appended at the end and ParseLine treats
+    // them as optional (defaulting to false / 0.10 / 0 / 0 respectively, matching the model
+    // defaults) - older CSVs without those columns still load fine.
+    //
+    // This class is also instantiated a second time (as CsvExitTriggerRuleStore, a thin
+    // unsealed-subclass wrapper - see that file) pointed at a completely separate CSV file for
+    // exit triggers - see IExitTriggerRuleStore's doc comment for why entry and exit rules are
+    // kept in physically separate stores rather than one shared file with a type flag.
     //
     // TriggerRule.RearmBuffer, AutoDirectionFromSpreadSign, LinkedPositionTradingSymbol,
     // LinkedPositionExchange, and LinkedPositionProduct (the re-arm/standing fire mode, the
@@ -36,7 +41,7 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
     // deploy (see deploy.ps1) and its actual current contents generally can't be verified from
     // this repo.
     private const string Header =
-        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,Enabled,IsArmed,LastFiredAt,ThresholdIsPercent,SlippagePercent,MaxFireCount,FireCount,IsExitTrigger";
+        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,Enabled,IsArmed,LastFiredAt,ThresholdIsPercent,SlippagePercent,MaxFireCount,FireCount";
 
     private readonly string _filePath;
     private readonly object _fileLock = new();
@@ -217,8 +222,7 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
         r.ThresholdIsPercent,
         r.SlippagePercent.ToString(CultureInfo.InvariantCulture),
         r.MaxFireCount.ToString(CultureInfo.InvariantCulture),
-        r.FireCount.ToString(CultureInfo.InvariantCulture),
-        r.IsExitTrigger);
+        r.FireCount.ToString(CultureInfo.InvariantCulture));
 
     private TriggerRule? ParseLine(string line)
     {
@@ -261,8 +265,6 @@ public sealed class CsvTriggerRuleStore : ITriggerRuleStore
                 FireCount = fields.Length > 16 && !string.IsNullOrEmpty(fields[16])
                     ? int.Parse(fields[16], CultureInfo.InvariantCulture)
                     : 0,
-                IsExitTrigger = fields.Length > 17 && !string.IsNullOrEmpty(fields[17])
-                    && bool.Parse(fields[17]),
             };
         }
         catch (Exception ex)

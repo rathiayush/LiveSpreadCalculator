@@ -7,8 +7,9 @@ import TriggerFeed from '../components/TriggerFeed'
 
 // Live feed of trigger fires only - split out from the Dashboard so the "what's moving"
 // ranking view and the "what fired" activity log don't have to compete for space on one page.
-// Split into two tabs by TriggerEvent.IsExitTrigger (carried through from the rule that fired -
-// see TriggerRule.IsExitTrigger), matching the Trigger/Exit Trigger split on the Triggers page.
+// Split into two tabs by TriggerEvent.IsExitTrigger (stamped by the backend based on which store -
+// entry or exit - the fired rule came from), matching the Trigger/Exit Trigger tabs on the
+// Triggers page. One shared activity history either way (see TriggersController.GetActivity).
 export default function TriggerActivityPage() {
   const triggerEvents = useTriggerEvents()
   const [clearError, setClearError] = useState(null)

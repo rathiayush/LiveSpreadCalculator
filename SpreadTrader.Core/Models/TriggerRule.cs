@@ -91,14 +91,6 @@ public sealed class TriggerRule
 
     public bool Enabled { get; set; } = true;
 
-    /// <summary>Purely a UI/activity-feed tag - carries no different evaluation or order-dispatch
-    /// behavior of its own (an exit trigger fires and places orders exactly like any other rule,
-    /// via the same SpreadCalculationHostedService/OrderDispatchHostedService path). Set true for
-    /// a rule meant to CLOSE an existing position (NearLegAction/FarLegAction chosen opposite of
-    /// however it's currently held) rather than open a new one, so the Triggers/Trigger Activity
-    /// pages can show entry and exit rules on separate tabs instead of mixed into one list.</summary>
-    public bool IsExitTrigger { get; set; }
-
     // Mutable runtime state - not thread-safe on its own, only touched under the store's lock.
     public bool IsArmed { get; set; } = true;
     public DateTimeOffset? LastFiredAt { get; set; }
