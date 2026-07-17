@@ -22,4 +22,8 @@ public readonly record struct TriggerEvent(
     string SpreadId,
     decimal SpreadValueAtTrigger,
     string Direction,
-    DateTimeOffset TriggeredAt);
+    DateTimeOffset TriggeredAt,
+    // Carried straight from TriggerRule.IsExitTrigger at fire time, so the Trigger Activity feed
+    // can split entry vs exit fires onto separate tabs without re-looking-up the rule (which may
+    // have since been deleted, or re-fetched with different state) - see TriggerActivityEntry.
+    bool IsExitTrigger = false);

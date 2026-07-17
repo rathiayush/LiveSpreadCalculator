@@ -102,6 +102,7 @@ public sealed class TriggersController : ControllerBase
             OneShot = request.OneShot,
             MaxFireCount = request.MaxFireCount,
             SlippagePercent = request.SlippagePercent,
+            IsExitTrigger = request.IsExitTrigger,
         };
 
         if (!TryUpsert(rule, out var problem)) return problem!;

@@ -46,7 +46,10 @@ const emptyForm = {
 // Threshold as a literal comparison value (see SpreadCalculationHostedService.EvaluateTriggersAsync
 // - `measured >= rule.Threshold` / `measured <= rule.Threshold`), so this is a frontend
 // simplification only - no API contract changes were needed for single-spread rules.
-export default function TriggerForm({ spreads, onCreated }) {
+// isExitTrigger just tags the created rule (see TriggerRule.IsExitTrigger) so it shows up under
+// the right tab on the Triggers/Trigger Activity pages - the form, validation, and everything
+// sent to the backend beyond that one flag are identical whether this is an entry or exit rule.
+export default function TriggerForm({ spreads, onCreated, isExitTrigger = false }) {
   const [form, setForm] = useState(emptyForm)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -107,6 +110,7 @@ export default function TriggerForm({ spreads, onCreated }) {
         oneShot: form.oneShot,
         maxFireCount: Number(form.maxFireCount || 0),
         slippagePercent: Number(form.slippagePercent),
+        isExitTrigger,
       })
       setForm({ ...emptyForm, spreadId: form.spreadId })
       onCreated()
@@ -120,11 +124,13 @@ export default function TriggerForm({ spreads, onCreated }) {
   const unit = form.thresholdIsPercent ? '%' : ''
 
   return (
-    <Card title={<Space><PlusCircleOutlined style={{ color: '#3ddc84' }} /> Add trigger</Space>} style={{ marginBottom: 16 }}>
+    <Card title={<Space><PlusCircleOutlined style={{ color: '#3ddc84' }} /> {isExitTrigger ? 'Add exit trigger' : 'Add trigger'}</Space>} style={{ marginBottom: 16 }}>
       <form onSubmit={submit}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <Typography.Text type="secondary">
-            Evaluated against each leg's best ask price, recomputed live - see the Dashboard page.
+            {isExitTrigger
+              ? 'Same mechanism as an ordinary trigger, just tagged as an exit - set the leg actions to whatever CLOSES your position (opposite of however you entered it).'
+              : "Evaluated against each leg's best ask price, recomputed live - see the Dashboard page."}
           </Typography.Text>
 
           <Row gutter={[12, 12]}>
@@ -306,7 +312,7 @@ export default function TriggerForm({ spreads, onCreated }) {
           )}
 
           {error && <Alert type="error" message={error} showIcon />}
-          <Button type="primary" htmlType="submit" loading={busy}>Add trigger</Button>
+          <Button type="primary" htmlType="submit" loading={busy}>{isExitTrigger ? 'Add exit trigger' : 'Add trigger'}</Button>
         </Space>
       </form>
     </Card>
