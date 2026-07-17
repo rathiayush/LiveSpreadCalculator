@@ -31,8 +31,9 @@ function fmt(v) {
 // on the backend would otherwise always read a negative threshold as "falls to" - see
 // CreateTriggerRuleRequest.FireWhenGreaterOrEqual, which this page sends explicitly to avoid
 // that trap). Near/far leg actions default to whatever CLOSES what's currently open (long ->
-// Sell, short -> Buy). The created rule is a plain, ordinary trigger like any other from here on
-// (tagged isExitTrigger so it shows up under the Triggers page's "Exit Trigger" tab) - it is NOT
+// Sell, short -> Buy). The created rule is a plain, ordinary trigger like any other from here on,
+// just posted to /api/exit-triggers (a separate store from ordinary entry triggers - see
+// IExitTriggerRuleStore) so it shows up under the Triggers page's "Exit Trigger" tab - it is NOT
 // linked back to this specific position, so squaring off the position manually does not delete
 // it; disable or remove it yourself from that tab if it's no longer needed.
 export default function AddPositionExitTriggerPage() {
@@ -170,7 +171,9 @@ export default function AddPositionExitTriggerPage() {
     setBusy(true)
     setSubmitError(null)
     try {
-      await api.createTrigger({
+      // Posts to the exit-trigger store (/api/exit-triggers), a completely separate CSV/store
+      // from ordinary entry triggers - see IExitTriggerRuleStore's doc comment.
+      await api.createExitTrigger({
         id: generateRuleId(),
         spreadId: matchedSpread.id,
         // The raw signed target itself - NOT a magnitude. fireWhenGreaterOrEqual (derived above,
@@ -188,9 +191,6 @@ export default function AddPositionExitTriggerPage() {
         slippagePercent: Number(slippagePercent),
         oneShot,
         maxFireCount: Number(maxFireCount || 0),
-        // Tags this rule so it shows up under the Exit Trigger / Exit Trigger Activity tabs on
-        // the Triggers page (see TriggerRule.IsExitTrigger) rather than mixed in with entry rules.
-        isExitTrigger: true,
       })
       navigate('/positions')
     } catch (err) {

@@ -75,11 +75,6 @@ public sealed class CreateTriggerRuleRequest
     /// of 0.05/0.10/0.15/0.20/0.25/0.30) instead of a single app-wide setting - see
     /// TriggerRule.SlippagePercent.</summary>
     public decimal SlippagePercent { get; set; } = 0.10m;
-
-    /// <summary>Tags the created rule as an exit trigger (meant to CLOSE an existing position)
-    /// rather than an entry one - see TriggerRule.IsExitTrigger. Purely a UI/activity-feed
-    /// distinction; evaluation and order dispatch are identical either way.</summary>
-    public bool IsExitTrigger { get; set; }
 }
 
 /// <summary>Retunes an existing trigger's lots/threshold in place (leaving its id, enabled/armed

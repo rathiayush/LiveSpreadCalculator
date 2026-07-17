@@ -46,9 +46,10 @@ const emptyForm = {
 // Threshold as a literal comparison value (see SpreadCalculationHostedService.EvaluateTriggersAsync
 // - `measured >= rule.Threshold` / `measured <= rule.Threshold`), so this is a frontend
 // simplification only - no API contract changes were needed for single-spread rules.
-// isExitTrigger just tags the created rule (see TriggerRule.IsExitTrigger) so it shows up under
-// the right tab on the Triggers/Trigger Activity pages - the form, validation, and everything
-// sent to the backend beyond that one flag are identical whether this is an entry or exit rule.
+// isExitTrigger picks which backend store the created rule lands in - POST /api/exit-triggers
+// (a completely separate store/CSV file from /api/triggers - see IExitTriggerRuleStore) instead
+// of the ordinary one, so exit rules never mix into the same table as entry rules. Everything
+// else - the form, validation, what's sent in the request body - is identical either way.
 export default function TriggerForm({ spreads, onCreated, isExitTrigger = false }) {
   const [form, setForm] = useState(emptyForm)
   const [busy, setBusy] = useState(false)
@@ -93,7 +94,8 @@ export default function TriggerForm({ spreads, onCreated, isExitTrigger = false 
     setBusy(true)
     setError(null)
     try {
-      await api.createTrigger({
+      const create = isExitTrigger ? api.createExitTrigger : api.createTrigger
+      await create({
         id: generateRuleId(),
         spreadId: form.spreadId,
         // The raw signed target itself - NOT a magnitude. fireWhenGreaterOrEqual carries the
@@ -110,7 +112,6 @@ export default function TriggerForm({ spreads, onCreated, isExitTrigger = false 
         oneShot: form.oneShot,
         maxFireCount: Number(form.maxFireCount || 0),
         slippagePercent: Number(form.slippagePercent),
-        isExitTrigger,
       })
       setForm({ ...emptyForm, spreadId: form.spreadId })
       onCreated()
