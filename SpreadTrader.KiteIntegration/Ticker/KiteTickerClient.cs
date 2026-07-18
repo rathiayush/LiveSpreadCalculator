@@ -70,6 +70,38 @@ public sealed class KiteTickerClient : IAsyncDisposable
         await SendAsync(new { a = "mode", v = new object[] { _options.TickerMode, newTokens } }, cancellationToken);
     }
 
+    /// <summary>Removes instrument tokens from the live subscription set - the counterpart
+    /// SubscribeAsync never had, which is why nothing in this app used to shrink it: once
+    /// subscribed, a token (and the InMemoryTickStore entry it feeds) stayed forever, even after
+    /// the spread/position that needed it was long gone. Drops each token from the remembered set
+    /// first (so a reconnect never re-subscribes it), then tells Kite over the wire if currently
+    /// connected - same "always update local state, best-effort over the wire" shape as
+    /// SubscribeAsync. See TickIngestionHostedService's reconciliation loop, the only caller.</summary>
+    public async Task UnsubscribeAsync(IEnumerable<uint> instrumentTokens, CancellationToken cancellationToken)
+    {
+        uint[] removedTokens;
+        lock (_tokensLock)
+        {
+            removedTokens = instrumentTokens.Where(t => _subscribedTokens.Remove(t)).ToArray();
+        }
+
+        if (removedTokens.Length == 0 || _socket is not { State: WebSocketState.Open })
+            return;
+
+        await SendAsync(new { a = "unsubscribe", v = removedTokens }, cancellationToken);
+    }
+
+    /// <summary>Every instrument token currently remembered as subscribed (survives reconnects -
+    /// see ConnectAndSubscribeAsync) - read by TickIngestionHostedService's reconciliation loop to
+    /// find tokens nothing needs any more.</summary>
+    public IReadOnlyCollection<uint> GetSubscribedTokens()
+    {
+        lock (_tokensLock)
+        {
+            return _subscribedTokens.ToArray();
+        }
+    }
+
     /// <summary>Runs until cancellationToken is cancelled, reconnecting on any failure.</summary>
     public async Task RunAsync(IReadOnlyCollection<uint> instrumentTokens, CancellationToken cancellationToken)
     {
