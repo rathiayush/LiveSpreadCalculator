@@ -1,0 +1,1 @@
+Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,Enabled,IsArmed,LastFiredAt,ThresholdIsPercent,SlippagePercent,MaxFireCount,FireCount
