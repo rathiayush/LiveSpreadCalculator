@@ -25,6 +25,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
 {
     private readonly ISpreadDefinitionStore _spreadStore;
     private readonly ITriggerRuleStore _ruleStore;
+    private readonly IExitTriggerRuleStore _exitRuleStore;
     private readonly ITickStore _tickStore;
     private readonly ISpreadPublisher _publisher;
     private readonly ITriggerEventSink _triggerSink;
@@ -39,6 +40,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
     public SpreadCalculationHostedService(
         ISpreadDefinitionStore spreadStore,
         ITriggerRuleStore ruleStore,
+        IExitTriggerRuleStore exitRuleStore,
         ITickStore tickStore,
         ISpreadPublisher publisher,
         ITriggerEventSink triggerSink,
@@ -50,6 +52,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
     {
         _spreadStore = spreadStore;
         _ruleStore = ruleStore;
+        _exitRuleStore = exitRuleStore;
         _tickStore = tickStore;
         _publisher = publisher;
         _triggerSink = triggerSink;
@@ -152,10 +155,16 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             var farBidOrAsk = farTick.BestBidPrice != 0 ? farTick.BestBidPrice : farTick.BestAskPrice;
             var buySpreadValue = farBidOrAsk - nearTick.BestAskPrice; // BuyNear(ask) / SellFar(bid)
             var sellSpreadValue = farTick.BestAskPrice - nearBidOrAsk; // SellNear(bid) / BuyFar(ask)
+            // Percentage counterparts, each relative to the near-leg price actually paid/received
+            // in that fixed direction - see SpreadSnapshot.BuySpreadPercent/SellSpreadPercent and
+            // EvaluateTriggersAsync/ResolveMeasuredValue, which pick whichever of these four
+            // (raw/percent x buy/sell) matches a given rule's own fixed leg actions.
+            var buySpreadPercent = nearTick.BestAskPrice == 0 ? 0m : buySpreadValue / nearTick.BestAskPrice * 100m;
+            var sellSpreadPercent = nearBidOrAsk == 0 ? 0m : sellSpreadValue / nearBidOrAsk * 100m;
 
             var snapshot = new SpreadSnapshot(
                 spread.Id, spread.Underlying, nearPrice, farPrice, direction, spreadValue, spreadPercent, DateTimeOffset.UtcNow,
-                buySpreadValue, sellSpreadValue);
+                buySpreadValue, sellSpreadValue, buySpreadPercent, sellSpreadPercent);
 
             // Always kept fresh for the ranking job / GET /api/spreads/snapshot, independent of
             // whether the value actually changed since the last cycle.
@@ -176,7 +185,12 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             _lastValues[spread.Id] = spreadValue;
             if (isChanged) changed.Add(snapshot);
 
-            await EvaluateTriggersAsync(spread, snapshot, stoppingToken);
+            // Entry and exit rules live in separate stores (see IExitTriggerRuleStore) and are
+            // evaluated as two independent passes so neither can ever be silently skipped or
+            // double-evaluated - isExitTrigger just gets stamped onto whatever TriggerEvent comes
+            // out of each pass (see TriggerEvent.IsExitTrigger) for the Trigger Activity feed.
+            await EvaluateTriggersAsync(spread, snapshot, _ruleStore, isExitTrigger: false, stoppingToken);
+            await EvaluateTriggersAsync(spread, snapshot, _exitRuleStore, isExitTrigger: true, stoppingToken);
         }
 
         if (changed.Count > 0)
@@ -193,15 +207,13 @@ public sealed class SpreadCalculationHostedService : BackgroundService
         }
     }
 
-    private async Task EvaluateTriggersAsync(SpreadDefinition spread, SpreadSnapshot snapshot, CancellationToken stoppingToken)
+    private async Task EvaluateTriggersAsync(SpreadDefinition spread, SpreadSnapshot snapshot, ITriggerRuleStore ruleStore, bool isExitTrigger, CancellationToken stoppingToken)
     {
-        foreach (var rule in _ruleStore.GetForSpread(spread.Id))
+        foreach (var rule in ruleStore.GetForSpread(spread.Id))
         {
             if (!rule.Enabled) continue;
 
-            // ThresholdIsPercent rules judge SpreadPercent (comparable across stocks at very
-            // different price levels); legacy rules judge the raw ask-price SpreadValue.
-            var measured = rule.ThresholdIsPercent ? snapshot.SpreadPercent : snapshot.SpreadValue;
+            var measured = ResolveMeasuredValue(rule, snapshot);
 
             // AbsoluteGreaterThanOrEqual (WatchBothSides) judges |measured| against a positive-
             // only Threshold (see TriggersController.Create) - it doesn't matter which side of
@@ -234,11 +246,11 @@ public sealed class SpreadCalculationHostedService : BackgroundService
                 rule.FireCount++;
                 rule.LastFiredAt = DateTimeOffset.UtcNow;
                 if (rule.FireCount >= rule.MaxFireCount) rule.Enabled = false;
-                _ruleStore.Upsert(rule); // persist shot count/fired/disabled state so a restart doesn't lose or repeat a shot
+                ruleStore.Upsert(rule); // persist shot count/fired/disabled state so a restart doesn't lose or repeat a shot
 
-                var seqTriggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow);
+                var seqTriggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, measured, snapshot.Direction, DateTimeOffset.UtcNow, isExitTrigger);
                 _logger.LogInformation("Trigger fired (shot {FireCount}/{MaxFireCount}): rule={RuleId} spread={SpreadId} value={Value} direction={Direction}",
-                    rule.FireCount, rule.MaxFireCount, rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction);
+                    rule.FireCount, rule.MaxFireCount, rule.Id, spread.Id, measured, snapshot.Direction);
 
                 await _triggerSink.PublishAsync(seqTriggerEvent, stoppingToken);
                 await _triggerChannel.Writer.WriteAsync(seqTriggerEvent, stoppingToken);
@@ -261,14 +273,34 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             rule.LastFiredAt = DateTimeOffset.UtcNow;
             rule.IsArmed = false;
             if (rule.OneShot) rule.Enabled = false;
-            _ruleStore.Upsert(rule); // persist fired/disabled state so a restart doesn't re-fire it
+            ruleStore.Upsert(rule); // persist fired/disabled state so a restart doesn't re-fire it
 
-            var triggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction, DateTimeOffset.UtcNow);
+            var triggerEvent = new TriggerEvent(Guid.NewGuid(), rule.Id, spread.Id, measured, snapshot.Direction, DateTimeOffset.UtcNow, isExitTrigger);
             _logger.LogInformation("Trigger fired: rule={RuleId} spread={SpreadId} value={Value} direction={Direction}",
-                rule.Id, spread.Id, snapshot.SpreadValue, snapshot.Direction);
+                rule.Id, spread.Id, measured, snapshot.Direction);
 
             await _triggerSink.PublishAsync(triggerEvent, stoppingToken);
             await _triggerChannel.Writer.WriteAsync(triggerEvent, stoppingToken);
         }
+    }
+
+    /// <summary>Picks which of the snapshot's four measured values (raw/percent x auto-direction/
+    /// fixed-direction) a given rule's Threshold should actually be compared against. A rule with
+    /// FIXED Buy-near/Sell-far or Sell-near/Buy-far leg actions (every rule created through the
+    /// current UI - see TriggerForm.jsx/AddPositionExitTriggerPage.jsx) is priced off the matching
+    /// BuySpreadValue/SellSpreadValue(/Percent), which are ALWAYS computed for both directions
+    /// regardless of which one the ask-ask auto-direction rule currently favors - critical for an
+    /// exit trigger, whose required closing direction is fixed by the position it's closing and
+    /// has no reason to line up with whichever side happens to be richer/cheaper this tick. Any
+    /// other leg-action combination (single-leg, both-Buy, both-Sell, or a legacy
+    /// AbsoluteGreaterThanOrEqual/watch-both-sides row) has no well-defined fixed direction to
+    /// price off, so it falls back to the original auto-direction SpreadValue/SpreadPercent.</summary>
+    private static decimal ResolveMeasuredValue(TriggerRule rule, SpreadSnapshot snapshot)
+    {
+        if (rule.NearLegAction == TriggerLegAction.Buy && rule.FarLegAction == TriggerLegAction.Sell)
+            return rule.ThresholdIsPercent ? snapshot.BuySpreadPercent : snapshot.BuySpreadValue;
+        if (rule.NearLegAction == TriggerLegAction.Sell && rule.FarLegAction == TriggerLegAction.Buy)
+            return rule.ThresholdIsPercent ? snapshot.SellSpreadPercent : snapshot.SellSpreadValue;
+        return rule.ThresholdIsPercent ? snapshot.SpreadPercent : snapshot.SpreadValue;
     }
 }

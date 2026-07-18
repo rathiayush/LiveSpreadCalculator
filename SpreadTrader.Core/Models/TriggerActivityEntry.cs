@@ -23,6 +23,7 @@ public sealed class TriggerActivityEntry
     public required decimal SpreadValueAtTrigger { get; init; }
     public required string Direction { get; init; }
     public required DateTimeOffset TriggeredAt { get; init; }
+    public bool IsExitTrigger { get; init; }
 
     // Everything below stays at its default (Legs null, MarginBlocked false, etc.) until
     // InMemoryTriggerActivityStore.RecordExecuted attaches the matching BasketExecutionEvent.
