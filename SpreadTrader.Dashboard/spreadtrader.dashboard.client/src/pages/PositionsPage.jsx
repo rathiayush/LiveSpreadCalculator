@@ -26,10 +26,10 @@ export default function PositionsPage() {
     return () => leavePositionsView()
   }, [])
   // Fetched once here (not by PositionsTable itself) so "Add trigger" can be gated to only the
-  // rows that are actually a leg of some configured spread - an exit trigger needs a near/far
-  // spread to evaluate a threshold against, so offering the button for a bare position with no
-  // matching SpreadDefinition would just lead to the dead-end warning AddPositionExitTriggerPage
-  // used to show after the fact. Failing quietly (empty array) just hides the buttons rather than
+  // rows that are actually a leg of some configured spread (see the `grouped` memo in
+  // PositionsTable.jsx, which only produces a group - and therefore an "Add trigger" button - for
+  // a position matched to a SpreadDefinition) - an exit trigger needs a near/far spread to
+  // evaluate a threshold against. Failing quietly (empty array) just hides the buttons rather than
   // breaking the whole Positions page over it.
   const [spreads, setSpreads] = useState([])
 

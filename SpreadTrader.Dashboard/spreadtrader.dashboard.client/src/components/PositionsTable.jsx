@@ -11,16 +11,15 @@ function rowKey(p) {
   return `${p.tradingSymbol}|${p.exchange}|${p.product}`
 }
 
-// Mirrors AddPositionExitTriggerPage's identical helper - a PNL alert id is an internal identifier
-// only, generated client-side rather than collected as a form field.
+// A PNL alert id is an internal identifier only, generated client-side rather than collected as
+// a form field - same pattern TriggerForm.jsx uses for a trigger rule's id.
 function generateAlertId() {
   return (typeof crypto !== 'undefined' && crypto.randomUUID)
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-// Mirrors AddPositionExitTriggerPage's identical helper - kept local rather than shared since
-// it's a one-line comparison, not worth a shared module for.
+// Kept local rather than shared since it's a one-line comparison, not worth a shared module for.
 function sameInstrument(a, tradingSymbol, exchange) {
   return a && a.tradingSymbol?.toUpperCase() === tradingSymbol?.toUpperCase() && a.exchange?.toUpperCase() === exchange?.toUpperCase()
 }
@@ -82,10 +81,7 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
       // itself has actually moved since you got in, independent of quantity/lot size. Both need
       // the FULL pair (near AND far) to mean anything; a naked single leg has no "spread" to
       // measure, so these stay null/blank for a lone leg the same way combinedExitPnl does.
-      //   - Average entered at: each leg's own AveragePrice (Kite's fill-weighted average) -
-      //     mirrors AddPositionExitTriggerPage's identical entrySpreadValue calculation, so a
-      //     position shows the same "entered at" figure whether you're looking at it here or on
-      //     that page.
+      //   - Average entered at: each leg's own AveragePrice (Kite's fill-weighted average).
       //   - Exit running spread: each leg's own ExitPrice (bid if long/selling-to-close, ask if
       //     short/buying-to-close - see PositionExitPricing.Compute) - what the spread would
       //     actually print if you closed both legs this instant, as opposed to the live-streamed
@@ -493,10 +489,10 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
       render: (_, r) => {
         if (r.isGroup) {
           // "Add trigger" lives here now, once per spread, instead of duplicated on each leg row -
-          // an exit trigger is evaluated against the near/far spread as a whole anyway (see
-          // AddPositionExitTriggerPage), so it only ever made sense at the group level. Either leg
-          // resolves the same matched spread there, so children[0] (near leg if it's open, else
-          // far) is just a stable representative to link the created rule to.
+          // an exit trigger is evaluated against the near/far spread as a whole anyway, so it only
+          // ever made sense at the group level. r.spreadId (computed in the `grouped` memo above)
+          // goes straight to the Triggers page's Exit Trigger tab, which preselects it - see
+          // TriggersPage/TriggerForm's initialSpreadId prop.
           return (
             <Space size="small">
               {r.hasFullPair && (
@@ -513,7 +509,7 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
                 <Button
                   size="small"
                   icon={<ThunderboltOutlined />}
-                  onClick={() => navigate('/positions/exit-trigger', { state: { position: r.children[0] } })}
+                  onClick={() => navigate('/triggers', { state: { tab: 'exit-trigger', spreadId: r.spreadId } })}
                 >
                   Add trigger
                 </Button>
@@ -646,7 +642,7 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
           <Button
             size="small"
             icon={<ThunderboltOutlined />}
-            onClick={() => navigate('/positions/exit-trigger', { state: { position: r.children[0] } })}
+            onClick={() => navigate('/triggers', { state: { tab: 'exit-trigger', spreadId: r.spreadId } })}
           >
             Add trigger
           </Button>
