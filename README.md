@@ -4,8 +4,8 @@ Live calendar-spread dashboard for NSE/NFO futures (e.g. July vs August contract
 Zerodha's Kite Connect API. Streams tick data over a WebSocket, computes each spread from the
 legs' **best ask price** (not last traded price - see below), evaluates user-configured trigger
 rules, and can punch basket orders automatically when a trigger fires. Ticks and spread values
-live in process memory only and are lost on restart; trigger rules are persisted to a small CSV
-file so they survive one (see Limitations).
+live in process memory only and are lost on restart; spread definitions and trigger rules are
+each persisted to their own small CSV file so they survive one (see Limitations).
 
 ## Projects
 
@@ -137,8 +137,8 @@ Runs two containers - `api` (the backend, port 8080) and `web` (nginx serving th
 
 ## Limitations to keep in mind
 
-- **Ticks and spreads are not persisted** - a restart loses live prices and computed spread values (expected: they're only meaningful live). **Spread definitions are also in-memory only** - re-add them via the Trigger Config page after a restart (they're quick to re-add now that the symbol picker is synced). **Trigger rules are the one thing that persists**, via the CSV file described above - but see the next point.
-- **The trigger CSV is a stopgap, not a database.** The whole file is rewritten on every add/remove/fire/enable/disable. Fine at the scale of tens or low hundreds of rules; would not hold up under high write concurrency. If that ever matters, swap `CsvTriggerRuleStore` for a real database behind the same `ITriggerRuleStore` interface - nothing else needs to change.
+- **Ticks and computed spread values are not persisted** - a restart loses live prices (expected: they're only meaningful live) and are recomputed from the next tick. **Spread definitions, trigger rules, and exit trigger rules all persist** across a restart, each via their own CSV file (`CsvSpreadDefinitionStore` / `CsvTriggerRuleStore` / `CsvExitTriggerRuleStore`) - see the next point.
+- **These CSVs are a stopgap, not a database.** The whole file is rewritten on every add/remove/fire/enable/disable. Fine at the scale of tens or low hundreds of rows; would not hold up under high write concurrency. If that ever matters, swap the relevant store for a real database behind the same interface (`ISpreadDefinitionStore` / `ITriggerRuleStore` / `IExitTriggerRuleStore`) - nothing else needs to change.
 - **No official Kite .NET SDK exists** - the WebSocket tick parser and REST calls here are hand-implemented against Zerodha's documented protocol, not a vendor library.
 - **Daily login is required.** Kite access tokens expire ~6 AM daily by regulation; there's no way around re-authenticating once a day.
 - **Full ticker mode uses more bandwidth than quote mode** since it carries market depth on every change - necessary for ask-price triggers, but worth knowing if you scale well past ~200 instruments.

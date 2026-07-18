@@ -18,9 +18,10 @@ NSE/NFO segment, live, via Zerodha's Kite Connect API. For each configured pair 
 5. When a rule fires, dispatches a basket order (one or two legs) through Kite's order API.
 6. Pushes all of the above to a React dashboard in real time over SignalR.
 
-Nothing about market data is persisted - it only ever exists in process memory, and is
-recomputed from the next tick after any restart. Trigger *rule definitions* are the one
-exception: they're written to a CSV file so your configuration survives a restart (see §7).
+Nothing about market data itself is persisted - it only ever exists in process memory, and is
+recomputed from the next tick after any restart. Configuration is the exception: spread
+definitions and trigger rule definitions are each written to their own CSV file so your setup
+survives a restart (see §7).
 
 ## 2. High-level architecture
 
@@ -173,8 +174,9 @@ definitions.
 | Live ticks | `ITickStore` (in-memory `ConcurrentDictionary`) | No - repopulated from the next ticks after reconnecting to Kite |
 | Latest spread snapshot per spread | `ISpreadSnapshotCache` (in-memory) | No |
 | Latest ranking | `ISpreadRankingStore` (in-memory) | No |
-| Spread definitions (which symbols form a spread) | `ISpreadDefinitionStore` (in-memory) | **No** - re-add via the Trigger Config page after a restart |
+| Spread definitions (which symbols form a spread) | `ISpreadDefinitionStore` -> `CsvSpreadDefinitionStore`, file at `Storage:SpreadsCsvPath` (default `App_Data/spreads.csv`) | **Yes** - only the identifying fields (id, underlying, each leg's trading symbol/exchange); InstrumentToken/LotSize/TickSize are always re-resolved live from the instrument master at startup, never persisted |
 | Trigger rules (definitions + arm/fire state) | `ITriggerRuleStore` -> `CsvTriggerRuleStore`, file at `Storage:TriggersCsvPath` (default `App_Data/triggers.csv`) | **Yes** |
+| Exit trigger rules (same shape, kept in a separate store/file so they can never mix with entry rules) | `IExitTriggerRuleStore` -> `CsvExitTriggerRuleStore`, file at `Storage:ExitTriggersCsvPath` (default `App_Data/exit_triggers.csv`) | **Yes** |
 | Futures symbol list | Written to `Storage:FuturesCsvPath` (default `App_Data/futures_instruments.csv`) when you click "Sync symbols from Kite"; also kept in `InstrumentMasterService`'s in-memory cache for 12h | File: yes. In-memory cache: no (re-downloads on demand) |
 | Kite access token | `KiteSession` (in-memory, singleton) | No - and wouldn't help anyway, since Kite invalidates it daily regardless |
 

@@ -29,10 +29,12 @@ builder.Services.Configure<KiteOptions>(builder.Configuration.GetSection(KiteOpt
 builder.Services.Configure<EngineOptions>(builder.Configuration.GetSection(EngineOptions.SectionName));
 
 // ---- State (Core) --------------------------------------------------------------------------
-// Ticks and spread definitions are in-memory only, by design - a restart loses them (re-add
-// spreads via POST /api/spreads). Trigger rules are the one thing worth surviving a restart, so
-// they're backed by a small CSV file (see CsvTriggerRuleStore) instead of pure in-memory - a
-// deliberate stopgap, not a real database.
+// Ticks are in-memory only, by design - a restart loses them (repopulated from the next ticks
+// after reconnecting to Kite). Trigger rules and spread definitions both survive a restart via a
+// small CSV file each (see CsvTriggerRuleStore / CsvSpreadDefinitionStore) instead of pure
+// in-memory - a deliberate stopgap, not a real database.
+var spreadsCsvPath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:SpreadsCsvPath"] ?? "App_Data/spreads.csv");
 var triggersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:TriggersCsvPath"] ?? "App_Data/triggers.csv");
 // Exit triggers (rules that CLOSE an existing position) live in a completely separate CSV file
@@ -64,7 +66,8 @@ builder.Services.AddSingleton<IExitTriggerRuleStore>(sp =>
     new CsvExitTriggerRuleStore(exitTriggersCsvPath, sp.GetRequiredService<ILogger<CsvTriggerRuleStore>>()));
 builder.Services.AddSingleton<IPnlAlertStore>(sp =>
     new CsvPnlAlertStore(pnlAlertsCsvPath, sp.GetRequiredService<ILogger<CsvPnlAlertStore>>()));
-builder.Services.AddSingleton<ISpreadDefinitionStore, InMemorySpreadDefinitionStore>();
+builder.Services.AddSingleton<ISpreadDefinitionStore>(sp =>
+    new CsvSpreadDefinitionStore(spreadsCsvPath, sp.GetRequiredService<ILogger<CsvSpreadDefinitionStore>>()));
 builder.Services.AddSingleton<ISpreadSnapshotCache, InMemorySpreadSnapshotCache>();
 builder.Services.AddSingleton<ISpreadRankingStore, InMemorySpreadRankingStore>();
 // Rolling in-memory history of fired triggers/execution outcomes, so GET /api/triggers/activity
