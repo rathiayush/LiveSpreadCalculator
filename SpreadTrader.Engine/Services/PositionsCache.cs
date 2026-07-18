@@ -111,6 +111,18 @@ public sealed class PositionsCache : BackgroundService
         return projected;
     }
 
+    /// <summary>Instrument tokens for every currently-anchored (open) position - read by
+    /// TickIngestionHostedService's reconciliation loop, alongside every configured spread leg's
+    /// token, to decide what the live ticker still actually needs subscribed. A closed position
+    /// simply stops appearing here on the next ResyncAsync (its anchor is dropped, see below),
+    /// which is what lets that token be unsubscribed if nothing else needs it either.</summary>
+    public IReadOnlyCollection<uint> GetAnchoredTokens()
+    {
+        IReadOnlyDictionary<string, PositionAnchor> anchors;
+        lock (_lock) { anchors = _anchors; }
+        return anchors.Values.Where(a => a.InstrumentToken != 0).Select(a => a.InstrumentToken).ToArray();
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _tickerClient.OrderUpdateReceived += OnOrderUpdate;
