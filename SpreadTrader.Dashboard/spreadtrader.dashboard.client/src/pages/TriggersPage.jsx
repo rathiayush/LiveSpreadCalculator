@@ -1,11 +1,23 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useLocation } from 'react-router-dom'
-import { Tabs } from 'antd'
-import { ThunderboltOutlined, ScissorOutlined } from '@ant-design/icons'
+import { useLocation, useNavigate } from 'react-router-dom'
+import { Tabs, Button } from 'antd'
+import { ThunderboltOutlined, ScissorOutlined, ArrowLeftOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import BulkTriggerForm from '../components/BulkTriggerForm'
 import TriggerList from '../components/TriggerList'
 import TriggerForm from '../components/TriggerForm'
+
+// Declared at module scope (not inside TriggersPage) so it isn't recreated on every render - a
+// component defined inline in a render body loses/resets its own state on every parent re-render,
+// which this doesn't need but is a footgun worth avoiding regardless of whether it bites today.
+function BackToPositions() {
+  const navigate = useNavigate()
+  return (
+    <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/positions')} style={{ marginBottom: 16 }}>
+      Back to Positions & PNL
+    </Button>
+  )
+}
 
 // Everything to do with trigger rules: applying one threshold across many spreads at once,
 // the list of existing rules, and the form to add a new one. Split into two tabs backed by two
@@ -25,6 +37,9 @@ export default function TriggersPage({ spreads }) {
   const location = useLocation()
   const initialTab = location.state?.tab === 'exit-trigger' ? 'exit-trigger' : 'trigger'
   const initialExitSpreadId = location.state?.spreadId ?? ''
+  // Only shown when we actually arrived via "Add trigger" on a Positions & PNL row - landing here
+  // from the nav menu instead has no "back to positions" to go back to.
+  const cameFromPositions = location.state?.tab === 'exit-trigger'
 
   const [entryTriggers, setEntryTriggers] = useState([])
   const [exitTriggers, setExitTriggers] = useState([])
@@ -42,42 +57,45 @@ export default function TriggersPage({ spreads }) {
   }, [loadEntryTriggers, loadExitTriggers])
 
   return (
-    <Tabs
-      defaultActiveKey={initialTab}
-      items={[
-        {
-          key: 'trigger',
-          label: <span><ThunderboltOutlined /> Trigger</span>,
-          children: (
-            <>
-              <TriggerList triggers={entryTriggers} onChanged={loadEntryTriggers} spreads={spreads} />
-              <TriggerForm spreads={spreads} onCreated={loadEntryTriggers} />
-              <BulkTriggerForm spreadCount={spreads.length} onCreated={loadEntryTriggers} />
-            </>
-          ),
-        },
-        {
-          key: 'exit-trigger',
-          label: <span><ScissorOutlined /> Exit Trigger</span>,
-          children: (
-            <>
-              <TriggerList
-                triggers={exitTriggers}
-                onChanged={loadExitTriggers}
-                spreads={spreads}
-                title="Configured exit triggers"
-                isExitTrigger
-              />
-              <TriggerForm
-                spreads={spreads}
-                onCreated={loadExitTriggers}
-                isExitTrigger
-                initialSpreadId={initialExitSpreadId}
-              />
-            </>
-          ),
-        },
-      ]}
-    />
+    <>
+      {cameFromPositions && <BackToPositions />}
+      <Tabs
+        defaultActiveKey={initialTab}
+        items={[
+          {
+            key: 'trigger',
+            label: <span><ThunderboltOutlined /> Trigger</span>,
+            children: (
+              <>
+                <TriggerList triggers={entryTriggers} onChanged={loadEntryTriggers} spreads={spreads} />
+                <TriggerForm spreads={spreads} onCreated={loadEntryTriggers} />
+                <BulkTriggerForm spreadCount={spreads.length} onCreated={loadEntryTriggers} />
+              </>
+            ),
+          },
+          {
+            key: 'exit-trigger',
+            label: <span><ScissorOutlined /> Exit Trigger</span>,
+            children: (
+              <>
+                <TriggerList
+                  triggers={exitTriggers}
+                  onChanged={loadExitTriggers}
+                  spreads={spreads}
+                  title="Configured exit triggers"
+                  isExitTrigger
+                />
+                <TriggerForm
+                  spreads={spreads}
+                  onCreated={loadExitTriggers}
+                  isExitTrigger
+                  initialSpreadId={initialExitSpreadId}
+                />
+              </>
+            ),
+          },
+        ]}
+      />
+    </>
   )
 }
