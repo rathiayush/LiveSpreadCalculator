@@ -84,16 +84,21 @@ function LiveSpreadPrice({ snapshot, thresholdIsPercent }) {
 // (e.g. -8, not a deviation magnitude away from zero), an explicit >= / <= comparison against it,
 // and manual Buy/Sell/None leg actions you set yourself - no "watch both sides"/auto-direction
 // mode where the engine decides live which leg to buy/sell from whichever side happened to cross.
-// Matches AddPositionExitTriggerPage's exit-trigger UX; the backend/engine already treat
-// Threshold as a literal comparison value (see SpreadCalculationHostedService.EvaluateTriggersAsync
-// - `measured >= rule.Threshold` / `measured <= rule.Threshold`), so this is a frontend
-// simplification only - no API contract changes were needed for single-spread rules.
+// The backend/engine already treat Threshold as a literal comparison value (see
+// SpreadCalculationHostedService.EvaluateTriggersAsync - `measured >= rule.Threshold` /
+// `measured <= rule.Threshold`), so this is a frontend simplification only - no API contract
+// changes were needed for single-spread rules.
 // isExitTrigger picks which backend store the created rule lands in - POST /api/exit-triggers
 // (a completely separate store/CSV file from /api/triggers - see IExitTriggerRuleStore) instead
 // of the ordinary one, so exit rules never mix into the same table as entry rules. Everything
 // else - the form, validation, what's sent in the request body - is identical either way.
-export default function TriggerForm({ spreads, onCreated, isExitTrigger = false }) {
-  const [form, setForm] = useState(emptyForm)
+// initialSpreadId seeds the spread picker once on mount (e.g. "Add trigger" on a Positions & PNL
+// row navigates here with the matching spread already known - see PositionsTable.jsx/
+// TriggersPage.jsx) - only read on the very first render (React's lazy useState initializer),
+// same as every other field in emptyForm; changing the prop after mount does nothing, since this
+// is a one-time default, not a controlled value.
+export default function TriggerForm({ spreads, onCreated, isExitTrigger = false, initialSpreadId = '' }) {
+  const [form, setForm] = useState(() => ({ ...emptyForm, spreadId: initialSpreadId }))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
 

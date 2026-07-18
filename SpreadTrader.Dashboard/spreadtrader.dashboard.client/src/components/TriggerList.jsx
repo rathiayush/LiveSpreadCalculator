@@ -72,9 +72,9 @@ export default function TriggerList({ triggers, onChanged, spreads, title = 'Con
       // spread's resolved lot size, so the edit modal matches what "Add trigger" collects.
       lots: lotSize > 0 ? Math.round(rule.quantity / lotSize) : '',
       // Every rule (ordinary or exit) now stores Threshold as a raw signed absolute spread
-      // target, not a deviation magnitude - see TriggerForm.jsx/AddPositionExitTriggerPage.jsx,
-      // both of which send it exactly as typed. Show it as-is (no Math.abs): the >=/<= operator
-      // below can legitimately pair with EITHER sign (e.g. GreaterThanOrEqual with a negative
+      // target, not a deviation magnitude - see TriggerForm.jsx, which sends it exactly as typed
+      // whichever tab (Trigger/Exit Trigger) created the rule. Show it as-is (no Math.abs): the
+      // >=/<= operator below can legitimately pair with EITHER sign (e.g. GreaterThanOrEqual with a negative
       // target, an exit rule waiting for the spread to RISE to -7 from -15) - forcing it through
       // a magnitude+sign-flip here would silently corrupt that on save. Only
       // AbsoluteGreaterThanOrEqual (watch-both-sides) rules genuinely store an unsigned
