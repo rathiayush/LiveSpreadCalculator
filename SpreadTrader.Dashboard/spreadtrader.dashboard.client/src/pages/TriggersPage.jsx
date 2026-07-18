@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { Tabs } from 'antd'
 import { ThunderboltOutlined, ScissorOutlined } from '@ant-design/icons'
 import { api } from '../api'
@@ -15,7 +16,16 @@ import TriggerForm from '../components/TriggerForm'
 // api.* functions), just fetched and posted through different endpoints. Bulk template
 // application (BulkTriggerForm) only applies to entry triggers - there's no bulk "exit" template
 // today.
+//
+// "Add trigger" on a Positions & PNL row (see PositionsTable.jsx) lands here with router state
+// ({ tab: 'exit-trigger', spreadId }) instead of the old standalone AddPositionExitTriggerPage -
+// read once on mount (same lazy-initializer pattern as TriggerForm's own initialSpreadId) to open
+// straight to the Exit Trigger tab with that spread already selected in the form below.
 export default function TriggersPage({ spreads }) {
+  const location = useLocation()
+  const initialTab = location.state?.tab === 'exit-trigger' ? 'exit-trigger' : 'trigger'
+  const initialExitSpreadId = location.state?.spreadId ?? ''
+
   const [entryTriggers, setEntryTriggers] = useState([])
   const [exitTriggers, setExitTriggers] = useState([])
 
@@ -33,6 +43,7 @@ export default function TriggersPage({ spreads }) {
 
   return (
     <Tabs
+      defaultActiveKey={initialTab}
       items={[
         {
           key: 'trigger',
@@ -57,7 +68,12 @@ export default function TriggersPage({ spreads }) {
                 title="Configured exit triggers"
                 isExitTrigger
               />
-              <TriggerForm spreads={spreads} onCreated={loadExitTriggers} isExitTrigger />
+              <TriggerForm
+                spreads={spreads}
+                onCreated={loadExitTriggers}
+                isExitTrigger
+                initialSpreadId={initialExitSpreadId}
+              />
             </>
           ),
         },

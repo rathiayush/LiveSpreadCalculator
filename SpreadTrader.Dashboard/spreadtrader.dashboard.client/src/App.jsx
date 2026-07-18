@@ -28,7 +28,6 @@ import ConfiguredSpreadsPage from './pages/ConfiguredSpreadsPage'
 import TriggersPage from './pages/TriggersPage'
 import TriggerActivityPage from './pages/TriggerActivityPage'
 import PositionsPage from './pages/PositionsPage'
-import AddPositionExitTriggerPage from './pages/AddPositionExitTriggerPage'
 
 const { Header, Content, Sider } = Layout
 
@@ -431,10 +430,6 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
             <Route
               path="/positions"
               element={<PositionsPage />}
-            />
-            <Route
-              path="/positions/exit-trigger"
-              element={<AddPositionExitTriggerPage />}
             />
           </Routes>
         </Content>
