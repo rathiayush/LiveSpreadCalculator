@@ -111,14 +111,17 @@ public sealed class PositionsController : ControllerBase
         // Kite rejects a plain MARKET order for F&O outright ("Market orders without market
         // protection are not allowed via API") - convert to a protected IOC LIMIT order first,
         // same as every other MARKET-originated leg in this app (triggered baskets and their
-        // auto-square-off go through the identical MarketProtectionService.Protect). Uses the
-        // position's own last_price (from GET /portfolio/positions, already fetched above) as
-        // the reference price rather than the live tick store, since a manually-held position
-        // isn't necessarily for a symbol any currently-configured spread streams ticks for.
+        // auto-square-off go through the identical MarketProtectionService.Protect). Routed
+        // through the same tick-store-backed Protect() every other order leg uses, priced off
+        // live best bid/ask - never off position.LastPrice (Kite's REST last_price/LTP, which can
+        // be stale between prints). If this instrument isn't part of any currently-subscribed
+        // spread, ITickStore has no depth for it and Protect() sends the leg unprotected rather
+        // than falling back to LTP - Kite will then reject the bare MARKET order outright instead
+        // of risking a fill priced off a stale reference.
         var instrument = _instrumentMaster.Find(position.TradingSymbol, position.Exchange);
-        var protectedLeg = _marketProtection.ProtectFromReference(
+        var protectedLeg = _marketProtection.Protect(
             leg,
-            position.LastPrice,
+            instrument?.InstrumentToken ?? 0,
             instrument?.TickSize ?? 0,
             $"Manual square-off {position.TradingSymbol}",
             // No TriggerRule to draw a per-rule slippage from here - this is a manual, ad-hoc

@@ -13,7 +13,11 @@ import { api } from '../api'
 
 const emptyEdit = { lots: '', threshold: '', thresholdIsPercent: false, operator: 'gte', slippagePercent: 0.10, oneShot: true, maxFireCount: 3 }
 
-export default function TriggerList({ triggers, onChanged, spreads }) {
+// isExitTrigger picks which backend store (and matching set of api.* functions) this table's
+// rows actually live in - see IExitTriggerRuleStore/api.js. The caller is expected to have
+// already fetched `triggers` from the matching endpoint (api.getTriggers vs api.getExitTriggers);
+// this component never mixes the two lists together itself.
+export default function TriggerList({ triggers, onChanged, spreads, title = 'Configured triggers', isExitTrigger = false }) {
   // The rule currently open in the edit modal, or null - available regardless of enabled/armed/
   // fired status, since a rule that already fired (one-shot, now disabled) is just as valid to
   // retune for next time as one that's still armed.
@@ -34,19 +38,28 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
     return spread?.nearLeg?.lotSize || spread?.farLeg?.lotSize || 0
   }
 
+  const disableFn = isExitTrigger ? api.disableExitTrigger : api.disableTrigger
+  const enableFn = isExitTrigger ? api.enableExitTrigger : api.enableTrigger
+  const deleteFn = isExitTrigger ? api.deleteExitTrigger : api.deleteTrigger
+  const updateFn = isExitTrigger ? api.updateExitTrigger : api.updateTrigger
+
   const toggle = async (rule) => {
-    if (rule.enabled) await api.disableTrigger(rule.id)
-    else await api.enableTrigger(rule.id)
+    if (rule.enabled) await disableFn(rule.id)
+    else await enableFn(rule.id)
     onChanged()
   }
 
   const remove = async (id) => {
-    await api.deleteTrigger(id)
+    await deleteFn(id)
     onChanged()
   }
 
+  // Deletes only what's actually shown in this table, one by one - NOT a "delete everything in
+  // this store" call, since GetAll (no spreadId filter) can return more than what's paginated
+  // here and this button is scoped to "this list" (entry or exit, whichever store this table was
+  // given), not the other one.
   const removeAll = async () => {
-    await api.deleteAllTriggers()
+    await Promise.all(triggers.map((t) => deleteFn(t.id)))
     onChanged()
   }
 
@@ -107,7 +120,7 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
         threshold = Number(editForm.threshold)
         fireWhenGreaterOrEqual = editForm.operator === 'gte'
       }
-      await api.updateTrigger(editing.id, {
+      await updateFn(editing.id, {
         lots: Number(editForm.lots),
         threshold,
         fireWhenGreaterOrEqual,
@@ -212,11 +225,11 @@ export default function TriggerList({ triggers, onChanged, spreads }) {
   return (
     <>
       <Card
-        title={<Space><ThunderboltOutlined style={{ color: '#f5a623' }} /> Configured triggers ({triggers.length})</Space>}
+        title={<Space><ThunderboltOutlined style={{ color: '#f5a623' }} /> {title} ({triggers.length})</Space>}
         extra={triggers.length > 0 && (
           <Popconfirm
             title={`Delete all ${triggers.length} triggers?`}
-            description="This removes every trigger rule, not just the ones shown on this page. Cannot be undone."
+            description="Removes every trigger in this list (across all pages of this table). Cannot be undone."
             onConfirm={removeAll}
             okText="Delete all"
             okButtonProps={{ danger: true }}

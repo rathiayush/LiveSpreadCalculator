@@ -30,6 +30,7 @@ public sealed class InMemoryTriggerActivityStore : ITriggerActivityStore
                 SpreadValueAtTrigger = triggerEvent.SpreadValueAtTrigger,
                 Direction = triggerEvent.Direction,
                 TriggeredAt = triggerEvent.TriggeredAt,
+                IsExitTrigger = triggerEvent.IsExitTrigger,
             });
 
             while (_entries.Count > MaxEntries)

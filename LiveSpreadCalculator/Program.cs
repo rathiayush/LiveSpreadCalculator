@@ -35,6 +35,11 @@ builder.Services.Configure<EngineOptions>(builder.Configuration.GetSection(Engin
 // deliberate stopgap, not a real database.
 var triggersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:TriggersCsvPath"] ?? "App_Data/triggers.csv");
+// Exit triggers (rules that CLOSE an existing position) live in a completely separate CSV file
+// from entry triggers - see IExitTriggerRuleStore's doc comment for why they're never mixed into
+// one shared table.
+var exitTriggersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:ExitTriggersCsvPath"] ?? "App_Data/exit_triggers.csv");
 // PNL alerts (see PnlAlertRule/CsvPnlAlertStore) - same "small CSV so it survives a restart"
 // treatment as trigger rules, kept in its own file since the row shape is unrelated.
 var pnlAlertsCsvPath = Path.Combine(builder.Environment.ContentRootPath,
@@ -55,6 +60,8 @@ var usersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 builder.Services.AddSingleton<ITickStore, InMemoryTickStore>();
 builder.Services.AddSingleton<ITriggerRuleStore>(sp =>
     new CsvTriggerRuleStore(triggersCsvPath, sp.GetRequiredService<ILogger<CsvTriggerRuleStore>>()));
+builder.Services.AddSingleton<IExitTriggerRuleStore>(sp =>
+    new CsvExitTriggerRuleStore(exitTriggersCsvPath, sp.GetRequiredService<ILogger<CsvTriggerRuleStore>>()));
 builder.Services.AddSingleton<IPnlAlertStore>(sp =>
     new CsvPnlAlertStore(pnlAlertsCsvPath, sp.GetRequiredService<ILogger<CsvPnlAlertStore>>()));
 builder.Services.AddSingleton<ISpreadDefinitionStore, InMemorySpreadDefinitionStore>();

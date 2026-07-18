@@ -16,12 +16,17 @@ namespace SpreadTrader.Core.Store;
 /// low hundreds of rules but wouldn't scale to a high write rate or many concurrent writers. If
 /// that ever matters, swap this for a real database behind the same ITriggerRuleStore interface.
 /// </summary>
-public sealed class CsvTriggerRuleStore : ITriggerRuleStore
+public class CsvTriggerRuleStore : ITriggerRuleStore
 {
     // ThresholdIsPercent, SlippagePercent, and MaxFireCount/FireCount were all added after the
     // first version of this file shipped, so they're appended at the end and ParseLine treats
     // them as optional (defaulting to false / 0.10 / 0 / 0 respectively, matching the model
     // defaults) - older CSVs without those columns still load fine.
+    //
+    // This class is also instantiated a second time (as CsvExitTriggerRuleStore, a thin
+    // unsealed-subclass wrapper - see that file) pointed at a completely separate CSV file for
+    // exit triggers - see IExitTriggerRuleStore's doc comment for why entry and exit rules are
+    // kept in physically separate stores rather than one shared file with a type flag.
     //
     // TriggerRule.RearmBuffer, AutoDirectionFromSpreadSign, LinkedPositionTradingSymbol,
     // LinkedPositionExchange, and LinkedPositionProduct (the re-arm/standing fire mode, the

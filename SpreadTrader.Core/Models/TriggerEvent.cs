@@ -22,4 +22,11 @@ public readonly record struct TriggerEvent(
     string SpreadId,
     decimal SpreadValueAtTrigger,
     string Direction,
-    DateTimeOffset TriggeredAt);
+    DateTimeOffset TriggeredAt,
+    // Stamped by SpreadCalculationHostedService based on which store (ITriggerRuleStore vs
+    // IExitTriggerRuleStore) it evaluated this rule out of - not a field on TriggerRule itself,
+    // since entry and exit rules live in physically separate stores (see
+    // IExitTriggerRuleStore's doc comment). Lets the Trigger Activity feed split entry vs exit
+    // fires onto separate tabs, and OrderDispatchHostedService look the rule back up in the
+    // correct store, without re-deriving which store a rule came from at dispatch time.
+    bool IsExitTrigger = false);

@@ -62,6 +62,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
 {
     private readonly TriggerEventChannel _triggerChannel;
     private readonly ITriggerRuleStore _ruleStore;
+    private readonly IExitTriggerRuleStore _exitRuleStore;
     private readonly ISpreadDefinitionStore _spreadStore;
     private readonly IOrderGateway _orderGateway;
     private readonly KiteMarginService _marginService;
@@ -74,6 +75,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
     public OrderDispatchHostedService(
         TriggerEventChannel triggerChannel,
         ITriggerRuleStore ruleStore,
+        IExitTriggerRuleStore exitRuleStore,
         ISpreadDefinitionStore spreadStore,
         IOrderGateway orderGateway,
         KiteMarginService marginService,
@@ -85,6 +87,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
     {
         _triggerChannel = triggerChannel;
         _ruleStore = ruleStore;
+        _exitRuleStore = exitRuleStore;
         _spreadStore = spreadStore;
         _orderGateway = orderGateway;
         _marginService = marginService;
@@ -125,7 +128,13 @@ public sealed class OrderDispatchHostedService : BackgroundService
 
     private async Task DispatchAsync(TriggerEvent triggerEvent, CancellationToken stoppingToken)
     {
-        var rule = _ruleStore.Get(triggerEvent.RuleId);
+        // Which store a fired rule is looked up in (and re-persisted to, below and in
+        // RestoreRuleIfNothingFilled) follows TriggerEvent.IsExitTrigger, stamped by
+        // SpreadCalculationHostedService from whichever of the two stores it evaluated the rule
+        // out of - see IExitTriggerRuleStore's doc comment for why entry and exit rules are never
+        // in the same store to begin with.
+        var ruleStore = triggerEvent.IsExitTrigger ? (ITriggerRuleStore)_exitRuleStore : _ruleStore;
+        var rule = ruleStore.Get(triggerEvent.RuleId);
         var spread = _spreadStore.Get(triggerEvent.SpreadId);
         if (rule is null || spread is null)
         {
@@ -162,7 +171,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
             if (blockReason is not null)
             {
                 await PublishBlockedAsync(triggerEvent, spread.Underlying, orderKind, blockReason, stoppingToken);
-                RestoreRuleIfNothingFilled(rule.Id); // nothing was placed at all - don't burn a shot on this
+                RestoreRuleIfNothingFilled(ruleStore, rule.Id); // nothing was placed at all - don't burn a shot on this
                 return; // fail-safe: nothing placed at all
             }
         }
@@ -222,7 +231,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
             legResults.AddRange(await SquareOffPartialFillAsync(rule, legPlans, placements, stoppingToken));
 
         if (!anyLegFilled)
-            RestoreRuleIfNothingFilled(rule.Id); // fully rejected/unfilled - don't burn a shot on this
+            RestoreRuleIfNothingFilled(ruleStore, rule.Id); // fully rejected/unfilled - don't burn a shot on this
 
         await _executionSink.PublishAsync(
             new BasketExecutionEvent(triggerEvent.FireId, rule.Id, spread.Id, spread.Underlying, orderKind, legResults, MarginBlocked: false, BlockedReason: null, DateTimeOffset.UtcNow),
@@ -242,9 +251,9 @@ public sealed class OrderDispatchHostedService : BackgroundService
     /// see the anyLegFilled comment in DispatchAsync. LastFiredAt is deliberately left untouched
     /// so EngineOptions.MinFireIntervalPerRuleMs still throttles an immediate retry (e.g. against
     /// a persistently-insufficient-margin condition that won't resolve instantly).</summary>
-    private void RestoreRuleIfNothingFilled(string ruleId)
+    private void RestoreRuleIfNothingFilled(ITriggerRuleStore ruleStore, string ruleId)
     {
-        var rule = _ruleStore.Get(ruleId);
+        var rule = ruleStore.Get(ruleId);
         if (rule is null) return; // deleted since it fired - nothing to restore
 
         var changed = false;
@@ -254,7 +263,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
 
         if (changed)
         {
-            _ruleStore.Upsert(rule);
+            ruleStore.Upsert(rule);
             _logger.LogInformation(
                 "Rule {RuleId}: nothing filled on this fire (blocked or fully rejected) - re-armed/re-enabled so it can try again.",
                 ruleId);
