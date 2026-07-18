@@ -18,4 +18,6 @@ public sealed class InMemoryTickStore : ITickStore
     public bool TryGet(uint instrumentToken, out Tick tick) => _ticks.TryGetValue(instrumentToken, out tick);
 
     public IReadOnlyCollection<Tick> Snapshot() => _ticks.Values.ToArray();
+
+    public void Remove(uint instrumentToken) => _ticks.TryRemove(instrumentToken, out _);
 }
