@@ -28,6 +28,7 @@ public sealed class KitePositionsService
     private readonly InstrumentMasterService _instrumentMaster;
     private readonly ITickStore _tickStore;
     private readonly ILogger<KitePositionsService> _logger;
+    private readonly HashSet<string> _trackedExchanges;
 
     public KitePositionsService(
         HttpClient httpClient,
@@ -36,7 +37,8 @@ public sealed class KitePositionsService
         KiteAuthFailureHandler authFailureHandler,
         InstrumentMasterService instrumentMaster,
         ITickStore tickStore,
-        ILogger<KitePositionsService> logger)
+        ILogger<KitePositionsService> logger,
+        McxOptions? mcx = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
@@ -45,6 +47,11 @@ public sealed class KitePositionsService
         _instrumentMaster = instrumentMaster;
         _tickStore = tickStore;
         _logger = logger;
+        // NFO is always tracked; MCX is added only when the commodity add-on is enabled. With the
+        // flag off this set is exactly { "NFO" }, so the positions filter below behaves as before.
+        _trackedExchanges = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "NFO" };
+        if (mcx is { Enabled: true })
+            _trackedExchanges.Add(mcx.Exchange);
     }
 
     public async Task<PositionsResult> GetPositionsAsync(CancellationToken cancellationToken)
@@ -89,13 +96,15 @@ public sealed class KitePositionsService
                 if (quantity == 0) continue; // fully squared off already - nothing to show/act on
 
                 var exchange = p.GetProperty("exchange").GetString() ?? "";
-                // This app only trades NFO (stock futures) - Kite's positions response can also
-                // carry stray BSE/CDS/MCX/BFO rows (e.g. a manual off-strategy trade placed via
-                // the Kite app itself). Excluding those here keeps this page - and its Total PNL
-                // figure - scoped to what SpreadTrader actually trades, instead of mixing in
-                // positions this dashboard has no context for and can't meaningfully square off
-                // (lot sizes/contracts differ entirely by segment).
-                if (!string.Equals(exchange, "NFO", StringComparison.OrdinalIgnoreCase)) continue;
+                // This app trades NFO (stock futures) and, when the MCX add-on is enabled, MCX
+                // (commodity futures). Kite's positions response can also carry stray BSE/CDS/BFO
+                // rows (e.g. a manual off-strategy trade placed via the Kite app itself). Excluding
+                // those here keeps this page - and its Total PNL figure - scoped to what
+                // SpreadTrader actually trades, instead of mixing in positions this dashboard has
+                // no context for and can't meaningfully square off (lot sizes/contracts differ
+                // entirely by segment). With the MCX flag off, _trackedExchanges is exactly
+                // { "NFO" }, so this is identical to the original NFO-only filter.
+                if (!_trackedExchanges.Contains(exchange)) continue;
 
                 var tradingSymbol = p.GetProperty("tradingsymbol").GetString() ?? "";
                 var product = p.TryGetProperty("product", out var pr) ? pr.GetString() ?? "" : "";

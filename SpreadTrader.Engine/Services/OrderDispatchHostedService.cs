@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 using SpreadTrader.Engine;
+using SpreadTrader.KiteIntegration;
 using SpreadTrader.KiteIntegration.Orders;
 
 namespace SpreadTrader.Engine.Services;
@@ -70,6 +71,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
     private readonly MarketProtectionService _marketProtection;
     private readonly TriggerInFlightTracker _inFlightTracker;
     private readonly EngineOptions _options;
+    private readonly McxOptions _mcx;
     private readonly ILogger<OrderDispatchHostedService> _logger;
 
     public OrderDispatchHostedService(
@@ -83,6 +85,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         MarketProtectionService marketProtection,
         TriggerInFlightTracker inFlightTracker,
         IOptions<EngineOptions> options,
+        McxOptions mcx,
         ILogger<OrderDispatchHostedService> logger)
     {
         _triggerChannel = triggerChannel;
@@ -95,6 +98,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         _marketProtection = marketProtection;
         _inFlightTracker = inFlightTracker;
         _options = options.Value;
+        _mcx = mcx;
         _logger = logger;
     }
 
@@ -382,7 +386,14 @@ public sealed class OrderDispatchHostedService : BackgroundService
         if (margin.FinalTotal is not { } required)
             return null;
 
-        var available = await _marginService.GetAvailableMarginAsync(cancellationToken: cancellationToken);
+        // NFO (equity F&O) settles against the "equity" margin segment; MCX commodities against
+        // "commodity". Pick per-basket from the legs' own exchange so an MCX basket's pre-trade
+        // check reads the right pool of available funds. With the MCX add-on off no basket ever
+        // carries an MCX leg, so this always resolves to the original "equity" default.
+        var marginSegment = _mcx.Enabled && legs.Any(l => string.Equals(l.Exchange, _mcx.Exchange, StringComparison.OrdinalIgnoreCase))
+            ? _mcx.MarginSegment
+            : "equity";
+        var available = await _marginService.GetAvailableMarginAsync(marginSegment, cancellationToken);
         if (!available.Success || available.Net is not { } net)
         {
             _logger.LogWarning("Available margin check failed for rule {RuleId}: {Error} - proceeding anyway", ruleId, available.ErrorMessage);

@@ -32,21 +32,29 @@ public sealed class InstrumentMasterService
     private readonly KiteOptions _options;
     private readonly ILogger<InstrumentMasterService> _logger;
     private readonly string _futuresCsvPath;
+    private readonly IReadOnlyList<string> _exchanges;
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
     private List<KiteInstrument> _instruments = new();
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
 
+    /// <param name="exchanges">Which Kite exchange-scoped instrument dumps to download and merge.
+    /// Defaults to NFO only (the app's original behaviour). When the MCX add-on is enabled,
+    /// Program.cs passes ["NFO", "MCX"] so commodity futures are resolvable too - see McxOptions.
+    /// The FUT-only filter in ParseCsv applies uniformly across every exchange, so enabling MCX
+    /// still only retains futures, never options.</param>
     public InstrumentMasterService(
         HttpClient httpClient,
         IOptions<KiteOptions> options,
         ILogger<InstrumentMasterService> logger,
-        string futuresCsvPath)
+        string futuresCsvPath,
+        IReadOnlyList<string>? exchanges = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _logger = logger;
         _futuresCsvPath = futuresCsvPath;
+        _exchanges = exchanges is { Count: > 0 } ? exchanges : new[] { "NFO" };
     }
 
     public async Task EnsureLoadedAsync(CancellationToken cancellationToken)
@@ -60,15 +68,25 @@ public sealed class InstrumentMasterService
             if (_instruments.Count > 0 && DateTimeOffset.UtcNow - _loadedAt < TimeSpan.FromHours(12))
                 return;
 
-            _logger.LogInformation("Downloading Kite NFO instrument master...");
-            // Exchange-scoped endpoint (NFO only) rather than the full multi-exchange dump - see
-            // the class doc comment for why this app never needs anything outside NFO futures.
-            using var response = await _httpClient.GetAsync($"{_options.RestBaseUrl}/instruments/NFO", cancellationToken);
-            response.EnsureSuccessStatusCode();
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            _instruments = ParseCsv(stream);
+            // One exchange-scoped download per configured exchange (NFO always; MCX too when the
+            // commodity add-on is enabled), merged into one futures list. Each dump is far smaller
+            // than Kite's full multi-exchange /instruments, and ParseCsv discards every non-FUT row
+            // as it reads - see the class doc comment.
+            var merged = new List<KiteInstrument>();
+            foreach (var exchange in _exchanges)
+            {
+                _logger.LogInformation("Downloading Kite {Exchange} instrument master...", exchange);
+                using var response = await _httpClient.GetAsync($"{_options.RestBaseUrl}/instruments/{exchange}", cancellationToken);
+                response.EnsureSuccessStatusCode();
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                var parsed = ParseCsv(stream);
+                merged.AddRange(parsed);
+                _logger.LogInformation("Loaded {Count} {Exchange} futures instruments from Kite (options/other rows discarded during parse)", parsed.Count, exchange);
+            }
+
+            _instruments = merged;
             _loadedAt = DateTimeOffset.UtcNow;
-            _logger.LogInformation("Loaded {Count} NFO futures instruments from Kite (options/other exchanges discarded during parse)", _instruments.Count);
+            _logger.LogInformation("Instrument master ready: {Count} futures across [{Exchanges}]", _instruments.Count, string.Join(", ", _exchanges));
         }
         finally
         {

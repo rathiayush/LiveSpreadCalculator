@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using SpreadTrader.Core.Models;
 using SpreadTrader.Engine.Services;
+using SpreadTrader.KiteIntegration;
 
 namespace LiveSpreadCalculator.Controllers;
 
@@ -9,10 +10,12 @@ namespace LiveSpreadCalculator.Controllers;
 public sealed class UniverseController : ControllerBase
 {
     private readonly UniverseBuilderService _builder;
+    private readonly McxOptions _mcx;
 
-    public UniverseController(UniverseBuilderService builder)
+    public UniverseController(UniverseBuilderService builder, McxOptions mcx)
     {
         _builder = builder;
+        _mcx = mcx;
     }
 
     /// <summary>Asks Kite's live instrument master for every stock currently listed for NFO
@@ -31,6 +34,22 @@ public sealed class UniverseController : ControllerBase
             return BadRequest("maxSymbols must be a positive number, or omitted to build every futures-listed symbol on the exchange.");
 
         var result = await _builder.BuildAsync(maxSymbols, cancellationToken);
+        return Ok(result);
+    }
+
+    /// <summary>MCX commodity counterpart to build. Asks the live MCX instrument master for the
+    /// configured commodity underlyings (silver, gold, crude oil, natural gas and their mini/micro
+    /// variants - see McxOptions.Underlyings) and upserts + subscribes two kinds of arbitrage
+    /// spread: near/far calendar spreads and same-expiry (or closest-expiry, for cross-contract)
+    /// spreads. Returns 409 Conflict when the MCX add-on is switched off (Mcx:Enabled=false) so
+    /// the feature is a pure config flag with no effect on the NFO engine until turned on.</summary>
+    [HttpPost("build-mcx")]
+    public async Task<ActionResult<UniverseBuildResult>> BuildMcx(CancellationToken cancellationToken)
+    {
+        if (!_mcx.Enabled)
+            return Conflict("The MCX commodity add-on is disabled. Set Mcx:Enabled=true (appsettings or Mcx__Enabled env var) and restart to use it.");
+
+        var result = await _builder.BuildMcxAsync(cancellationToken);
         return Ok(result);
     }
 }

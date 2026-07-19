@@ -19,6 +19,7 @@ import {
 } from '@ant-design/icons'
 import { api } from './api'
 import { useAuth, clearSession } from './auth'
+import { getCachedKiteToken, saveKiteToken, clearCachedKiteToken } from './kiteAuth'
 import { useSpreadHubConnectionState, useKiteAuthInvalidated, clearKiteAuthInvalidated, stopConnection, pruneSpreads } from './hooks/spreadHub'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
@@ -337,7 +338,34 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
     // rather than silently disappearing - so fall back to an explicit "not authenticated" state
     // instead of leaving authStatus null.
     api.getAuthStatus()
-      .then(setAuthStatus)
+      .then(async (status) => {
+        if (status.isAuthenticated) {
+          setAuthStatus(status)
+          return
+        }
+        // Backend has no session - most likely a fresh process restart, not an actual logout.
+        // Offer back whatever Kite token this browser cached from an earlier login, as long as
+        // it's not past its computed 6 AM IST expiry - see kiteAuth.js. This is what avoids
+        // showing the "Login to Kite" button (and prompting a real re-login) purely because the
+        // server restarted, while yesterday's token is still genuinely valid.
+        const cachedToken = getCachedKiteToken()
+        if (!cachedToken) {
+          setAuthStatus(status)
+          return
+        }
+        try {
+          const restored = await api.restoreKiteToken(cachedToken)
+          setAuthStatus(restored)
+          // Backend only ever fills an EMPTY session (see AuthController.RestoreKiteToken) and
+          // never round-trips to Kite to pre-verify, so isAuthenticated:false here means the
+          // cached token was empty/malformed, not that Kite rejected it - still fine to drop it,
+          // there's nothing useful left to retry with.
+          if (!restored.isAuthenticated) clearCachedKiteToken()
+        } catch (err) {
+          console.error('Failed to restore cached Kite token:', err)
+          setAuthStatus(status)
+        }
+      })
       .catch((err) => {
         console.error('Failed to load Kite auth status:', err)
         setAuthStatus({ isAuthenticated: false })
@@ -356,6 +384,13 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
       // A fresh login means any earlier "your token died mid-session" notice no longer
       // applies - clear it so it doesn't keep showing after the problem's already fixed.
       clearKiteAuthInvalidated()
+      // Cache the just-obtained token so a future backend restart can restore this session
+      // instead of forcing another real Kite login - see kiteAuth.js / loadAuthStatus above.
+      if (params.get('kiteLogin') === 'success') {
+        api.getKiteToken()
+          .then((res) => saveKiteToken(res.accessToken))
+          .catch((err) => console.error('Failed to cache Kite token after login:', err))
+      }
     }
   }, [loadSpreads, loadAuthStatus])
 
@@ -368,6 +403,9 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
   useEffect(() => {
     if (!kiteAuthInvalidReason) return
     setAuthStatus({ isAuthenticated: false })
+    // The cached token (if any) has now been proven dead by an actual Kite API call - drop it so
+    // a future restart doesn't try to restore this same dead token again. See kiteAuth.js.
+    clearCachedKiteToken()
     message.warning(`Kite session ended (${kiteAuthInvalidReason}) - please log in again.`, 8)
   }, [kiteAuthInvalidReason])
 

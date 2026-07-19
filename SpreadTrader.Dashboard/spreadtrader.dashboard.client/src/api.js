@@ -112,6 +112,14 @@ export const api = {
   buildUniverse: (maxSymbols) =>
     authFetch(`/api/universe/build${maxSymbols ? `?maxSymbols=${encodeURIComponent(maxSymbols)}` : ''}`, { method: 'POST' }).then(handle),
 
+  // Builds the MCX commodity arbitrage universe (silver/gold/crude/natgas calendar + cross-
+  // contract spreads like SILVER vs SILVERM) from Kite's live MCX instrument master - see
+  // UniverseBuilderService.BuildMcxAsync. Gated server-side by Mcx:Enabled: returns 409 (surfaced
+  // as an error here) while the add-on is switched off, so this button is a no-op until the flag
+  // is flipped in config.
+  buildMcxUniverse: () =>
+    authFetch('/api/universe/build-mcx', { method: 'POST' }).then(handle),
+
   getFutures: (underlying, exchange = 'NFO') =>
     authFetch(`/api/instruments/futures?underlying=${encodeURIComponent(underlying)}&exchange=${encodeURIComponent(exchange)}`).then(handle),
   // Downloads the full instrument master and writes every futures contract (no options) to
@@ -123,6 +131,14 @@ export const api = {
 
   getAuthStatus: () => authFetch('/api/auth/status').then(handle),
   getLoginUrl: () => authFetch('/api/auth/login-url').then(handle),
+  // Fetches the current Kite access token so it can be cached client-side (see kiteAuth.js) -
+  // call right after a successful Kite login (kiteLogin=success).
+  getKiteToken: () => authFetch('/api/auth/kite-token').then(handle),
+  // Offers a client-cached Kite token back to the backend after a restart - only takes effect if
+  // the backend's own in-memory session is currently empty (never overwrites a live one). See
+  // AuthController.RestoreKiteToken / kiteAuth.js.
+  restoreKiteToken: (accessToken) =>
+    authFetch('/api/auth/kite-restore', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ accessToken }) }).then(handle),
 
   // Live open positions + PNL (GET /portfolio/positions under the hood) - see
   // KitePositionsService. { success, positions: [...], errorMessage }.
