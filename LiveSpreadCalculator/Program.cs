@@ -229,8 +229,19 @@ builder.Services.AddSingleton<BulkTriggerTemplateService>();
 // App_Data/users.csv can obtain a token (POST /api/auth/token); the external world can't consume
 // anything without one. See JwtTokenService (mints) / the fallback policy below (enforces).
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
+
+// Reversible, key-based password protection for App_Data/users.csv. The key comes from
+// Security:PasswordKey, falling back to the JWT key so the app still boots if only that is set.
+// NOTE: this must be the SAME value the PowerShell decrypt tool (Tools/Decrypt-Users.ps1) is given,
+// or previously encrypted passwords can't be read back. Changing it makes existing enc: rows
+// undecryptable.
+var passwordKey = builder.Configuration["Security:PasswordKey"];
+if (string.IsNullOrWhiteSpace(passwordKey))
+    passwordKey = builder.Configuration["Jwt:Key"];
+builder.Services.AddSingleton(new PasswordProtector(passwordKey ?? string.Empty));
+
 builder.Services.AddSingleton(sp =>
-    new CsvUserStore(usersCsvPath, sp.GetRequiredService<ILogger<CsvUserStore>>()));
+    new CsvUserStore(usersCsvPath, sp.GetRequiredService<PasswordProtector>(), sp.GetRequiredService<ILogger<CsvUserStore>>()));
 builder.Services.AddSingleton<JwtTokenService>();
 
 var jwtOptions = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
@@ -262,6 +273,30 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 var path = context.HttpContext.Request.Path;
                 if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
                     context.Token = accessToken;
+                return Task.CompletedTask;
+            },
+
+            // Force-logout enforcement. Every request carries the security stamp the token was
+            // issued with (the "stamp" claim); we compare it to the user's CURRENT stamp derived
+            // from App_Data/users.csv. A password change rewrites that row, so its stamp no longer
+            // matches any previously issued token - those tokens fail here (401), the client clears
+            // its session, and the user is bounced to the login screen on every device. Tokens
+            // minted before this feature shipped have no stamp claim and are likewise rejected,
+            // requiring a one-time re-login after deploy.
+            OnTokenValidated = context =>
+            {
+                var store = context.HttpContext.RequestServices.GetRequiredService<CsvUserStore>();
+                var email = context.Principal?.Identity?.Name;
+                var tokenStamp = context.Principal?.FindFirst("stamp")?.Value;
+                var currentStamp = store.GetSecurityStamp(email);
+
+                if (string.IsNullOrEmpty(tokenStamp) ||
+                    string.IsNullOrEmpty(currentStamp) ||
+                    !string.Equals(tokenStamp, currentStamp, StringComparison.Ordinal))
+                {
+                    context.Fail("Security stamp mismatch - password was changed or the token is stale.");
+                }
+
                 return Task.CompletedTask;
             }
         };
@@ -318,6 +353,11 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+// One-time-per-file upgrade of App_Data/users.csv: any legacy plaintext password rows are rewritten
+// as encrypted blobs on startup. No-op once every row is already encrypted, so ordinary restarts
+// don't touch the file (and don't disturb live sessions). See CsvUserStore.MigrateToEncrypted.
+app.Services.GetRequiredService<CsvUserStore>().MigrateToEncrypted();
 
 if (app.Environment.IsDevelopment())
 {
