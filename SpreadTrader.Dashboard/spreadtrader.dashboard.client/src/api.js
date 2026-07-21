@@ -89,6 +89,20 @@ export const api = {
   applyBulkTemplate: (template) =>
     authFetch('/api/triggers/bulk', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(template) }).then(handle),
 
+  // Exit triggers (rules that CLOSE an existing position) - a completely separate backend store/
+  // CSV file from the entry triggers above (see IExitTriggerRuleStore), reached at /api/exit-
+  // triggers instead of /api/triggers. Same request/response shapes throughout - only the base
+  // path differs - so these mirror the entry-trigger functions one for one.
+  getExitTriggers: (spreadId) =>
+    authFetch(`/api/exit-triggers${spreadId ? `?spreadId=${encodeURIComponent(spreadId)}` : ''}`).then(handle),
+  createExitTrigger: (rule) =>
+    authFetch('/api/exit-triggers', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(rule) }).then(handle),
+  updateExitTrigger: (id, patch) =>
+    authFetch(`/api/exit-triggers/${encodeURIComponent(id)}`, { method: 'PUT', headers: jsonHeaders, body: JSON.stringify(patch) }).then(handle),
+  deleteExitTrigger: (id) => authFetch(`/api/exit-triggers/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
+  enableExitTrigger: (id) => authFetch(`/api/exit-triggers/${encodeURIComponent(id)}/enable`, { method: 'POST' }).then(handle),
+  disableExitTrigger: (id) => authFetch(`/api/exit-triggers/${encodeURIComponent(id)}/disable`, { method: 'POST' }).then(handle),
+
   // Builds the futures universe from Kite's live instrument master - every stock currently
   // listed for NFO futures, not a hand-maintained list. Resolves each symbol's near/far month
   // contract, writes App_Data/universe_futures.csv, and subscribes the live ticker to all of
@@ -97,6 +111,14 @@ export const api = {
   // (roughly 200-220 as of mid-2026 - that's the whole exchange, not a limit in this code).
   buildUniverse: (maxSymbols) =>
     authFetch(`/api/universe/build${maxSymbols ? `?maxSymbols=${encodeURIComponent(maxSymbols)}` : ''}`, { method: 'POST' }).then(handle),
+
+  // Builds the MCX commodity arbitrage universe (silver/gold/crude/natgas calendar + cross-
+  // contract spreads like SILVER vs SILVERM) from Kite's live MCX instrument master - see
+  // UniverseBuilderService.BuildMcxAsync. Gated server-side by Mcx:Enabled: returns 409 (surfaced
+  // as an error here) while the add-on is switched off, so this button is a no-op until the flag
+  // is flipped in config.
+  buildMcxUniverse: () =>
+    authFetch('/api/universe/build-mcx', { method: 'POST' }).then(handle),
 
   getFutures: (underlying, exchange = 'NFO') =>
     authFetch(`/api/instruments/futures?underlying=${encodeURIComponent(underlying)}&exchange=${encodeURIComponent(exchange)}`).then(handle),
@@ -109,6 +131,14 @@ export const api = {
 
   getAuthStatus: () => authFetch('/api/auth/status').then(handle),
   getLoginUrl: () => authFetch('/api/auth/login-url').then(handle),
+  // Fetches the current Kite access token so it can be cached client-side (see kiteAuth.js) -
+  // call right after a successful Kite login (kiteLogin=success).
+  getKiteToken: () => authFetch('/api/auth/kite-token').then(handle),
+  // Offers a client-cached Kite token back to the backend after a restart - only takes effect if
+  // the backend's own in-memory session is currently empty (never overwrites a live one). See
+  // AuthController.RestoreKiteToken / kiteAuth.js.
+  restoreKiteToken: (accessToken) =>
+    authFetch('/api/auth/kite-restore', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ accessToken }) }).then(handle),
 
   // Changes the signed-in user's own password. On success the backend invalidates every existing
   // token for this user (security-stamp bump), so the caller must clear the local session and send

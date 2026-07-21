@@ -1,0 +1,2 @@
+Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,Enabled,IsArmed,LastFiredAt,ThresholdIsPercent,SlippagePercent,MaxFireCount,FireCount
+f077d45c-44aa-4e4a-8658-1deb60ff5f12,KPITTECH-JUL-AUG,GreaterThanOrEqual,-8,Buy,Sell,1550,NRML,MARKET,True,True,True,,False,0.1,3,0

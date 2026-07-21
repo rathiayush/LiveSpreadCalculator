@@ -11,16 +11,15 @@ function rowKey(p) {
   return `${p.tradingSymbol}|${p.exchange}|${p.product}`
 }
 
-// Mirrors AddPositionExitTriggerPage's identical helper - a PNL alert id is an internal identifier
-// only, generated client-side rather than collected as a form field.
+// A PNL alert id is an internal identifier only, generated client-side rather than collected as
+// a form field - same pattern TriggerForm.jsx uses for a trigger rule's id.
 function generateAlertId() {
   return (typeof crypto !== 'undefined' && crypto.randomUUID)
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-// Mirrors AddPositionExitTriggerPage's identical helper - kept local rather than shared since
-// it's a one-line comparison, not worth a shared module for.
+// Kept local rather than shared since it's a one-line comparison, not worth a shared module for.
 function sameInstrument(a, tradingSymbol, exchange) {
   return a && a.tradingSymbol?.toUpperCase() === tradingSymbol?.toUpperCase() && a.exchange?.toUpperCase() === exchange?.toUpperCase()
 }
@@ -77,6 +76,24 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
         ? legs.reduce((sum, p) => sum + (p.exitPnl ?? 0), 0)
         : null
 
+      // The spread VALUE (not PNL) at entry and right now, in the same Far-minus-Near convention
+      // SpreadDefinition/SpreadSnapshot use everywhere else - lets you see how far the spread
+      // itself has actually moved since you got in, independent of quantity/lot size. Both need
+      // the FULL pair (near AND far) to mean anything; a naked single leg has no "spread" to
+      // measure, so these stay null/blank for a lone leg the same way combinedExitPnl does.
+      //   - Average entered at: each leg's own AveragePrice (Kite's fill-weighted average).
+      //   - Exit running spread: each leg's own ExitPrice (bid if long/selling-to-close, ask if
+      //     short/buying-to-close - see PositionExitPricing.Compute) - what the spread would
+      //     actually print if you closed both legs this instant, as opposed to the live-streamed
+      //     SpreadSnapshot value (which is priced for a fresh ENTRY, not for unwinding this
+      //     specific held position).
+      const averageEnteredAt = (nearPos && farPos)
+        ? farPos.averagePrice - nearPos.averagePrice
+        : null
+      const exitRunningSpread = (nearPos && farPos && nearPos.exitPrice && farPos.exitPrice)
+        ? farPos.exitPrice - nearPos.exitPrice
+        : null
+
       rows.push({
         key: `group|${s.id}`,
         isGroup: true,
@@ -86,6 +103,8 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
         hasFullPair: legs.length === 2,
         combinedPnl: legs.reduce((sum, p) => sum + (p.pnl ?? 0), 0),
         combinedExitPnl,
+        averageEnteredAt,
+        exitRunningSpread,
         children: legs,
       })
     }
@@ -397,6 +416,33 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
       },
     },
     {
+      // Group-only (see averageEnteredAt above) - a naked single leg has no spread value to show
+      // here, same as the blank cells combinedPnl/combinedExitPnl already leave for one.
+      title: (
+        <Tooltip title="Spread value (Far minus Near) at entry, from each leg's own average fill price - the same figure Add Exit Trigger shows as 'Entered at'.">
+          Entered at
+        </Tooltip>
+      ),
+      key: 'averageEnteredAt',
+      render: (_, r) => (r.isGroup && r.averageEnteredAt !== null) ? r.averageEnteredAt.toFixed(2) : (r.isGroup ? '—' : ''),
+      sorter: (a, b) => (a.isGroup ? (a.averageEnteredAt ?? 0) : 0) - (b.isGroup ? (b.averageEnteredAt ?? 0) : 0),
+    },
+    {
+      title: (
+        <Tooltip title="Spread value (Far minus Near) if you closed both legs right now, priced off each leg's own Exit price (bid if long, ask if short) - not the live-streamed spread value, which is priced for a fresh entry, not for unwinding this held position.">
+          Running spread
+        </Tooltip>
+      ),
+      key: 'exitRunningSpread',
+      render: (_, r) => {
+        if (!r.isGroup) return ''
+        return r.exitRunningSpread === null
+          ? '—'
+          : <Typography.Text strong>{r.exitRunningSpread.toFixed(2)}</Typography.Text>
+      },
+      sorter: (a, b) => (a.isGroup ? (a.exitRunningSpread ?? 0) : 0) - (b.isGroup ? (b.exitRunningSpread ?? 0) : 0),
+    },
+    {
       title: 'Qty (lots)',
       key: 'quantity',
       render: (_, r) => {
@@ -443,10 +489,10 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
       render: (_, r) => {
         if (r.isGroup) {
           // "Add trigger" lives here now, once per spread, instead of duplicated on each leg row -
-          // an exit trigger is evaluated against the near/far spread as a whole anyway (see
-          // AddPositionExitTriggerPage), so it only ever made sense at the group level. Either leg
-          // resolves the same matched spread there, so children[0] (near leg if it's open, else
-          // far) is just a stable representative to link the created rule to.
+          // an exit trigger is evaluated against the near/far spread as a whole anyway, so it only
+          // ever made sense at the group level. r.spreadId (computed in the `grouped` memo above)
+          // goes straight to the Triggers page's Exit Trigger tab, which preselects it - see
+          // TriggersPage/TriggerForm's initialSpreadId prop.
           return (
             <Space size="small">
               {r.hasFullPair && (
@@ -463,7 +509,7 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
                 <Button
                   size="small"
                   icon={<ThunderboltOutlined />}
-                  onClick={() => navigate('/positions/exit-trigger', { state: { position: r.children[0] } })}
+                  onClick={() => navigate('/triggers', { state: { tab: 'exit-trigger', spreadId: r.spreadId } })}
                 >
                   Add trigger
                 </Button>
@@ -568,6 +614,14 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
           </Typography.Text>
         )}
       </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 2 }}>
+        <Typography.Text type="secondary">Entered at</Typography.Text>
+        <Typography.Text>{r.averageEnteredAt === null ? '—' : r.averageEnteredAt.toFixed(2)}</Typography.Text>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 2 }}>
+        <Typography.Text type="secondary">Running spread</Typography.Text>
+        <Typography.Text strong>{r.exitRunningSpread === null ? '—' : r.exitRunningSpread.toFixed(2)}</Typography.Text>
+      </div>
 
       <Divider style={{ margin: '10px 0' }} />
 
@@ -588,7 +642,7 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
           <Button
             size="small"
             icon={<ThunderboltOutlined />}
-            onClick={() => navigate('/positions/exit-trigger', { state: { position: r.children[0] } })}
+            onClick={() => navigate('/triggers', { state: { tab: 'exit-trigger', spreadId: r.spreadId } })}
           >
             Add trigger
           </Button>

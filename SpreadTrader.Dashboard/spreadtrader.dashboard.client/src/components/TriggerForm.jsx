@@ -1,7 +1,9 @@
 import { useState } from 'react'
-import { Card, Row, Col, InputNumber, Select, Switch, Radio, Button, Alert, Typography, Space } from 'antd'
+import { Card, Row, Col, InputNumber, Select, Switch, Radio, Button, Alert, Typography, Space, Tooltip } from 'antd'
 import { PlusCircleOutlined } from '@ant-design/icons'
 import { api } from '../api'
+import { useLiveSpreads } from '../hooks/spreadHub'
+import FlashValue from './FlashValue'
 
 const LEG_ACTIONS = ['None', 'Buy', 'Sell']
 
@@ -38,18 +40,72 @@ const emptyForm = {
   maxFireCount: 3,
 }
 
+// The two-way live quote (same buySpreadValue/sellSpreadValue SpreadGrid's "Buy spread"/"Sell
+// spread" columns show - see SpreadSnapshot.BuySpreadValue) for whichever spread is currently
+// selected, shown right under the picker so there's a live number to anchor a target against
+// without leaving this page. Both sides shown regardless of thresholdIsPercent/leg actions
+// picked below, since which one this rule actually gets evaluated against depends on Near/Far
+// leg action (see SpreadCalculationHostedService.ResolveMeasuredValue) - showing only one would
+// silently guess wrong for whichever direction isn't picked yet.
+function fmtLive(v, isPercent) {
+  return v === null || v === undefined ? '—' : `${v.toFixed(2)}${isPercent ? '%' : ''}`
+}
+function LiveSpreadPrice({ snapshot, thresholdIsPercent }) {
+  if (!snapshot) {
+    return (
+      <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+        Live now: not ticking yet
+      </Typography.Text>
+    )
+  }
+  const buy = thresholdIsPercent ? snapshot.buySpreadPercent : snapshot.buySpreadValue
+  const sell = thresholdIsPercent ? snapshot.sellSpreadPercent : snapshot.sellSpreadValue
+  return (
+    <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+      Live now —{' '}
+      <Tooltip title="What Buy Near / Sell Far would cost right now (near leg at ask, far leg at bid).">
+        Buy spread:{' '}
+        <FlashValue value={buy}>
+          <span style={{ color: buy >= 0 ? '#3ddc84' : '#ff5c5c', fontWeight: 600 }}>{fmtLive(buy, thresholdIsPercent)}</span>
+        </FlashValue>
+      </Tooltip>
+      {'  ·  '}
+      <Tooltip title="What Sell Near / Buy Far would net right now (near leg at bid, far leg at ask).">
+        Sell spread:{' '}
+        <FlashValue value={sell}>
+          <span style={{ color: sell >= 0 ? '#3ddc84' : '#ff5c5c', fontWeight: 600 }}>{fmtLive(sell, thresholdIsPercent)}</span>
+        </FlashValue>
+      </Tooltip>
+    </Typography.Text>
+  )
+}
+
 // Every trigger created here is now the same simple shape: a plain SIGNED absolute spread target
 // (e.g. -8, not a deviation magnitude away from zero), an explicit >= / <= comparison against it,
 // and manual Buy/Sell/None leg actions you set yourself - no "watch both sides"/auto-direction
 // mode where the engine decides live which leg to buy/sell from whichever side happened to cross.
-// Matches AddPositionExitTriggerPage's exit-trigger UX; the backend/engine already treat
-// Threshold as a literal comparison value (see SpreadCalculationHostedService.EvaluateTriggersAsync
-// - `measured >= rule.Threshold` / `measured <= rule.Threshold`), so this is a frontend
-// simplification only - no API contract changes were needed for single-spread rules.
-export default function TriggerForm({ spreads, onCreated }) {
-  const [form, setForm] = useState(emptyForm)
+// The backend/engine already treat Threshold as a literal comparison value (see
+// SpreadCalculationHostedService.EvaluateTriggersAsync - `measured >= rule.Threshold` /
+// `measured <= rule.Threshold`), so this is a frontend simplification only - no API contract
+// changes were needed for single-spread rules.
+// isExitTrigger picks which backend store the created rule lands in - POST /api/exit-triggers
+// (a completely separate store/CSV file from /api/triggers - see IExitTriggerRuleStore) instead
+// of the ordinary one, so exit rules never mix into the same table as entry rules. Everything
+// else - the form, validation, what's sent in the request body - is identical either way.
+// initialSpreadId seeds the spread picker once on mount (e.g. "Add trigger" on a Positions & PNL
+// row navigates here with the matching spread already known - see PositionsTable.jsx/
+// TriggersPage.jsx) - only read on the very first render (React's lazy useState initializer),
+// same as every other field in emptyForm; changing the prop after mount does nothing, since this
+// is a one-time default, not a controlled value.
+export default function TriggerForm({ spreads, onCreated, isExitTrigger = false, initialSpreadId = '' }) {
+  const [form, setForm] = useState(() => ({ ...emptyForm, spreadId: initialSpreadId }))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+
+  // Live spreadId -> SpreadSnapshot map, same source SpreadGrid/Live Spreads uses - shown right
+  // under the spread picker below so you can see where the spread is trading right now while
+  // typing a target, without leaving this page to go check the Live Spreads grid.
+  const liveSpreads = useLiveSpreads()
 
   const set = (field) => (value) => setForm((f) => ({ ...f, [field]: value }))
 
@@ -90,7 +146,8 @@ export default function TriggerForm({ spreads, onCreated }) {
     setBusy(true)
     setError(null)
     try {
-      await api.createTrigger({
+      const create = isExitTrigger ? api.createExitTrigger : api.createTrigger
+      await create({
         id: generateRuleId(),
         spreadId: form.spreadId,
         // The raw signed target itself - NOT a magnitude. fireWhenGreaterOrEqual carries the
@@ -118,13 +175,16 @@ export default function TriggerForm({ spreads, onCreated }) {
   }
 
   const unit = form.thresholdIsPercent ? '%' : ''
+  const liveSnapshot = form.spreadId ? liveSpreads[form.spreadId] : null
 
   return (
-    <Card title={<Space><PlusCircleOutlined style={{ color: '#3ddc84' }} /> Add trigger</Space>} style={{ marginBottom: 16 }}>
+    <Card title={<Space><PlusCircleOutlined style={{ color: '#3ddc84' }} /> {isExitTrigger ? 'Add exit trigger' : 'Add trigger'}</Space>} style={{ marginBottom: 16 }}>
       <form onSubmit={submit}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <Typography.Text type="secondary">
-            Evaluated against each leg's best ask price, recomputed live - see the Dashboard page.
+            {isExitTrigger
+              ? 'Same mechanism as an ordinary trigger, just tagged as an exit - set the leg actions to whatever CLOSES your position (opposite of however you entered it).'
+              : "Evaluated against each leg's best ask price, recomputed live - see the Dashboard page."}
           </Typography.Text>
 
           <Row gutter={[12, 12]}>
@@ -139,6 +199,7 @@ export default function TriggerForm({ spreads, onCreated }) {
                 filterOption={(input, option) => (option?.label ?? '').toLowerCase().includes(input.toLowerCase())}
                 options={spreads.map((s) => ({ value: s.id, label: `${s.underlying} — ${s.id}` }))}
               />
+              {form.spreadId && <LiveSpreadPrice snapshot={liveSnapshot} thresholdIsPercent={form.thresholdIsPercent} />}
             </Col>
           </Row>
 
@@ -306,7 +367,7 @@ export default function TriggerForm({ spreads, onCreated }) {
           )}
 
           {error && <Alert type="error" message={error} showIcon />}
-          <Button type="primary" htmlType="submit" loading={busy}>Add trigger</Button>
+          <Button type="primary" htmlType="submit" loading={busy}>{isExitTrigger ? 'Add exit trigger' : 'Add trigger'}</Button>
         </Space>
       </form>
     </Card>
