@@ -10,6 +10,14 @@ public sealed class OrderLegRequest
     public string OrderType { get; set; } = "MARKET";
     public decimal? Price { get; set; } // required for LIMIT orders
 
+    /// <summary>Which live price MarketProtectionService anchored the protection band to when it
+    /// converted this leg from MARKET to a protected LIMIT - "Bid/Ask" (best ask for a BUY, best
+    /// bid for a SELL, from the live ticker) or "LTP" (last traded price, used either as a
+    /// fallback when depth hasn't arrived yet, or as the only reference available at all for
+    /// manual square-off - see MarketProtectionService.Protect/ProtectFromReference). Null for a
+    /// leg that was never MARKET-protected (a plain LIMIT order the caller priced itself).</summary>
+    public string? PriceReference { get; set; }
+
     /// <summary>DAY (rests in the book until it fills or the session ends) or IOC (fills
     /// whatever quantity it can immediately, cancels the rest right away instead of resting).
     /// OrderDispatchHostedService.ApplyMarketProtection sets this to IOC on every protected

@@ -8,9 +8,12 @@ namespace SpreadTrader.Core.Models;
 ///
 /// Price is the price the order was actually sent at - for a MARKET leg converted to a protected
 /// LIMIT (see OrderDispatchHostedService.ApplyMarketProtection) that's the protection-band limit
-/// price; null means it went as a raw MARKET order with no price reference. OrderType/Status carry
-/// the sent order type and Kite's raw terminal status (COMPLETE/REJECTED/CANCELLED/OPEN...) so the
-/// Telegram/dashboard readout can show exactly what was placed and at what price.</summary>
+/// price; null means it went as a raw MARKET order with no price reference. PriceReference says
+/// which live price that protection band was anchored to - "Bid/Ask" or "LTP" (see
+/// OrderLegRequest.PriceReference/MarketProtectionService) - null alongside a null Price. OrderType/
+/// Status carry the sent order type and Kite's raw terminal status (COMPLETE/REJECTED/CANCELLED/
+/// OPEN...) so the Telegram/dashboard readout can show exactly what was placed, at what price, and
+/// off which reference.</summary>
 public sealed record OrderLegResult(
     string TradingSymbol,
     string TransactionType, // BUY or SELL
@@ -22,7 +25,8 @@ public sealed record OrderLegResult(
     int FilledQuantity = 0,
     decimal? Price = null,
     string? OrderType = null,
-    string? Status = null);
+    string? Status = null,
+    string? PriceReference = null);
 
 /// <summary>Published once OrderDispatchHostedService finishes acting on a fired trigger -
 /// correlates back to the TriggerEvent that caused it via FireId, and reports what was actually

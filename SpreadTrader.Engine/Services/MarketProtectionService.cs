@@ -18,8 +18,8 @@ namespace SpreadTrader.Engine.Services;
 /// far-month contract may need more headroom than a liquid near-month one - see TriggerRule's doc
 /// comment), applied identically to whichever leg is being protected at the time, so both legs of
 /// a fired rule get the same percentage band, each off its own reference price. Callers with no
-/// rule to draw from (PositionsController's manual square-off) fall back to
-/// EngineOptions.MarketProtectionPercent as a fixed default.
+/// rule to draw from (PositionsController's manual square-off) instead use whatever slippage % the
+/// user entered on the square-off confirmation popup - see SquareOffPositionRequest.SlippagePercent.
 ///
 /// Extracted as its own service (rather than living only on OrderDispatchHostedService, where
 /// this logic originated) so every place in this app that fires a MARKET-type order - triggered
@@ -35,6 +35,17 @@ public sealed class MarketProtectionService
     /// entirely.</summary>
     private const decimal DefaultTickSize = 0.05m;
 
+    /// <summary>OrderLegRequest.PriceReference values. Kept as named constants (rather than
+    /// free-floating string literals) so Protect/ProtectFromReference and every caller that reads
+    /// them back (Telegram/dashboard formatting) can't drift out of sync on the exact text.
+    /// ReferenceBidAsk is the only value any order-pricing path in this app produces today - a
+    /// protected order is always anchored to live best bid/ask, never last traded price (LTP can
+    /// be stale between prints - see Protect's doc comment). ReferenceLtp is kept only so a
+    /// pre-existing triggers.csv/basket-history row written before this restriction still renders
+    /// correctly; nothing produces it going forward.</summary>
+    public const string ReferenceBidAsk = "Bid/Ask";
+    public const string ReferenceLtp = "LTP";
+
     private readonly ITickStore _tickStore;
     private readonly ILogger<MarketProtectionService> _logger;
 
@@ -46,11 +57,14 @@ public sealed class MarketProtectionService
 
     /// <summary>Tick-store-backed variant, for symbols that are part of the live-streamed
     /// universe (triggered baskets always are, since a spread can't exist without both legs
-    /// subscribed). Looks up the latest bid/ask/LTP for <paramref name="instrumentToken"/> from
-    /// the shared ITickStore and hands off to <see cref="ProtectFromReference"/> for the actual
-    /// band/rounding math. Returns <paramref name="leg"/> unchanged if it isn't OrderType=MARKET,
-    /// or if no tick data has arrived yet for this instrument (Kite will then likely reject it,
-    /// but there's no better price reference available to send instead).</summary>
+    /// subscribed). Looks up the latest bid/ask for <paramref name="instrumentToken"/> from the
+    /// shared ITickStore and hands off to <see cref="ProtectFromReference"/> for the actual
+    /// band/rounding math. Returns <paramref name="leg"/> unchanged - as a plain, unprotected
+    /// MARKET order, which Kite will then likely reject outright rather than risk pricing it off
+    /// a stale reference - if no tick data has arrived yet for this instrument, or if live bid/ask
+    /// depth hasn't arrived for the side this leg needs (LTP is deliberately never used as a
+    /// substitute here: it only updates on an actual trade and can be stale/off-market between
+    /// prints, which is exactly the risk market protection exists to price around).</summary>
     public OrderLegRequest Protect(OrderLegRequest leg, uint instrumentToken, decimal tickSize, string context, decimal slippagePercent)
     {
         if (!string.Equals(leg.OrderType, "MARKET", StringComparison.OrdinalIgnoreCase))
@@ -65,22 +79,29 @@ public sealed class MarketProtectionService
         }
 
         var isBuy = string.Equals(leg.TransactionType, "BUY", StringComparison.OrdinalIgnoreCase);
-        var reference = isBuy
-            ? (tick.BestAskPrice > 0 ? tick.BestAskPrice : tick.LastPrice)
-            : (tick.BestBidPrice > 0 ? tick.BestBidPrice : tick.LastPrice);
+        var bidAskAvailable = isBuy ? tick.BestAskPrice > 0 : tick.BestBidPrice > 0;
+        if (!bidAskAvailable)
+        {
+            _logger.LogWarning(
+                "{Context}: no live bid/ask depth yet for {Symbol} - sending as MARKET anyway rather than pricing off LTP, Kite will likely reject it (market protection requires a real depth reference).",
+                context, leg.TradingSymbol);
+            return leg;
+        }
 
-        return ProtectFromReference(leg, reference, tickSize, context, slippagePercent);
+        var reference = isBuy ? tick.BestAskPrice : tick.BestBidPrice;
+        return ProtectFromReference(leg, reference, tickSize, context, slippagePercent, ReferenceBidAsk);
     }
 
-    /// <summary>Reference-price variant, for callers that already have an up-to-date price
-    /// without needing the live WebSocket ticker - e.g. PositionsController's manual square-off,
-    /// which uses GET /portfolio/positions' own last_price. This matters because an open position
-    /// isn't necessarily for a symbol any currently-configured spread subscribes to, so ITickStore
-    /// may have no data for it at all even though Kite itself has a perfectly good LTP.
+    /// <summary>Reference-price variant - does the actual band/rounding math once a caller has
+    /// already resolved a real bid/ask reference price (<see cref="Protect"/> is the only caller
+    /// today, passing <see cref="ReferenceBidAsk"/> after confirming live depth exists). Not
+    /// meant to be handed an LTP: this app never prices a protected order off last traded price -
+    /// see <see cref="Protect"/>'s doc comment for why. <paramref name="referenceKind"/> has no
+    /// default on purpose, so a caller can't silently fall into <see cref="ReferenceLtp"/>.
     ///
     /// Returns <paramref name="leg"/> unchanged if it isn't OrderType=MARKET, or if
     /// <paramref name="referencePrice"/> is not a usable (&gt; 0) price.</summary>
-    public OrderLegRequest ProtectFromReference(OrderLegRequest leg, decimal referencePrice, decimal tickSize, string context, decimal slippagePercent)
+    public OrderLegRequest ProtectFromReference(OrderLegRequest leg, decimal referencePrice, decimal tickSize, string context, decimal slippagePercent, string referenceKind)
     {
         if (!string.Equals(leg.OrderType, "MARKET", StringComparison.OrdinalIgnoreCase))
             return leg;
@@ -106,8 +127,8 @@ public sealed class MarketProtectionService
         var protectedPrice = RoundToTick(rawPrice, effectiveTickSize, roundUp: isBuy);
 
         _logger.LogInformation(
-            "{Context}: {Symbol} MARKET -> protected LIMIT @ {Price} ({Percent}% band around {Reference}, tick size {TickSize})",
-            context, leg.TradingSymbol, protectedPrice, slippagePercent, referencePrice, effectiveTickSize);
+            "{Context}: {Symbol} MARKET -> protected LIMIT @ {Price} ({Percent}% band around {ReferenceKind} {Reference}, tick size {TickSize})",
+            context, leg.TradingSymbol, protectedPrice, slippagePercent, referenceKind, referencePrice, effectiveTickSize);
 
         return new OrderLegRequest
         {
@@ -118,6 +139,7 @@ public sealed class MarketProtectionService
             Product = leg.Product,
             OrderType = "LIMIT",
             Price = protectedPrice,
+            PriceReference = referenceKind,
             // IOC instead of the DAY default: fill whatever it can immediately and cancel the
             // rest right away, rather than resting in the book if price moves past the
             // protection band - see OrderDispatchHostedService's class doc comment for why this

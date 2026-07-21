@@ -49,6 +49,21 @@ public sealed class EngineOptions
     /// MarketProtectionPercent below, same as any other MARKET-type leg).</summary>
     public bool AutoSquareOffOnPartialFill { get; set; } = true;
 
+    /// <summary>Only consulted when AutoSquareOffOnPartialFill is true. Before flattening
+    /// whatever leg(s) DID fill in a partial-fill basket, make one more attempt at whichever
+    /// leg(s) were genuinely rejected/cancelled (not the hedge's deliberately-skipped partner -
+    /// see OrderDispatchHostedService.RetryUnfilledLegsAsync), at RetryUnfilledLegSlippageMultiplier
+    /// times the rule's own SlippagePercent - a fill, even at worse pricing, keeps the intended
+    /// hedged spread intact, which is strictly better than ending up with no position at all
+    /// after flattening the leg that did fill. Set to false to go straight to square-off on any
+    /// rejection, as before this option existed.</summary>
+    public bool RetryUnfilledLegOnPartialFill { get; set; } = true;
+
+    /// <summary>How much wider than the rule's own SlippagePercent the one-time retry above is
+    /// allowed to price through - e.g. 3 means a rule fired with 0.10% slippage retries its
+    /// rejected leg at 0.30%. Only used when RetryUnfilledLegOnPartialFill is true.</summary>
+    public decimal RetryUnfilledLegSlippageMultiplier { get; set; } = 3m;
+
     /// <summary>Kite Connect's API rejects plain MARKET orders outright with "Market orders
     /// without market protection are not allowed via API" for F&amp;O - there's no
     /// market_protection flag in the order-placement API itself, so any leg configured as

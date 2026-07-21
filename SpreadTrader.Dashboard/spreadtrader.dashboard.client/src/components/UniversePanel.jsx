@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Card, Button, Alert, Typography, Space, InputNumber } from 'antd'
-import { GlobalOutlined, ThunderboltOutlined } from '@ant-design/icons'
+import { Card, Button, Alert, Typography, Space, InputNumber, Divider } from 'antd'
+import { GlobalOutlined, ThunderboltOutlined, GoldOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
 // One button that builds the futures universe straight from Kite's live instrument master -
@@ -16,6 +16,11 @@ export default function UniversePanel({ onSpreadsChanged }) {
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
 
+  // Separate state for the MCX commodity build so its outcome/errors don't clobber the NFO panel.
+  const [mcxBusy, setMcxBusy] = useState(false)
+  const [mcxResult, setMcxResult] = useState(null)
+  const [mcxError, setMcxError] = useState(null)
+
   const build = async () => {
     setBusy(true)
     setError(null)
@@ -28,6 +33,23 @@ export default function UniversePanel({ onSpreadsChanged }) {
       setError(err.message)
     } finally {
       setBusy(false)
+    }
+  }
+
+  const buildMcx = async () => {
+    setMcxBusy(true)
+    setMcxError(null)
+    setMcxResult(null)
+    try {
+      const res = await api.buildMcxUniverse()
+      setMcxResult(res)
+      onSpreadsChanged()
+    } catch (err) {
+      // While Mcx:Enabled is false the server returns 409 - surface it as-is so it's obvious the
+      // add-on just needs turning on in config rather than looking like a failure.
+      setMcxError(err.message)
+    } finally {
+      setMcxBusy(false)
     }
   }
 
@@ -60,6 +82,34 @@ export default function UniversePanel({ onSpreadsChanged }) {
             message={`${result.included.length} of ${result.requestedCount} symbols resolved and are now streaming.`}
             description={result.skipped.length > 0
               ? `${result.skipped.length} skipped: ${result.skipped.slice(0, 5).join('; ')}${result.skipped.length > 5 ? '…' : ''}`
+              : undefined}
+          />
+        )}
+
+        <Divider style={{ margin: '4px 0' }} />
+
+        {/* MCX commodity arbitrage build. Gated server-side by Mcx:Enabled - until that flag is on,
+            this button reports the add-on is disabled instead of building anything. Once built, the
+            commodity spreads stream into the same Live Spreads grid / ranking as everything else. */}
+        <Typography.Text type="secondary">
+          <GoldOutlined style={{ color: '#d4af37', marginRight: 6 }} />
+          Builds MCX commodity spreads (silver, gold, crude, natural gas): near/far calendar spreads
+          plus same-expiry cross-contract pairs like SILVER vs SILVERM. Disabled until
+          <Typography.Text code>Mcx:Enabled</Typography.Text> is turned on in config.
+        </Typography.Text>
+        <Space wrap>
+          <Button icon={<GoldOutlined />} onClick={buildMcx} loading={mcxBusy}>
+            Build MCX commodity universe
+          </Button>
+        </Space>
+        {mcxError && <Alert type="warning" message={mcxError} showIcon />}
+        {mcxResult && (
+          <Alert
+            type="success"
+            showIcon
+            message={`${mcxResult.included.length} MCX commodity spreads built and now streaming.`}
+            description={mcxResult.skipped.length > 0
+              ? `${mcxResult.skipped.length} skipped: ${mcxResult.skipped.slice(0, 5).join('; ')}${mcxResult.skipped.length > 5 ? '…' : ''}`
               : undefined}
           />
         )}

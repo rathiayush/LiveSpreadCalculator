@@ -21,6 +21,16 @@ public sealed class ChangePasswordRequest
     public required string NewPassword { get; set; }
 }
 
+/// <summary>Posted to POST /api/auth/kite-restore - see that endpoint's doc comment. The
+/// frontend's own cached copy of a previously-obtained Kite access token (see kiteAuth.js),
+/// offered back to the backend so a process restart doesn't force a fresh Kite login while
+/// that token is still genuinely valid (Kite tokens are valid until ~6 AM IST the next day,
+/// independent of this app's own uptime).</summary>
+public sealed class KiteTokenRestoreRequest
+{
+    public required string AccessToken { get; set; }
+}
+
 public sealed class InstrumentLegRequest
 {
     public required string TradingSymbol { get; set; }

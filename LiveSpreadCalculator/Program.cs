@@ -28,6 +28,16 @@ const string DashboardCorsPolicy = "Dashboard";
 builder.Services.Configure<KiteOptions>(builder.Configuration.GetSection(KiteOptions.SectionName));
 builder.Services.Configure<EngineOptions>(builder.Configuration.GetSection(EngineOptions.SectionName));
 
+// MCX commodity arbitrage add-on (silver/gold/crude/natgas calendar + cross-contract spreads).
+// The whole feature is gated behind Mcx:Enabled (default false) - see McxOptions. Bound once here
+// and also registered as a plain singleton so both DI-constructed services (OrderDispatch, the
+// UniverseController) and the hand-wired singletons below (instrument master, positions, universe
+// builder) read the exact same resolved config. With Enabled=false every consumer is a no-op and
+// the NFO engine is unchanged.
+builder.Services.Configure<McxOptions>(builder.Configuration.GetSection(McxOptions.SectionName));
+var mcxOptions = builder.Configuration.GetSection(McxOptions.SectionName).Get<McxOptions>() ?? new McxOptions();
+builder.Services.AddSingleton(mcxOptions);
+
 // ---- State (Core) --------------------------------------------------------------------------
 // Ticks and spread definitions are in-memory only, by design - a restart loses them (re-add
 // spreads via POST /api/spreads). Trigger rules are the one thing worth surviving a restart, so
@@ -35,6 +45,11 @@ builder.Services.Configure<EngineOptions>(builder.Configuration.GetSection(Engin
 // deliberate stopgap, not a real database.
 var triggersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:TriggersCsvPath"] ?? "App_Data/triggers.csv");
+// Exit triggers (rules that CLOSE an existing position) live in a completely separate CSV file
+// from entry triggers - see IExitTriggerRuleStore's doc comment for why they're never mixed into
+// one shared table.
+var exitTriggersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:ExitTriggersCsvPath"] ?? "App_Data/exit_triggers.csv");
 // PNL alerts (see PnlAlertRule/CsvPnlAlertStore) - same "small CSV so it survives a restart"
 // treatment as trigger rules, kept in its own file since the row shape is unrelated.
 var pnlAlertsCsvPath = Path.Combine(builder.Environment.ContentRootPath,
@@ -48,6 +63,10 @@ var futuresCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 // see UniverseBuilderService.
 var universeCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:UniverseCsvPath"] ?? "App_Data/universe_futures.csv");
+// Separate output file for the MCX commodity universe so building it never overwrites the NFO
+// universe CSV above - only written when the MCX add-on is enabled and built.
+var mcxUniverseCsvPath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:McxUniverseCsvPath"] ?? "App_Data/universe_mcx.csv");
 // Allow-list of who may log in and obtain a JWT (email,password rows). See CsvUserStore.
 var usersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:UsersCsvPath"] ?? "App_Data/users.csv");
@@ -55,6 +74,8 @@ var usersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 builder.Services.AddSingleton<ITickStore, InMemoryTickStore>();
 builder.Services.AddSingleton<ITriggerRuleStore>(sp =>
     new CsvTriggerRuleStore(triggersCsvPath, sp.GetRequiredService<ILogger<CsvTriggerRuleStore>>()));
+builder.Services.AddSingleton<IExitTriggerRuleStore>(sp =>
+    new CsvExitTriggerRuleStore(exitTriggersCsvPath, sp.GetRequiredService<ILogger<CsvTriggerRuleStore>>()));
 builder.Services.AddSingleton<IPnlAlertStore>(sp =>
     new CsvPnlAlertStore(pnlAlertsCsvPath, sp.GetRequiredService<ILogger<CsvPnlAlertStore>>()));
 builder.Services.AddSingleton<ISpreadDefinitionStore, InMemorySpreadDefinitionStore>();
@@ -73,7 +94,9 @@ builder.Services.AddSingleton(sp => new InstrumentMasterService(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(InstrumentMasterService)),
     sp.GetRequiredService<IOptions<KiteOptions>>(),
     sp.GetRequiredService<ILogger<InstrumentMasterService>>(),
-    futuresCsvPath));
+    futuresCsvPath,
+    // ["NFO"] when the MCX add-on is off (unchanged behaviour), ["NFO","MCX"] when on.
+    mcxOptions.ResolveExchanges()));
 
 builder.Services.AddSingleton(sp => new KiteAuthService(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KiteAuthService)),
@@ -113,7 +136,8 @@ builder.Services.AddSingleton(sp => new KitePositionsService(
     sp.GetRequiredService<KiteAuthFailureHandler>(),
     sp.GetRequiredService<InstrumentMasterService>(),
     sp.GetRequiredService<ITickStore>(),
-    sp.GetRequiredService<ILogger<KitePositionsService>>()));
+    sp.GetRequiredService<ILogger<KitePositionsService>>(),
+    mcxOptions));
 
 // Shared MARKET -> protected-LIMIT conversion (Kite rejects raw MARKET orders for F&O - see
 // MarketProtectionService's doc comment). Used by both OrderDispatchHostedService (triggered
@@ -195,7 +219,9 @@ builder.Services.AddSingleton(sp => new UniverseBuilderService(
     sp.GetRequiredService<ISpreadDefinitionStore>(),
     sp.GetRequiredService<TickIngestionHostedService>(),
     sp.GetRequiredService<ILogger<UniverseBuilderService>>(),
-    universeCsvPath));
+    universeCsvPath,
+    mcxOptions,
+    mcxUniverseCsvPath));
 builder.Services.AddSingleton<BulkTriggerTemplateService>();
 
 // ---- Authentication (JWT) -------------------------------------------------------------------
