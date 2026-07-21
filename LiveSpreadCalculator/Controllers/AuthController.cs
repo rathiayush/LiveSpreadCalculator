@@ -57,8 +57,36 @@ public sealed class AuthController : ControllerBase
             return Unauthorized(new { error = "Invalid email or password." });
         }
 
-        var (token, expiresUtc) = _tokenService.CreateToken(request.Email.Trim());
-        return Ok(new { token, expiresUtc, email = request.Email.Trim() });
+        var email = request.Email.Trim();
+        // Bake the user's current security stamp into the token so a later password change can
+        // invalidate it (see Program.cs OnTokenValidated).
+        var stamp = _userStore.GetSecurityStamp(email);
+        var (token, expiresUtc) = _tokenService.CreateToken(email, stamp);
+        return Ok(new { token, expiresUtc, email });
+    }
+
+    /// <summary>Lets the signed-in user change their own password. Re-verifies the current password,
+    /// then stores the new one ENCRYPTED in App_Data/users.csv. Because that rewrites the user's
+    /// security stamp, every token issued against the old password - on any device, including this
+    /// one - stops validating immediately, so the client is expected to drop its session and send
+    /// the user back to the login screen after a success here.</summary>
+    [HttpPost("change-password")]
+    public ActionResult<object> ChangePassword([FromBody] ChangePasswordRequest request)
+    {
+        // Identity.Name is the email - set explicitly as a ClaimTypes.Name claim by JwtTokenService.
+        var email = User.Identity?.Name;
+        if (string.IsNullOrEmpty(email))
+            return Unauthorized(new { error = "Not signed in." });
+
+        var result = _userStore.ChangePassword(email, request.CurrentPassword, request.NewPassword);
+        if (!result.Ok)
+        {
+            _logger.LogWarning("Password change rejected for {Email}: {Reason}", email, result.Error);
+            return BadRequest(new { error = result.Error });
+        }
+
+        _logger.LogInformation("Password changed for {Email}; all existing sessions invalidated.", email);
+        return Ok(new { message = "Password updated. Please sign in again." });
     }
 
     /// <summary>Returns the Kite login URL the frontend should redirect the browser to.

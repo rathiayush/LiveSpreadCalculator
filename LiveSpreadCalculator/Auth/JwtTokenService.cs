@@ -21,8 +21,13 @@ public sealed class JwtTokenService
     }
 
     /// <summary>Issues a token identifying the given user, expiring ExpiryDays from now. Returns the
-    /// compact JWT string and the absolute UTC expiry so the caller can hand both to the client.</summary>
-    public (string Token, DateTime ExpiresUtc) CreateToken(string email)
+    /// compact JWT string and the absolute UTC expiry so the caller can hand both to the client.
+    ///
+    /// <paramref name="securityStamp"/> is a fingerprint of the user's current password (see
+    /// CsvUserStore.GetSecurityStamp). It's carried as the "stamp" claim and re-validated on every
+    /// request in Program.cs, so changing the password moves the stamp and instantly invalidates
+    /// every token that was issued against the old one - i.e. a forced logout on all devices.</summary>
+    public (string Token, DateTime ExpiresUtc) CreateToken(string email, string securityStamp)
     {
         var expires = DateTime.UtcNow.AddDays(_options.ExpiryDays);
 
@@ -33,6 +38,7 @@ public sealed class JwtTokenService
                 new Claim(JwtRegisteredClaimNames.Sub, email),
                 new Claim(ClaimTypes.Name, email),
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+                new Claim("stamp", securityStamp),
             }),
             Expires = expires,
             Issuer = _options.Issuer,

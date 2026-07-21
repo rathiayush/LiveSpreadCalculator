@@ -81,14 +81,24 @@ Copy-Item -Path "$ClientDir\dist\*" -Destination "$PublishDir\wwwroot" -Recurse 
 # the stripping exist in the first place (see git history around this file). If you need the
 # server's live triggers.csv etc. preserved again, uncomment the four Remove-Item lines below.
 #
-# users.csv/users.pradeep-1.csv/users.pradeep-2.csv are DELIBERATELY NOT stripped either, by
-# separate explicit request from before this change - the local repo copy is deployed like any
-# other static file and DOES overwrite whatever's live on the server on every deploy. Know this
-# before editing credentials only on the server via Kudu: that edit will be wiped on the next
-# deploy unless the same change is also made to the local App_Data\users*.csv file first (this is
-# exactly the behavior that reset Production's login to the placeholder demo accounts once
-# already - see git history around 2026-07-14 for the incident this traded off against).
-Write-Host "==> App_Data files are NOT stripped - every deploy overwrites live server state with the local repo copy (see comment above)." -ForegroundColor Cyan
+# users.csv/users.pradeep-1.csv/users.pradeep-2.csv ARE NOW STRIPPED from the publish output (the
+# Remove-Item line below), so a deploy NEVER overwrites the live server's user file. This was changed
+# 2026-07-15: passwords are now editable on the live server itself (the Profile > Change password
+# feature stores a new ENCRYPTED password directly into the server's users.csv). If the deploy kept
+# overwriting that file with the local repo copy, every password a user changed on the server would
+# be silently wiped on the next deploy and their login reset to whatever's committed here - exactly
+# the credential-reset incident this used to cause. Stripping the files means the zip overlay leaves
+# the server's own users.csv in place.
+#
+# Trade-off to know: because the file is no longer in the zip, the server keeps whatever users file
+# it already has. A brand-new/empty Web App would therefore start with NO users file until one is
+# uploaded once (via Kudu / FTP). To seed or intentionally reset server credentials from the repo,
+# comment the users*.csv Remove-Item line out for that one deploy.
+#
+# The other four App_Data files (triggers/pnl-alerts/futures/universe) are still NOT stripped, by
+# the separate explicit request noted above - every deploy overwrites those with the local repo copy.
+Write-Host "==> Stripping users*.csv from publish so the deploy does NOT overwrite live server credentials (other App_Data files still overwrite - see comment)." -ForegroundColor Cyan
+Remove-Item "$PublishDir\App_Data\users*.csv" -Force -ErrorAction SilentlyContinue
 # Remove-Item "$PublishDir\App_Data\triggers.csv" -Force -ErrorAction SilentlyContinue
 # Remove-Item "$PublishDir\App_Data\pnl-alerts.csv" -Force -ErrorAction SilentlyContinue
 # Remove-Item "$PublishDir\App_Data\futures_instruments.csv" -Force -ErrorAction SilentlyContinue

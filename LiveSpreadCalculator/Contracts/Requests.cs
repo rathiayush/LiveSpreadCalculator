@@ -11,6 +11,16 @@ public sealed class UserLoginRequest
     public required string Password { get; set; }
 }
 
+/// <summary>Body of POST /api/auth/change-password (see AuthController.ChangePassword). The user is
+/// identified by their JWT, not by anything in this payload, so only the two passwords are sent.
+/// Succeeding here rewrites the stored (encrypted) password and invalidates every existing token
+/// for that user - a forced logout on all devices.</summary>
+public sealed class ChangePasswordRequest
+{
+    public required string CurrentPassword { get; set; }
+    public required string NewPassword { get; set; }
+}
+
 /// <summary>Posted to POST /api/auth/kite-restore - see that endpoint's doc comment. The
 /// frontend's own cached copy of a previously-obtained Kite access token (see kiteAuth.js),
 /// offered back to the backend so a process restart doesn't force a fresh Kite login while

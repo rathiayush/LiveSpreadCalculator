@@ -16,6 +16,7 @@ import {
   MenuOutlined,
   SettingOutlined,
   LogoutOutlined,
+  UserOutlined,
 } from '@ant-design/icons'
 import { api } from './api'
 import { useAuth, clearSession } from './auth'
@@ -29,6 +30,7 @@ import ConfiguredSpreadsPage from './pages/ConfiguredSpreadsPage'
 import TriggersPage from './pages/TriggersPage'
 import TriggerActivityPage from './pages/TriggerActivityPage'
 import PositionsPage from './pages/PositionsPage'
+import ProfileModal from './components/ProfileModal'
 
 const { Header, Content, Sider } = Layout
 
@@ -203,7 +205,7 @@ function MobileNavDrawer({ open, onClose }) {
   )
 }
 
-function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenuButton, userEmail, onLogout }) {
+function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenuButton, userEmail, onLogout, onProfile }) {
   const active = useActiveNavItem()
   const isLight = mode === 'light'
   // Only this hook re-renders on connection state flips (rare - connect/reconnect/disconnect),
@@ -294,6 +296,15 @@ function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenu
           onClick={onToggleMode}
           title={isLight ? 'Switch to dark theme' : 'Switch to light theme'}
         />
+        <Tooltip title={userEmail ? `${userEmail} - change password` : 'Change password'}>
+          <Button
+            size="small"
+            shape="circle"
+            icon={<UserOutlined />}
+            onClick={onProfile}
+            aria-label="Profile and password"
+          />
+        </Tooltip>
         {compact ? (
           <Tooltip title={userEmail ? `Signed in as ${userEmail} - log out` : 'Log out'}>
             <Button size="small" shape="circle" icon={<LogoutOutlined />} onClick={onLogout} aria-label="Log out" />
@@ -312,6 +323,7 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
   const [spreads, setSpreads] = useState([])
   const [authStatus, setAuthStatus] = useState(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
   // Note: live spread ticks, ranking, and trigger events are deliberately *not* read here - see
   // hooks/spreadHub.js. Each page/component that needs one of those slices calls its own hook,
   // so AppShell (and unrelated pages) no longer re-render on every ~250-300ms spread tick.
@@ -435,6 +447,7 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
           onMenuClick={() => setDrawerOpen(true)}
           userEmail={userEmail}
           onLogout={onLogout}
+          onProfile={() => setProfileOpen(true)}
         />
         <Content
           className="app-content"
@@ -473,6 +486,15 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
         </Content>
       </Layout>
       {!isDesktopNav && <MobileNavDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />}
+      <ProfileModal
+        open={profileOpen}
+        onClose={() => setProfileOpen(false)}
+        email={userEmail}
+        onChanged={() => {
+          setProfileOpen(false)
+          onLogout() // password changed -> old token is dead server-side; drop the session locally
+        }}
+      />
     </Layout>
   )
 }
