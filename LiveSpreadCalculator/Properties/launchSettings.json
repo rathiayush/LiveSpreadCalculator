@@ -28,6 +28,22 @@
         "ASPNETCORE_ENVIRONMENT": "Development"
       }
     },
+    "pradeep-2 (local)": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "pradeep-2",
+        // Overrides appsettings.pradeep-2.json's Dashboard:BaseUrl (the deployed Azure URL) so
+        // CORS allows a LOCAL frontend dev server instead of only the live P2 site - env vars
+        // always win over appsettings.{Environment}.json regardless of environment name. Point
+        // this at wherever the React client is actually running locally (its Vite/dev-server
+        // port), not the deployed Dashboard:BaseUrl above.
+        "Dashboard__BaseUrl": "https://localhost:63061"
+      },
+      "dotnetRunMessages": true,
+      "applicationUrl": "https://localhost:7105;http://localhost:5159"
+    },
     "Container (Dockerfile)": {
       "commandName": "Docker",
       "launchBrowser": true,
