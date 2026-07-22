@@ -52,7 +52,8 @@ if (-not (Test-Path $CsvPath)) {
     throw "users.csv not found at: $CsvPath"
 }
 
-# ---- Resolve key (param > appsettings Security:PasswordKey > appsettings Jwt:Key) --------------
+# ---- Resolve key (param > interactive prompt, defaulting to appsettings Security:PasswordKey / -----
+# ---- Jwt:Key as a suggestion) -------------------------------------------------------------------
 if (-not $Key) {
     # Each instance uses its own key, so pick the appsettings file that matches the CSV's name:
     #   users.pradeep-1.csv -> appsettings.pradeep-1.json, users.pradeep-2.csv -> ...pradeep-2.json,
@@ -62,27 +63,38 @@ if (-not $Key) {
     elseif ($csvName -like '*pradeep-2*') { $appSettingsPath = Join-Path $projectDir 'appsettings.pradeep-2.json' }
     else                                  { $appSettingsPath = Join-Path $projectDir 'appsettings.json' }
 
-    if (-not (Test-Path $appSettingsPath)) {
-        throw "No -Key given and appsettings not found at: $appSettingsPath"
+    $suggestedKey = $null
+    if (Test-Path $appSettingsPath) {
+        # appsettings.json in this project contains // comments, which ConvertFrom-Json rejects. Strip
+        # single-line // comments (naively but sufficiently for this file) before parsing.
+        $raw = Get-Content -Path $appSettingsPath -Raw
+        $noComments = ($raw -split "`n" | ForEach-Object { $_ -replace '^\s*//.*$', '' }) -join "`n"
+        $config = $noComments | ConvertFrom-Json
+
+        if ($config.Security -and $config.Security.PasswordKey) {
+            $suggestedKey = $config.Security.PasswordKey
+        }
+        elseif ($config.Jwt -and $config.Jwt.Key) {
+            $suggestedKey = $config.Jwt.Key
+        }
     }
 
-    # appsettings.json in this project contains // comments, which ConvertFrom-Json rejects. Strip
-    # single-line // comments (naively but sufficiently for this file) before parsing.
-    $raw = Get-Content -Path $appSettingsPath -Raw
-    $noComments = ($raw -split "`n" | ForEach-Object { $_ -replace '^\s*//.*$', '' }) -join "`n"
-    $config = $noComments | ConvertFrom-Json
-
-    if ($config.Security -and $config.Security.PasswordKey) {
-        $Key = $config.Security.PasswordKey
+    # Ask interactively rather than silently trusting the committed appsettings value - if the real
+    # Azure Web App overrides Security__PasswordKey via an environment variable (which it should),
+    # the committed file's key is just a placeholder and will NOT decrypt real rows. Press Enter to
+    # accept the suggested/committed key (fine for local/dev-only data), or paste the real key (e.g.
+    # copy-pasted from the Web App's Application Settings) to decrypt production data correctly.
+    if ($suggestedKey) {
+        Write-Host "Committed key found in $(Split-Path $appSettingsPath -Leaf): $suggestedKey" -ForegroundColor DarkYellow
+        $typed = Read-Host "Press Enter to use this key, or paste the real key (e.g. Security__PasswordKey from Azure) if it's different"
+        $Key = if ([string]::IsNullOrWhiteSpace($typed)) { $suggestedKey } else { $typed }
     }
-    elseif ($config.Jwt -and $config.Jwt.Key) {
-        $Key = $config.Jwt.Key
+    else {
+        $Key = Read-Host "No key found in appsettings - paste the encryption key (Security:PasswordKey / Security__PasswordKey)"
+        if ([string]::IsNullOrWhiteSpace($Key)) {
+            throw "No key provided."
+        }
     }
-
-    if (-not $Key) {
-        throw "Could not find Security:PasswordKey or Jwt:Key in appsettings.json. Pass -Key explicitly."
-    }
-    Write-Host "Key: read from $(Split-Path $appSettingsPath -Leaf) (override with -Key if the backend uses a different secret)." -ForegroundColor DarkYellow
 }
 
 # ---- Crypto helpers (must mirror PasswordProtector.cs) ----------------------------------------
