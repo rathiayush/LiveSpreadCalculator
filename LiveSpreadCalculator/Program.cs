@@ -359,7 +359,16 @@ var app = builder.Build();
 // don't touch the file (and don't disturb live sessions). See CsvUserStore.MigrateToEncrypted.
 app.Services.GetRequiredService<CsvUserStore>().MigrateToEncrypted();
 
-if (app.Environment.IsDevelopment())
+// Swagger has no auth of its own (it's plain middleware, registered before UseAuthentication/
+// UseAuthorization below - not an endpoint, so the JWT fallback policy never applies to it) -
+// normally gated to IsDevelopment() so it's never reachable on a real deployed instance
+// (Production, or the actual pradeep-1/pradeep-2 Azure Web Apps). Swagger:ForceEnabled lets a
+// LOCAL run under a non-Development environment name (e.g. ASPNETCORE_ENVIRONMENT=pradeep-2, so
+// that instance's own appsettings/App_Data/users file loads for local testing) still get Swagger,
+// without turning it on for the real deployed Azure instance of the same name - see the
+// "pradeep-2 (local)" launch profile in launchSettings.json, which sets this env var; the actual
+// Azure Web App does not.
+if (app.Environment.IsDevelopment() || builder.Configuration.GetValue<bool>("Swagger:ForceEnabled"))
 {
     app.UseSwagger();
     app.UseSwaggerUI();
