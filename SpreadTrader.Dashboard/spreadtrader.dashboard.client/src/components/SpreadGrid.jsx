@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
-import { Card, Table, Typography, Input, Space, Tooltip } from 'antd'
-import { LineChartOutlined } from '@ant-design/icons'
+import { Card, Table, Typography, Input, Space, Tooltip, Button } from 'antd'
+import { LineChartOutlined, AreaChartOutlined } from '@ant-design/icons'
 import DirectionTag from './DirectionTag'
 import FlashValue from './FlashValue'
+import SpreadHistoryModal from './SpreadHistoryModal'
 
 // Live per-spread grid with a name search (underlying / near / far tradingsymbol) and real
 // pagination - lives on its own "Live Spreads" page since with a 150-200+ symbol universe a
@@ -16,6 +17,8 @@ export default function SpreadGrid({ definitions, liveValues }) {
   // deterministic and immune to the live re-renders.
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
+  // The spread whose stored hourly history is open in the chart popup (null = closed).
+  const [historySpread, setHistorySpread] = useState(null)
 
   // Reset to the first page whenever the search term changes, so filtering can't strand you on a
   // page number that no longer exists in the smaller result set.
@@ -37,6 +40,24 @@ export default function SpreadGrid({ definitions, liveValues }) {
   const dataSource = filtered.map((d) => ({ key: d.id, ...d, live: liveValues[d.id] }))
 
   const columns = [
+    {
+      // Opens the datetime-vs-spread history chart (hourly snapshots persisted server-side) for
+      // this spread - the "click on live spread -> popup datetime vs spread" view.
+      title: '',
+      key: 'history',
+      fixed: 'left',
+      width: 44,
+      render: (_, r) => (
+        <Tooltip title="View spread history chart">
+          <Button
+            type="text"
+            size="small"
+            icon={<AreaChartOutlined style={{ color: '#4da3ff' }} />}
+            onClick={() => setHistorySpread(r)}
+          />
+        </Tooltip>
+      ),
+    },
     {
       // width is required (not just cosmetic) on a fixed column - without it, antd can't
       // reliably compute the sticky offset for the columns after it before layout settles,
@@ -220,6 +241,11 @@ export default function SpreadGrid({ definitions, liveValues }) {
           scroll={{ x: 'max-content' }}
         />
       )}
+      <SpreadHistoryModal
+        spread={historySpread}
+        open={historySpread != null}
+        onClose={() => setHistorySpread(null)}
+      />
     </Card>
   )
 }

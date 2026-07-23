@@ -83,4 +83,65 @@ public sealed class EngineOptions
     /// headroom at all - more likely to sit unfilled if the market moves between decision and
     /// placement).</summary>
     public decimal MarketProtectionPercent { get; set; } = 3m;
+
+    // ---- Hourly spread history capture (see SpreadHistoryCaptureHostedService) ------------------
+
+    /// <summary>Designates THIS instance as the single writer of the shared spread-history database.
+    /// Exactly one deployed instance (pradeep-2) should set this true; it alone captures snapshots,
+    /// creates the schema, and runs the expiry/retention purges. Every other instance leaves this
+    /// false and only READS the history (serving the chart) - no captures, no schema init, no
+    /// deletes - so multiple instances pointed at one database never double-write or race on it.</summary>
+    public bool SpreadHistoryWriter { get; set; } = false;
+
+    /// <summary>Master switch for the hourly spread-history capture job. When false the background
+    /// service does nothing (no snapshots written, no DB touched beyond startup schema init). Only
+    /// consulted on the writer instance (SpreadHistoryWriter=true); readers never capture regardless.</summary>
+    public bool SpreadHistoryCaptureEnabled { get; set; } = true;
+
+    /// <summary>The clock times (IST, "HH:mm") at which a snapshot of every spread is captured and
+    /// bulk-inserted into the history database on each trading day. Default is the :29 mark of each
+    /// trading hour from just after the 09:15 open through the 15:29 pre-close (7 captures/day).
+    /// Add "top of hour" entries (e.g. "10:00") here if you also want those. Times are matched to
+    /// the minute in IST regardless of the server's own timezone.</summary>
+    public string[] SpreadHistorySnapshotTimesIst { get; set; } =
+        { "09:29", "10:29", "11:29", "12:29", "13:29", "14:29", "15:29" };
+
+    /// <summary>Capture only on weekdays (Mon-Fri). NSE is closed on weekends; leave true unless you
+    /// want rows on Saturday/Sunday too (this does NOT account for exchange holidays - a snapshot on
+    /// a holiday simply records whatever the last live values were, or nothing if none are cached).</summary>
+    public bool SpreadHistoryWeekdaysOnly { get; set; } = true;
+
+    /// <summary>When true, once per day (on the first capture of the day) the engine deletes history
+    /// rows whose near leg has already expired - the monthly "when a leg expires, flush that leg's
+    /// data and move to the next legs" behaviour (see ISpreadHistoryStore.PurgeExpiredAsync).</summary>
+    public bool SpreadHistoryPurgeExpiredLegs { get; set; } = true;
+
+    // ---- Daily maintenance job (see DailyMaintenanceHostedService) ------------------------------
+
+    /// <summary>Master switch for the once-a-day maintenance job that clears trigger data and trims
+    /// old spread history. When false the job does nothing.</summary>
+    public bool DailyMaintenanceEnabled { get; set; } = true;
+
+    /// <summary>IST clock time ("HH:mm") the daily maintenance job runs at. Default 06:00 - well
+    /// before the 09:15 market open, so the day starts from a clean trigger slate.</summary>
+    public string DailyMaintenanceTimeIst { get; set; } = "06:00";
+
+    /// <summary>Run the maintenance job on weekdays (Mon-Fri) only. Default true - the market is
+    /// closed on Saturday/Sunday, so there's no reason to clear triggers/activity or purge history
+    /// then. Set false to run it every day.</summary>
+    public bool DailyMaintenanceWeekdaysOnly { get; set; } = true;
+
+    /// <summary>Daily job wipes ALL entry trigger rules (ITriggerRuleStore.RemoveAll).</summary>
+    public bool DailyMaintenanceClearTriggers { get; set; } = true;
+
+    /// <summary>Daily job wipes ALL exit trigger rules (IExitTriggerRuleStore.RemoveAll).</summary>
+    public bool DailyMaintenanceClearExitTriggers { get; set; } = true;
+
+    /// <summary>Daily job wipes the in-memory trigger activity feed (ITriggerActivityStore.Clear).</summary>
+    public bool DailyMaintenanceClearTriggerActivity { get; set; } = true;
+
+    /// <summary>Daily job deletes spread history rows older than this many days
+    /// (ISpreadHistoryStore.PurgeOlderThanAsync) - an age-based retention cap independent of the
+    /// per-leg expiry flush. Set to 0 or less to skip age-based trimming.</summary>
+    public int SpreadHistoryRetentionDays { get; set; } = 30;
 }
