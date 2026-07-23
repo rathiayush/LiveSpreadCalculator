@@ -62,6 +62,15 @@ export const api = {
   createSpread: (spread) =>
     authFetch('/api/spreads', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(spread) }).then(handle),
   deleteSpread: (id) => authFetch(`/api/spreads/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
+  // Stored hourly spread history (datetime + buy/sell spread values), oldest first - powers the
+  // "Live Spread" chart popup. Backend defaults to the last 30 days; pass ISO strings to override.
+  getSpreadHistory: (id, from, to) => {
+    const params = new URLSearchParams()
+    if (from) params.set('from', from)
+    if (to) params.set('to', to)
+    const qs = params.toString()
+    return authFetch(`/api/spreads/${encodeURIComponent(id)}/history${qs ? `?${qs}` : ''}`).then(handle)
+  },
 
   getTriggers: (spreadId) =>
     authFetch(`/api/triggers${spreadId ? `?spreadId=${encodeURIComponent(spreadId)}` : ''}`).then(handle),

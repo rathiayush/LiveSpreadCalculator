@@ -3,9 +3,11 @@ using System.Text.Json.Serialization;
 using LiveSpreadCalculator.Auth;
 using LiveSpreadCalculator.Hubs;
 using LiveSpreadCalculator.Notifications;
+using LiveSpreadCalculator.Persistence;
 using LiveSpreadCalculator.Realtime;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -71,6 +73,20 @@ var mcxUniverseCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 var usersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:UsersCsvPath"] ?? "App_Data/users.csv");
 
+// Hourly spread history lives in a real SQL Server / LocalDB database (unlike the CSV stores above),
+// so the "Live Spread" popup can chart datetime-vs-spread and a leg's rows can be flushed on expiry -
+// see SqlSpreadHistoryStore / SpreadHistoryCaptureHostedService. Default targets LocalDB; override
+// Storage:SpreadHistoryConnectionString (or Storage__SpreadHistoryConnectionString env var) with a
+// real SQL Server connection string on Linux/Docker, where LocalDB isn't available.
+var spreadHistoryConnectionString = builder.Configuration["Storage:SpreadHistoryConnectionString"]
+    ?? @"Server=(localdb)\MSSQLLocalDB;Database=SpreadTraderHistory;Trusted_Connection=True;TrustServerCertificate=True;";
+// Exactly one deployed instance (pradeep-2) is the WRITER of the shared history DB: only it captures
+// snapshots, creates the schema, and runs purges. Every other instance leaves Engine:SpreadHistoryWriter
+// false and only READS the history (to serve the chart), so multiple instances on one database never
+// double-write or race. Read at startup here to decide whether to register the capture service and run
+// schema init below.
+var spreadHistoryWriter = builder.Configuration.GetValue<bool>("Engine:SpreadHistoryWriter");
+
 builder.Services.AddSingleton<ITickStore, InMemoryTickStore>();
 builder.Services.AddSingleton<ITriggerRuleStore>(sp =>
     new CsvTriggerRuleStore(triggersCsvPath, sp.GetRequiredService<ILogger<CsvTriggerRuleStore>>()));
@@ -81,6 +97,18 @@ builder.Services.AddSingleton<IPnlAlertStore>(sp =>
 builder.Services.AddSingleton<ISpreadDefinitionStore, InMemorySpreadDefinitionStore>();
 builder.Services.AddSingleton<ISpreadSnapshotCache, InMemorySpreadSnapshotCache>();
 builder.Services.AddSingleton<ISpreadRankingStore, InMemorySpreadRankingStore>();
+// Durable hourly spread history (EF Core over SQL Server / LocalDB) - see EfSpreadHistoryStore.
+// A pooled DbContext factory is used because the store (and the capture hosted service that drives
+// it) are singletons, and a DbContext must not be shared across threads - the store creates a
+// short-lived context per operation instead. Schema is created on startup below
+// (app.Services...InitializeAsync): the database if missing, then the table if missing.
+builder.Services.AddDbContextFactory<SpreadHistoryDbContext>(options =>
+    options.UseSqlServer(spreadHistoryConnectionString));
+builder.Services.AddSingleton<ISpreadHistoryStore>(sp =>
+    new EfSpreadHistoryStore(
+        sp.GetRequiredService<IDbContextFactory<SpreadHistoryDbContext>>(),
+        spreadHistoryConnectionString,
+        sp.GetRequiredService<ILogger<EfSpreadHistoryStore>>()));
 // Rolling in-memory history of fired triggers/execution outcomes, so GET /api/triggers/activity
 // can reseed the Trigger Activity feed after a browser refresh - see TriggerActivityEntry.
 builder.Services.AddSingleton<ITriggerActivityStore, InMemoryTriggerActivityStore>();
@@ -160,6 +188,14 @@ builder.Services.AddSingleton<TriggerInFlightTracker>();
 builder.Services.AddHostedService<SpreadCalculationHostedService>();
 builder.Services.AddHostedService<OrderDispatchHostedService>();
 builder.Services.AddHostedService<SpreadRankingHostedService>();
+// Hourly (IST :29-mark) snapshot capture into the SQL history DB + monthly expired-leg flush - see
+// SpreadHistoryCaptureHostedService / EngineOptions.SpreadHistory*. ONLY registered on the writer
+// instance; reader instances never capture (they only serve GET /api/spreads/{id}/history).
+if (spreadHistoryWriter)
+    builder.Services.AddHostedService<SpreadHistoryCaptureHostedService>();
+// Daily 06:00 IST maintenance: clears entry/exit triggers + trigger activity and trims spread
+// history older than the retention window - see DailyMaintenanceHostedService / EngineOptions.DailyMaintenance*.
+builder.Services.AddHostedService<DailyMaintenanceHostedService>();
 
 builder.Services.AddSingleton<ISpreadPublisher, SignalRSpreadPublisher>();
 builder.Services.AddSingleton<ITriggerEventSink, SignalRTriggerEventSink>();
@@ -358,6 +394,25 @@ var app = builder.Build();
 // as encrypted blobs on startup. No-op once every row is already encrypted, so ordinary restarts
 // don't touch the file (and don't disturb live sessions). See CsvUserStore.MigrateToEncrypted.
 app.Services.GetRequiredService<CsvUserStore>().MigrateToEncrypted();
+
+// Create the spread-history database + table if they don't exist yet (idempotent). Only the WRITER
+// instance provisions the schema - reader instances assume the writer has already created it and just
+// query it (they may not even have CREATE DATABASE rights on a shared SQL login). Done at startup
+// rather than lazily on first insert so a bad connection string surfaces loudly here instead of
+// silently swallowing hourly captures. A failure is logged but not fatal - the rest of the app (live
+// spreads, triggers, orders) runs fine without history; only the chart/capture is affected.
+if (spreadHistoryWriter)
+{
+    try
+    {
+        app.Services.GetRequiredService<ISpreadHistoryStore>().InitializeAsync().GetAwaiter().GetResult();
+    }
+    catch (Exception ex)
+    {
+        app.Services.GetRequiredService<ILogger<Program>>()
+            .LogError(ex, "Spread history store failed to initialize - hourly capture and the history chart will be unavailable until the connection string / SQL Server is fixed.");
+    }
+}
 
 // Swagger has no auth of its own (it's plain middleware, registered before UseAuthentication/
 // UseAuthorization below - not an endpoint, so the JWT fallback policy never applies to it) -

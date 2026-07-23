@@ -14,17 +14,20 @@ public sealed class SpreadsController : ControllerBase
     private readonly TickIngestionHostedService _tickIngestion;
     private readonly ISpreadSnapshotCache _snapshotCache;
     private readonly ISpreadRankingStore _rankingStore;
+    private readonly ISpreadHistoryStore _historyStore;
 
     public SpreadsController(
         ISpreadDefinitionStore spreadStore,
         TickIngestionHostedService tickIngestion,
         ISpreadSnapshotCache snapshotCache,
-        ISpreadRankingStore rankingStore)
+        ISpreadRankingStore rankingStore,
+        ISpreadHistoryStore historyStore)
     {
         _spreadStore = spreadStore;
         _tickIngestion = tickIngestion;
         _snapshotCache = snapshotCache;
         _rankingStore = rankingStore;
+        _historyStore = historyStore;
     }
 
     [HttpGet]
@@ -58,6 +61,30 @@ public sealed class SpreadsController : ControllerBase
         await _tickIngestion.ResolveAndSubscribeAsync(spread, cancellationToken);
 
         return Ok(spread);
+    }
+
+    /// <summary>The stored hourly spread history for one spread, oldest-first - this is what the
+    /// "Live Spread" popup plots as a datetime-vs-spread chart. Defaults to the last 30 days;
+    /// override with ISO-8601 from/to query params (e.g. ?from=2026-07-01T00:00:00Z).</summary>
+    [HttpGet("{id}/history")]
+    public async Task<ActionResult<IReadOnlyList<SpreadHistoryPoint>>> GetHistory(
+        string id,
+        [FromQuery] DateTimeOffset? from,
+        [FromQuery] DateTimeOffset? to,
+        CancellationToken cancellationToken)
+    {
+        var fromUtc = from ?? DateTimeOffset.UtcNow.AddDays(-30);
+        var points = await _historyStore.GetHistoryAsync(id, fromUtc, to, cancellationToken);
+        return Ok(points);
+    }
+
+    /// <summary>Manually flush all stored history for one spread (the automatic per-leg-expiry flush
+    /// runs daily inside the capture service - see SpreadHistoryCaptureHostedService).</summary>
+    [HttpDelete("{id}/history")]
+    public async Task<IActionResult> DeleteHistory(string id, CancellationToken cancellationToken)
+    {
+        var removed = await _historyStore.DeleteBySpreadIdAsync(id, cancellationToken);
+        return Ok(new { removed });
     }
 
     [HttpDelete("{id}")]
