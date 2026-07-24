@@ -58,10 +58,12 @@ public sealed class DhanOptions
     /// surfaces both through one IMarketDataFeed - see its doc comment.</summary>
     public string OrderUpdateWsUrl { get; set; } = "wss://api-order-update.dhan.co";
 
-    /// <summary>The instrument dump ("security id list"). The DETAILED csv is the default because
-    /// it is the only one that carries tick size, which order pricing needs - see
-    /// DhanInstrumentMasterService.</summary>
-    public string ScripMasterUrl { get; set; } = "https://images.dhan.co/api-data/api-scrip-master-detailed.csv";
+    /// <summary>The instrument dump ("security id list"). Must be the COMPACT csv: it is the only
+    /// one of Dhan's two files with a per-contract trading symbol column (SEM_TRADING_SYMBOL), and
+    /// it carries tick and lot size just as the detailed file does. The detailed csv
+    /// (api-scrip-master-detailed.csv) has no usable trading symbol column, so pointing this at it
+    /// loads zero instruments - see DhanInstrumentMasterService.ParseCsv.</summary>
+    public string ScripMasterUrl { get; set; } = "https://images.dhan.co/api-data/api-scrip-master.csv";
 
     /// <summary>ltp, quote, or full. Spread triggers are evaluated against best bid/ask, which only
     /// "full" mode carries (Dhan request code 21 - the Full packet is the only one with market

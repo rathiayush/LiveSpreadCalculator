@@ -15,8 +15,10 @@ namespace SpreadTrader.DhanIntegration.Auth;
 ///  - REST: HTTP 401, and/or an error body carrying <c>errorCode</c> "DH-901"
 ///    (errorType <c>Invalid_Authentication</c>) - "Client ID or user generated access token is
 ///    invalid or expired".
-///  - Market feed: the server sends a disconnect packet (response code 50) whose reason code is
-///    807, "Access Token is expired" - see DhanMarketFeedClient.
+///  - Market feed: the server sends a disconnect packet (response code 50) whose reason code says
+///    the credentials are dead - 807 (token expired), 808 (authentication failed), 809 (token
+///    invalid) or 810 (client id invalid). See DhanMarketFeedClient and
+///    DhanSymbology.IsSessionInvalidCode.
 ///
 /// Deliberately NOT treated as an auth failure:
 ///  - DH-902 (<c>Invalid_Access</c>): the token is fine, the account just isn't subscribed to the
@@ -32,7 +34,9 @@ public sealed class DhanAuthFailureHandler
     /// <summary>Dhan's error code for an invalid/expired access token or client id.</summary>
     private const string InvalidAuthenticationCode = "DH-901";
 
-    /// <summary>The market feed's disconnect reason code for an expired token.</summary>
+    /// <summary>The market feed's disconnect reason code for an expired token. Kept as a named
+    /// constant because it is the most common of the dead-session codes; the full set this reacts
+    /// to lives in DhanSymbology.IsSessionInvalidCode.</summary>
     public const int FeedTokenExpiredCode = 807;
 
     private readonly DhanSession _session;
@@ -68,12 +72,19 @@ public sealed class DhanAuthFailureHandler
     }
 
     /// <summary>The market-feed counterpart: called with the reason code from a Dhan disconnect
-    /// packet. Only 807 (token expired) invalidates the session - 805 (too many connections) and
-    /// 806 (not subscribed to Data APIs) are real problems but not dead tokens, and logging out
-    /// over them would hide the actual cause.</summary>
+    /// packet. Invalidates the session for every code that means the credentials themselves are
+    /// dead - 807 (token expired), 808 (authentication failed), 809 (token invalid) and 810
+    /// (client id invalid). 805 (too many connections) and 806 (not subscribed to Data APIs) are
+    /// real problems but not dead tokens, and logging out over them would hide the actual cause.
+    ///
+    /// Previously only 807 was handled, so a feed rejected with 809 or 810 reconnected on its
+    /// backoff loop indefinitely while the dashboard still showed a healthy session - the ticks
+    /// simply stopped, with nothing pointing at the token as the cause.</summary>
     public Task<bool> HandleIfFeedTokenExpiredAsync(int disconnectCode, CancellationToken cancellationToken) =>
-        disconnectCode == FeedTokenExpiredCode
-            ? InvalidateAsync("the market data feed reported the access token as expired (code 807)", cancellationToken)
+        DhanSymbology.IsSessionInvalidCode(disconnectCode)
+            ? InvalidateAsync(
+                $"the market data feed reported that {DhanSymbology.DescribeFeedErrorCode(disconnectCode)} (code {disconnectCode})",
+                cancellationToken)
             : Task.FromResult(false);
 
     private async Task<bool> InvalidateAsync(string context, CancellationToken cancellationToken)

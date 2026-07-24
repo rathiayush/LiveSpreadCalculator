@@ -47,16 +47,27 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
     // Dhan's documented maximum instruments per subscription message.
     private const int SubscriptionBatchSize = 100;
 
+    /// <summary>Dhan's documented ceiling on instruments carried by a single feed connection. This
+    /// client uses one connection, so this is the hard limit on what can stream at once. The full
+    /// NFO futures universe is ~658 contracts and MCX adds ~150, so ordinary use is nowhere near
+    /// it - but going over silently is the bad case, since Dhan answers an oversized subscription
+    /// with error 804 and the surplus instruments simply never tick, which looks like a handful of
+    /// spreads being mysteriously stale rather than a limit being hit.</summary>
+    private const int MaxInstrumentsPerConnection = 5000;
+
     // Small pause between consecutive subscription messages. Sending several hundred instruments
     // as back-to-back batches with no gap is exactly the pattern that caused instruments to end up
     // silently without depth on the Kite side (see TickIngestionHostedService.SubscribeTokensAsync),
     // and costs nothing to avoid here.
     private static readonly TimeSpan InterBatchDelay = TimeSpan.FromMilliseconds(50);
 
-    // Dhan request codes. Unsubscribe for a given mode is always its subscribe code + 1.
+    // Dhan feed request codes, per Dhan's published annexure.
     private const int RequestCodeTicker = 15;
+    private const int RequestCodeUnsubscribeTicker = 16;
     private const int RequestCodeQuote = 17;
+    private const int RequestCodeUnsubscribeQuote = 18;
     private const int RequestCodeFull = 21;
+    private const int RequestCodeUnsubscribeFull = 22;
     private const int RequestCodeDisconnect = 12;
 
     private readonly DhanOptions _options;
@@ -103,6 +114,18 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         _ => RequestCodeFull,
     };
 
+    /// <summary>The unsubscribe code paired with the current mode's subscribe code. Dhan's codes
+    /// happen to run subscribe/unsubscribe in adjacent pairs, but this maps them explicitly rather
+    /// than computing "subscribe + 1" - an arithmetic relationship the protocol never promises,
+    /// and one that would silently send a wrong request code if Dhan ever adds a mode that breaks
+    /// the pattern.</summary>
+    private int UnsubscribeRequestCode => SubscribeRequestCode switch
+    {
+        RequestCodeQuote => RequestCodeUnsubscribeQuote,
+        RequestCodeTicker => RequestCodeUnsubscribeTicker,
+        _ => RequestCodeUnsubscribeFull,
+    };
+
     public async Task SubscribeAsync(IEnumerable<uint> instrumentTokens, CancellationToken cancellationToken)
     {
         uint[] newTokens;
@@ -134,7 +157,7 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
 
         if (_socket is not { State: WebSocketState.Open }) return;
 
-        await SendSubscriptionAsync(removedTokens, SubscribeRequestCode + 1, cancellationToken);
+        await SendSubscriptionAsync(removedTokens, UnsubscribeRequestCode, cancellationToken);
     }
 
     public IReadOnlyCollection<uint> GetSubscribedTokens()
@@ -223,6 +246,8 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         var entries = ResolveSubscriptionEntries(tokens);
         if (entries.Count == 0) return;
 
+        WarnIfOverConnectionLimit(requestCode);
+
         var isFirst = true;
         foreach (var batch in entries.Chunk(SubscriptionBatchSize))
         {
@@ -236,6 +261,32 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
                 InstrumentList = batch.Select(e => new { e.ExchangeSegment, e.SecurityId }).ToArray(),
             }, cancellationToken);
         }
+    }
+
+    /// <summary>Warns once per subscribe attempt when the total subscribed set has grown past what
+    /// one Dhan connection can carry. Deliberately a warning rather than a truncation: silently
+    /// dropping instruments would be indistinguishable, from the engine's side, from a contract
+    /// that simply isn't trading, whereas Dhan's own 804 rejection at least surfaces in the
+    /// disconnect log next to this message. Only checked on subscribe - an unsubscribe can only
+    /// take the count down.</summary>
+    private void WarnIfOverConnectionLimit(int requestCode)
+    {
+        if (requestCode is RequestCodeUnsubscribeTicker or RequestCodeUnsubscribeQuote or RequestCodeUnsubscribeFull)
+            return;
+
+        int total;
+        lock (_tokensLock)
+        {
+            total = _subscribedTokens.Count;
+        }
+
+        if (total <= MaxInstrumentsPerConnection) return;
+
+        _logger.LogError(
+            "Subscribed instrument count ({Count}) exceeds Dhan's per-connection limit of {Limit}. " +
+            "Dhan will reject the surplus (error 804) and those instruments will never tick, so any spread using them will sit stale. " +
+            "Reduce the streamed universe, or shard across additional feed connections.",
+            total, MaxInstrumentsPerConnection);
     }
 
     private readonly record struct SubscriptionEntry(string ExchangeSegment, string SecurityId);
@@ -372,20 +423,10 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
             BestAskPrice: packet.BestAskPrice > 0 ? packet.BestAskPrice : previous.BestAskPrice);
     }
 
-    private void LogDisconnect(int code)
-    {
-        var reason = code switch
-        {
-            805 => "too many active WebSocket connections for this account",
-            806 => "the account is not subscribed to Dhan's Data APIs",
-            807 => "the access token has expired",
-            808 => "invalid client id",
-            809 => "authentication failed",
-            _ => "unspecified reason",
-        };
-
-        _logger.LogWarning("Dhan market feed sent a disconnect packet (code {Code}): {Reason}.", code, reason);
-    }
+    private void LogDisconnect(int code) =>
+        _logger.LogWarning(
+            "Dhan market feed sent a disconnect packet (code {Code}): {Reason}.",
+            code, DhanSymbology.DescribeFeedErrorCode(code));
 
     // ---- Order updates --------------------------------------------------------------------------
 

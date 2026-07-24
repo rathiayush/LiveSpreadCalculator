@@ -21,12 +21,14 @@ namespace SpreadTrader.DhanIntegration.Instruments;
 ///     and every row outside the configured exchanges as it streams, keeping only the few hundred
 ///     futures contracts this app trades in memory.
 ///
-///  2. THE DETAILED CSV IS REQUIRED. Dhan publishes a compact list and a detailed one. Only the
-///     detailed list carries SEM_TICK_SIZE, and order pricing genuinely needs it - a LIMIT price
-///     that isn't an exact multiple of the tick size is rejected outright, and tick size varies by
-///     contract (see MarketProtectionService). Hence DhanOptions.ScripMasterUrl defaults to the
-///     detailed CSV. If a deployment points it at the compact one, tick size comes back 0 and
-///     order pricing falls back to its 0.05 default - correct for most NSE F&amp;O, not for all.
+///  2. THE COMPACT CSV IS THE ONE THAT PARSES. Dhan publishes a compact list
+///     (api-scrip-master.csv) and a detailed one (api-scrip-master-detailed.csv). Only the compact
+///     file has a per-contract trading symbol column (SEM_TRADING_SYMBOL); the detailed file's
+///     nearest equivalent, SYMBOL_NAME, is not unique per contract - every MCX GOLD expiry shares
+///     the value "GOLD" - so it cannot key the symbol index. Both files carry tick and lot size,
+///     so the compact one loses nothing. DhanOptions.ScripMasterUrl therefore defaults to the
+///     compact CSV, and pointing it at the detailed file is a hard, logged failure rather than a
+///     partial load (see ParseCsv's required-column check).
 ///
 ///  3. COLUMNS ARE READ BY NAME, NOT POSITION. Kite's dump has a fixed, documented column order
 ///     this codebase indexes into directly. Dhan's has grown columns over time and differs between
@@ -108,14 +110,15 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             if (_instruments.Count == 0)
             {
                 _logger.LogWarning(
-                    "Dhan scrip master parsed to zero futures contracts - check that Dhan:ScripMasterUrl points at the security id list CSV and that its column headers are recognised.");
+                    "Dhan scrip master parsed to zero futures contracts - check that Dhan:ScripMasterUrl points at the compact security id list " +
+                    "(https://images.dhan.co/api-data/api-scrip-master.csv) and that its column headers are recognised.");
             }
             else if (_instruments.All(i => i.TickSize == 0))
             {
                 _logger.LogWarning(
-                    "No tick sizes were found in the Dhan scrip master - Dhan:ScripMasterUrl is probably pointing at the COMPACT csv. " +
-                    "Order pricing will fall back to a 0.05 default tick, which is wrong for any contract that doesn't use it. " +
-                    "Use api-scrip-master-detailed.csv instead.");
+                    "No tick sizes were found in the Dhan scrip master, so order pricing will fall back to a 0.05 default tick, " +
+                    "which is wrong for any contract that doesn't use it. Expected a SEM_TICK_SIZE column in {Url}.",
+                    _options.ScripMasterUrl);
             }
         }
         finally
@@ -245,6 +248,10 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
     {
         public static readonly string[] SecurityId = { "SEM_SMST_SECURITY_ID", "SECURITY_ID" };
         public static readonly string[] Exchange = { "SEM_EXM_EXCH_ID", "EXCH_ID" };
+
+        /// <summary>Needed alongside the exchange id to identify the segment - "NSE" alone is
+        /// ambiguous between F&amp;O and currency derivatives. See ToCanonicalExchange.</summary>
+        public static readonly string[] Segment = { "SEM_SEGMENT", "SEGMENT" };
         public static readonly string[] InstrumentName = { "SEM_INSTRUMENT_NAME", "INSTRUMENT" };
         public static readonly string[] TradingSymbol = { "SEM_TRADING_SYMBOL", "TRADING_SYMBOL" };
         public static readonly string[] CustomSymbol = { "SEM_CUSTOM_SYMBOL", "DISPLAY_NAME" };
@@ -273,6 +280,7 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
 
         var securityIdIndex = Resolve(header, Columns.SecurityId);
         var exchangeIndex = Resolve(header, Columns.Exchange);
+        var segmentIndex = Resolve(header, Columns.Segment);
         var instrumentNameIndex = Resolve(header, Columns.InstrumentName);
         var tradingSymbolIndex = Resolve(header, Columns.TradingSymbol);
         var customSymbolIndex = Resolve(header, Columns.CustomSymbol);
@@ -285,9 +293,16 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         // returning an empty universe that looks like "the market has no futures today".
         if (securityIdIndex < 0 || exchangeIndex < 0 || instrumentNameIndex < 0 || tradingSymbolIndex < 0)
         {
+            // The overwhelmingly likely cause is being pointed at the DETAILED scrip master, which
+            // has no per-contract trading symbol column at all, so say so outright: the symptom
+            // (every symbol fails to resolve, no spread streams, no order can be placed) otherwise
+            // looks nothing like "wrong CSV configured".
             _logger.LogError(
-                "Dhan scrip master is missing required columns (need a security id, exchange, instrument name and trading symbol). Header was: {Header}",
-                headerLine);
+                "Dhan scrip master at {Url} is missing required columns (need security id, exchange, instrument name and trading symbol) - " +
+                "no instruments were loaded, so no symbol will resolve and no order can be placed. " +
+                "The detailed scrip master (api-scrip-master-detailed.csv) is NOT supported: it has no per-contract trading symbol column. " +
+                "Set Dhan:ScripMasterUrl to the compact list, https://images.dhan.co/api-data/api-scrip-master.csv. Header was: {Header}",
+                _options.ScripMasterUrl, headerLine);
             return result;
         }
 
@@ -301,7 +316,7 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             if (!DhanSymbology.IsFuture(instrumentName)) continue; // options/equities/indices - the bulk of the file
 
             var exchangeId = Get(fields, exchangeIndex);
-            var canonicalExchange = ToCanonicalExchange(exchangeId);
+            var canonicalExchange = ToCanonicalExchange(exchangeId, Get(fields, segmentIndex));
             if (canonicalExchange is null || !_exchanges.Contains(canonicalExchange)) continue;
 
             if (!uint.TryParse(Get(fields, securityIdIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var securityId))
@@ -325,8 +340,8 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
                 // BrokerInstrument's contract.
                 InstrumentType: "FUT",
                 Expiry: ParseExpiry(Get(fields, expiryIndex)),
-                LotSize: ParseInt(Get(fields, lotSizeIndex)),
-                TickSize: ParseDecimal(Get(fields, tickSizeIndex)));
+                LotSize: ParseLotSize(Get(fields, lotSizeIndex)),
+                TickSize: ParseTickSize(Get(fields, tickSizeIndex)));
 
             // Carry the display spelling through as an alias so Find() resolves whichever of the
             // two a Dhan positions/orders response happens to report.
@@ -341,16 +356,32 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         return result;
     }
 
-    /// <summary>Dhan's exchange column is the exchange itself ("NSE"/"BSE"/"MCX"), not a segment.
-    /// Combined with the futures-only filter already applied, an NSE row is by definition an NSE
-    /// F&amp;O contract, so it maps to the canonical "NFO".</summary>
-    private static string? ToCanonicalExchange(string? exchangeId) => exchangeId?.ToUpperInvariant() switch
+    /// <summary>
+    /// Maps a scrip-master row's exchange to this app's canonical exchange code.
+    ///
+    /// The segment is what disambiguates it: "NSE" alone covers both the F&amp;O segment ("D") and
+    /// the currency-derivatives segment ("C"), and both contain rows this app's futures filter
+    /// accepts (FUTSTK/FUTIDX vs FUTCUR). Keying on the exchange id alone therefore filed all 129
+    /// NSE currency futures under NFO, which put contracts nobody asked for into the NFO universe
+    /// and - because the weekly currency contracts reuse a monthly-style trading symbol across
+    /// different securityIds - introduced 16 duplicate symbols into the lookup index, where a
+    /// Find() could return whichever row happened to be indexed last.
+    ///
+    /// A blank segment (a file variant that omits the column) falls back to the derivatives
+    /// reading, which is the only segment this app trades.
+    /// </summary>
+    private static string? ToCanonicalExchange(string? exchangeId, string? segment)
     {
-        "NSE" => "NFO",
-        "BSE" => "BFO",
-        "MCX" => "MCX",
-        _ => null,
-    };
+        var isCurrency = string.Equals(segment?.Trim(), "C", StringComparison.OrdinalIgnoreCase);
+
+        return exchangeId?.ToUpperInvariant() switch
+        {
+            "NSE" => isCurrency ? "CDS" : "NFO",
+            "BSE" => isCurrency ? "BCD" : "BFO",
+            "MCX" => "MCX",
+            _ => null,
+        };
+    }
 
     /// <summary>Fallback when the underlying column is absent: Dhan's trading symbols are
     /// "UNDERLYING-MonYYYY-FUT", so the leading segment before the first dash is the underlying.
@@ -397,13 +428,41 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             : null;
     }
 
-    private static int ParseInt(string? raw) =>
-        int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
+    /// <summary>
+    /// Lot size is a whole number of units, but Dhan writes it as a decimal string ("500.0"), which
+    /// NumberStyles.Integer rejects outright - so parsing it as an integer returned 0 for every
+    /// single contract in the file, not just the odd one. That is quiet but expensive: lot size is
+    /// what converts a rule's "lots" into an order quantity and what the dashboard uses to offer
+    /// "exit N lots", so a universe of zero-lot contracts breaks position sizing everywhere it is
+    /// read. Parsed as a decimal and truncated instead.
+    /// </summary>
+    private static int ParseLotSize(string? raw)
+    {
+        var value = ParseDecimal(raw);
+        return value > 0 && value <= int.MaxValue ? (int)value : 0;
+    }
 
-    /// <summary>Dhan publishes tick size in the same units as the price. Some rows carry it as a
-    /// float with trailing noise ("0.0500"), hence the invariant decimal parse.</summary>
     private static decimal ParseDecimal(string? raw) =>
         decimal.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : 0m;
+
+    /// <summary>
+    /// Dhan publishes tick size in PAISE, not rupees - unlike every price on the wire, which is in
+    /// rupees. The scrip master reports "5.0000" for a contract whose tick is actually Rs 0.05.
+    /// Confirmed against contracts whose real tick size is independently known: NSE equity rows
+    /// carry 1.0 (Rs 0.01), NSE option rows 5.0 (Rs 0.05), and on MCX, GOLD/SILVER/CRUDEOIL carry
+    /// 100.0 (Rs 1.00), NATURALGAS 10.0 (Rs 0.10) and COPPER 5.0 (Rs 0.05) - all exactly 100x the
+    /// true value, on both exchanges this app trades.
+    ///
+    /// This conversion is not cosmetic. MarketProtectionService aligns every protected LIMIT price
+    /// to a multiple of this number, so leaving it in paise rounded order prices to the nearest
+    /// Rs 10 instead of Rs 0.10 - on a 500-unit RELIANCE lot that is thousands of rupees of
+    /// unintended slippage per leg, and a price the exchange may reject outright.
+    /// </summary>
+    private static decimal ParseTickSize(string? raw)
+    {
+        var paise = ParseDecimal(raw);
+        return paise > 0 ? paise / 100m : 0m;
+    }
 
     private static string[] SplitCsvLine(string line)
     {
