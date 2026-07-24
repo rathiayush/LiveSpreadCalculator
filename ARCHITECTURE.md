@@ -385,8 +385,9 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
     "AuthBaseUrl": "https://auth.dhan.co",
     "WsUrl": "wss://api-feed.dhan.co",
     "OrderUpdateWsUrl": "wss://api-order-update.dhan.co",
-    // Must be the DETAILED list - the only one carrying tick size, which order pricing needs.
-    "ScripMasterUrl": "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
+    // Must be the COMPACT list - the only one with a per-contract trading symbol column. It
+    // carries tick and lot size too; the detailed list has no usable trading symbol and loads nothing.
+    "ScripMasterUrl": "https://images.dhan.co/api-data/api-scrip-master.csv",
     "TickerMode": "full",                   // only "full" carries market depth
     "OrdersPerSecond": 15,
     "AccessTokenValidityDays": 30

@@ -642,7 +642,8 @@ public sealed class OrderDispatchHostedService : BackgroundService
     private static string BuildTag(string ruleId)
     {
         // Order tags/correlation ids must be alphanumeric and short (Kite caps them at 20 chars,
-        // Dhan's correlationId at 25) - 20 alphanumerics satisfies both.
+        // Dhan's correlationId at 30 and restricts it to alphanumerics plus space/underscore/
+        // hyphen) - 20 alphanumerics satisfies both.
         var raw = "str" + new string(ruleId.Where(char.IsLetterOrDigit).ToArray());
         return raw.Length > 20 ? raw[..20] : raw;
     }

@@ -115,28 +115,80 @@ public static class DhanSymbology
     ///
     ///   TRANSIT     - accepted by Dhan, not yet at the exchange        -> OPEN (still in flight)
     ///   PENDING     - resting at the exchange, unfilled                -> OPEN (still in flight)
+    ///   TRIGGERED   - a stop order's trigger hit; now working          -> OPEN (still in flight)
     ///   PART_TRADED - partially filled, remainder still resting        -> OPEN (still in flight)
     ///   TRADED      - filled                                           -> COMPLETE
     ///   REJECTED    - rejected by Dhan or the exchange                 -> REJECTED
     ///   CANCELLED   - cancelled (including an IOC's unfilled residue)  -> CANCELLED
     ///   EXPIRED     - lapsed at session end without filling            -> CANCELLED
+    ///   CLOSED      - closed out by Dhan without reaching the book     -> CLOSED (terminal)
     ///
     /// EXPIRED maps to CANCELLED rather than getting its own value because the engine only cares
     /// about the terminal/non-terminal distinction plus whether anything filled, and an expired
-    /// order is a cancelled one for both purposes.</summary>
+    /// order is a cancelled one for both purposes.
+    ///
+    /// TRIGGERED and CLOSED are both in Dhan's documented order-status enum but were missing here,
+    /// so they fell through to the passthrough arm and were classified non-terminal. That is right
+    /// for TRIGGERED (the order really is still working) but wrong for CLOSED, which never
+    /// progresses: the gateway burned its full status-poll budget on it and then reported the
+    /// order as unconfirmed/"may still be open" when it was already finished. CLOSED keeps its own
+    /// canonical name rather than being folded into COMPLETE, so a CLOSED order with no fill isn't
+    /// described to the operator as having completed - Success is decided by filled quantity
+    /// either way (see DhanOrderGateway.PollOrderStatusAsync).</summary>
     public static string ToCanonicalOrderStatus(string? dhanStatus) => dhanStatus?.ToUpperInvariant() switch
     {
         "TRADED" => "COMPLETE",
         "REJECTED" => "REJECTED",
         "CANCELLED" or "CANCELED" or "EXPIRED" => "CANCELLED",
-        "TRANSIT" or "PENDING" or "PART_TRADED" or "PARTIALLY_TRADED" => "OPEN",
+        "CLOSED" => "CLOSED",
+        "TRANSIT" or "PENDING" or "TRIGGERED" or "PART_TRADED" or "PARTIALLY_TRADED" => "OPEN",
         null or "" => "OPEN",
         _ => dhanStatus!.ToUpperInvariant(),
     };
 
     /// <summary>Statuses after which polling an order again cannot change the answer.</summary>
     public static bool IsTerminalStatus(string canonicalStatus) =>
-        canonicalStatus is "COMPLETE" or "REJECTED" or "CANCELLED";
+        canonicalStatus is "COMPLETE" or "REJECTED" or "CANCELLED" or "CLOSED";
+
+    // ---- Market-feed error codes ---------------------------------------------------------------
+
+    /// <summary>
+    /// Dhan's Data API error codes, as carried by the reason field of a market-feed disconnect
+    /// packet (response code 50). Transcribed from Dhan's published annexure.
+    ///
+    /// Three of these were previously mapped to the wrong meanings (808 was described as "invalid
+    /// client id", 809 as "authentication failed", and 810 was absent entirely), which mattered
+    /// beyond the log text: 809 and 810 are dead-session conditions, so misreading them as generic
+    /// failures left the feed reconnecting forever against credentials that could never work - the
+    /// exact failure mode DhanAuthFailureHandler exists to prevent. See IsSessionInvalidCode.
+    /// </summary>
+    public static string DescribeFeedErrorCode(int code) => code switch
+    {
+        800 => "internal server error at Dhan",
+        804 => "the subscription requested more instruments than the connection allows",
+        805 => "too many requests or connections for this account - further ones may be blocked",
+        806 => "the account is not subscribed to Dhan's Data APIs",
+        807 => "the access token has expired",
+        808 => "authentication failed - the credentials were not accepted",
+        809 => "the access token is invalid",
+        810 => "the client id is invalid",
+        811 => "invalid expiry date",
+        812 => "invalid date format",
+        813 => "invalid security id",
+        814 => "invalid request",
+        _ => "unspecified reason",
+    };
+
+    /// <summary>
+    /// True for the disconnect codes that mean this session's credentials will never work again,
+    /// so the only useful response is to clear the session and ask the operator to log in - not to
+    /// keep reconnecting.
+    ///
+    /// Deliberately excludes 805 (too many connections) and 806 (Data APIs not subscribed): both
+    /// are real problems, but the token is fine, and logging the operator out over either would
+    /// hide the actual cause behind a login prompt that cannot fix it.
+    /// </summary>
+    public static bool IsSessionInvalidCode(int code) => code is 807 or 808 or 809 or 810;
 
     // ---- Instrument types ----------------------------------------------------------------------
     /// <summary>Dhan splits futures by underlying asset class (FUTSTK stock, FUTIDX index, FUTCOM

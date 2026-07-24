@@ -7,7 +7,6 @@ public enum DhanPacketKind
 {
     Unknown = 0,
     Ticker = 2,
-    Depth = 3,
     Quote = 4,
     OpenInterest = 5,
     PreviousClose = 6,
@@ -82,14 +81,18 @@ public readonly record struct DhanPacket(
 ///     54-58 float32 high                   58-62 float32 low
 ///     62-162        market depth: 5 entries x 20 bytes
 ///
-/// Market depth (code 3, 112 bytes) carries LTP at 8-12 and the same 5x20 depth block at 12-112.
+/// Dhan v2 defines exactly these response codes: 2 Ticker, 4 Quote, 5 OI, 6 Prev Close, 7 Market
+/// Status, 8 Full, 50 Disconnect. There is no standalone depth packet on this socket - depth
+/// arrives only inside the Full packet, which is why Full is the mode this app subscribes.
+/// (20-level depth is a separate service on its own socket, not implemented here.) Any other code
+/// is skipped by its declared length rather than guessed at.
 ///
 /// Each depth entry is:
 ///     0-4   uint32  bid quantity           4-8   uint32  ask quantity
 ///     8-10  uint16  bid orders             10-12 uint16  ask orders
 ///     12-16 float32 bid price              16-20 float32 ask price
 /// so the best bid/ask prices are the first entry's price fields - offsets 74 and 78 in a Full
-/// packet, 24 and 28 in a Depth packet.
+/// packet.
 ///
 /// Note Dhan's ordering of the OHLC block is open, CLOSE, high, low - not the open/high/low/close
 /// order the field names might suggest.
@@ -98,9 +101,8 @@ public static class DhanTickPacketParser
 {
     private const int HeaderLength = 8;
 
-    // Offset of the depth block within each packet kind that carries one.
+    // Offset of the depth block within the Full packet, the only kind that carries one.
     private const int FullDepthOffset = 62;
-    private const int DepthPacketDepthOffset = 12;
     private const int DepthEntryLength = 20;
 
     /// <summary>Expected total length per response code, used only as a fallback when a packet
@@ -109,7 +111,6 @@ public static class DhanTickPacketParser
     private static int KnownLength(DhanPacketKind kind) => kind switch
     {
         DhanPacketKind.Ticker => 16,
-        DhanPacketKind.Depth => 112,
         DhanPacketKind.Quote => 50,
         DhanPacketKind.OpenInterest => 12,
         DhanPacketKind.PreviousClose => 16,
@@ -210,19 +211,6 @@ public static class DhanTickPacketParser
                     Close = ReadPrice(packet.Slice(50, 4)),
                     High = ReadPrice(packet.Slice(54, 4)),
                     Low = ReadPrice(packet.Slice(58, 4)),
-                    BestBidPrice = bid,
-                    BestAskPrice = ask,
-                };
-                return true;
-            }
-
-            case DhanPacketKind.Depth:
-            {
-                if (packet.Length < 112) return false;
-                var (bid, ask) = ReadBestBidAsk(packet, DepthPacketDepthOffset);
-                result = New(kind, securityId, exchangeSegment) with
-                {
-                    LastPrice = ReadPrice(packet.Slice(8, 4)),
                     BestBidPrice = bid,
                     BestAskPrice = ask,
                 };
