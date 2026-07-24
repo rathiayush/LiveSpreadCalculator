@@ -115,6 +115,61 @@ Two things to know before trading on Dhan:
   and different instrument ids, so spreads resolved against one broker's instrument master can't be
   reused against the other's. Spread definitions are in-memory only, so this costs nothing.
 
+### Every `Dhan:*` key
+
+All twelve keys, with the environment variable that overrides each one. Only `ClientId` plus
+either `AccessToken` or `AppId`/`AppSecret` need setting - every other key already defaults to the
+right value and is only there so a deployment can point at something else without a rebuild.
+
+| Key | Env var | Default | What it does |
+|---|---|---|---|
+| `ClientId` | `Dhan__ClientId` | *(blank)* | **Required.** Your Dhan account id, e.g. `1100123456`. Sent as the `client-id` header on every REST call, as `dhanClientId` in order payloads, and as `clientId` on the feed socket. |
+| `AccessToken` | `Dhan__AccessToken` | *(blank)* | Token from the Dhan portal. Set this for static-token mode; leave blank for the consent flow. **Secret.** |
+| `AppId` | `Dhan__AppId` | *(blank)* | Partner app id. Set together with `AppSecret` to enable the browser consent login. |
+| `AppSecret` | `Dhan__AppSecret` | *(blank)* | Partner app secret. **Secret.** |
+| `RestBaseUrl` | `Dhan__RestBaseUrl` | `https://api.dhan.co/v2` | Trading/data REST root. |
+| `AuthBaseUrl` | `Dhan__AuthBaseUrl` | `https://auth.dhan.co` | Consent/login host - a different host from the trading API. |
+| `WsUrl` | `Dhan__WsUrl` | `wss://api-feed.dhan.co` | Live market feed socket. |
+| `OrderUpdateWsUrl` | `Dhan__OrderUpdateWsUrl` | `wss://api-order-update.dhan.co` | Order-update socket. Dhan keeps this separate from the feed; Kite multiplexes the equivalent onto its ticker. |
+| `ScripMasterUrl` | `Dhan__ScripMasterUrl` | `.../api-scrip-master.csv` | Instrument dump. Must be the **compact** list - the detailed one has no per-contract trading symbol column and loads zero instruments. |
+| `TickerMode` | `Dhan__TickerMode` | `full` | `full`, `quote` or `ltp`. Leave on `full`: it is the only mode carrying best bid/ask, which spreads are evaluated against. |
+| `OrdersPerSecond` | `Dhan__OrdersPerSecond` | `8` | Order pacing. Dhan's published limit is 10/sec and it counts reads too, so this keeps headroom. |
+| `AccessTokenValidityDays` | `Dhan__AccessTokenValidityDays` | `30` | Static-token mode only - how long the portal token you generated is valid, so the dashboard expires its cached copy at the right time. |
+
+### Step by step: running on Dhan
+
+1. **Get credentials.** Log in at [web.dhan.co](https://web.dhan.co) → Profile → *DhanHQ Trading
+   APIs*. Note your **client id**, and generate an **access token** (choose its validity - up to
+   30 days).
+2. **Whitelist your outbound IP** in the same section. Without this, data APIs work but every
+   order placement is rejected. For a local run this is your home/office public IP; for Azure it
+   is the Web App's outbound IP.
+3. **Point the app at Dhan.** In `LiveSpreadCalculator/appsettings.json` set:
+   ```json
+   "Broker": { "Platform": "Dhan" }
+   ```
+   or, better, set `Broker__Platform=Dhan` as an environment variable so the committed file stays
+   on `Kite`.
+4. **Supply the secrets as environment variables** rather than editing the file:
+   ```bash
+   export Broker__Platform=Dhan
+   export Dhan__ClientId=1100123456
+   export Dhan__AccessToken=eyJ0eXAiOi...
+   ```
+   On Windows PowerShell use `$env:Dhan__ClientId = "1100123456"`. In Azure these go in the Web
+   App's Application Settings. Note the **double** underscore - that is how .NET maps a flat
+   environment variable onto a nested config key.
+5. **Run it** exactly as for Kite (see "Running locally" below). With a static token there is no
+   login step - the log should show `Instrument master ready: 658 futures across [NFO]` and
+   `Connected to Dhan market feed`.
+6. **Rebuild the universe once**: `POST /api/universe/build`, or the *Build universe* button.
+   This is required after switching platforms - see above.
+
+If startup logs `Dhan scrip master ... is missing required columns`, `ScripMasterUrl` is pointing
+at the detailed CSV; set it to the compact one in the table above. If the feed logs a disconnect
+with code `807`/`809`, the token has expired or been invalidated - generate a new one and use the
+dashboard's **Enter Dhan token** button, no redeploy needed.
+
 See ARCHITECTURE.md §3.1 for the interfaces involved and what actually differs between the two.
 
 ## Running locally
