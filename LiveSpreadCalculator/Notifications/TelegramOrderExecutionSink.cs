@@ -24,17 +24,20 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly TelegramOptions _options;
     private readonly IHostEnvironment _environment;
+    private readonly ISpreadDefinitionStore _spreadStore;
     private readonly ILogger<TelegramOrderExecutionSink> _logger;
 
     public TelegramOrderExecutionSink(
         IHttpClientFactory httpClientFactory,
         IOptions<TelegramOptions> options,
         IHostEnvironment environment,
+        ISpreadDefinitionStore spreadStore,
         ILogger<TelegramOrderExecutionSink> logger)
     {
         _httpClientFactory = httpClientFactory;
         _options = options.Value;
         _environment = environment;
+        _spreadStore = spreadStore;
         _logger = logger;
     }
 
@@ -86,18 +89,23 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
     }
 
     /// <summary>Turns the execution outcome into an HTML Telegram message: a one-line overall
-    /// verdict (all filled / partial / rejected / blocked) followed by a per-leg breakdown.</summary>
-    private static string BuildMessage(BasketExecutionEvent e)
+    /// verdict (all filled / partial / rejected / blocked) followed by a per-leg breakdown, the
+    /// spread value the rule actually fired at, and the realized spread from what the two primary
+    /// legs were sent/filled at.</summary>
+    private string BuildMessage(BasketExecutionEvent e)
     {
         var sb = new StringBuilder();
 
-        // Margin-blocked: nothing was placed at all, so there are no legs to report.
+        // Margin-blocked: nothing was placed at all, so there are no legs to report, but the level
+        // that caused the (blocked) fire is still worth showing if we have it.
         if (e.MarginBlocked)
         {
             sb.Append("<b>⛔ ORDER BLOCKED</b>\n");
             sb.Append($"<b>{Esc(e.Underlying)}</b> | {Esc(e.OrderKind)}\n");
             sb.Append($"<b>Rule:</b> {Esc(e.RuleId)}\n");
             sb.Append($"<b>Spread:</b> {Esc(e.SpreadId)}\n");
+            if (e.SpreadValueAtTrigger is { } blockedTriggerValue)
+                sb.Append($"<b>Spread triggered at:</b> {blockedTriggerValue:0.##}\n");
             sb.Append($"<b>Reason:</b> {Esc(e.BlockedReason ?? "Unknown")}\n");
             sb.Append($"<b>Time:</b> {FormatTime(e.ExecutedAt)}");
             return sb.ToString();
@@ -119,6 +127,24 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
         sb.Append($"<b>Rule:</b> {Esc(e.RuleId)}  |  <b>Spread:</b> {Esc(e.SpreadId)}\n");
         sb.Append($"<b>Filled:</b> {filledCount}/{primary.Count} leg(s)\n");
 
+        // The level that actually crossed the rule's threshold and caused this fire - distinct
+        // from what the legs were then sent at below, since price can move in the gap between the
+        // trigger check and the order actually reaching Kite.
+        if (e.SpreadValueAtTrigger is { } triggerValue)
+            sb.Append($"<b>Spread triggered at:</b> {triggerValue:0.##}\n");
+
+        // The REAL cut spread - Far leg's ACTUAL Kite fill price minus Near leg's, i.e. what the
+        // position genuinely got executed at (Far - Near, same convention as SpreadDefinition/
+        // SpreadSnapshot/PositionsTable's "Entered at" everywhere else) - not the sent/limit price,
+        // which can differ from the fill. Only shown when both legs of the configured spread are
+        // identifiable among the primary legs and BOTH have a confirmed AverageFillPrice from Kite
+        // (see OrderResult.AverageFillPrice / KiteOrderGateway.PollOrderStatusAsync) - null on
+        // either side (order not filled, or status poll never confirmed a fill) skips this line
+        // rather than showing a misleading number.
+        var fillSpread = TryComputeFillSpread(e.SpreadId, primary);
+        if (fillSpread is { } fs)
+            sb.Append($"<b>Cut at (actual fill spread):</b> {fs:0.##}\n");
+
         sb.Append("\n<b>Legs</b>\n");
         foreach (var leg in primary)
             sb.Append(FormatLeg(leg)).Append('\n');
@@ -132,6 +158,28 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
 
         sb.Append($"\n<b>Time:</b> {FormatTime(e.ExecutedAt)}");
         return sb.ToString();
+    }
+
+    /// <summary>Far leg's ACTUAL Kite fill price minus Near leg's, i.e. the same Far-minus-Near
+    /// convention used everywhere else a "spread value" is shown (SpreadDefinition/SpreadSnapshot/
+    /// PositionsTable's "Entered at") - but computed from Kite's own confirmed average_price for
+    /// these two specific legs, not the sent/limit price or the live streamed value. Looks up the
+    /// spread's near/far tradingsymbols from ISpreadDefinitionStore to match them against the
+    /// (near/far-agnostic) OrderLegResult list. Returns null if the spread definition is gone,
+    /// either leg isn't among the primary legs, or either leg has no confirmed AverageFillPrice
+    /// (not filled, or the status poll gave up before confirming).</summary>
+    private decimal? TryComputeFillSpread(string spreadId, IReadOnlyList<OrderLegResult> primaryLegs)
+    {
+        var spread = _spreadStore.Get(spreadId);
+        if (spread is null) return null;
+
+        var near = primaryLegs.FirstOrDefault(l =>
+            string.Equals(l.TradingSymbol, spread.NearLeg.TradingSymbol, StringComparison.OrdinalIgnoreCase));
+        var far = primaryLegs.FirstOrDefault(l =>
+            string.Equals(l.TradingSymbol, spread.FarLeg.TradingSymbol, StringComparison.OrdinalIgnoreCase));
+
+        if (near is null || far is null || near.AverageFillPrice is null || far.AverageFillPrice is null) return null;
+        return far.AverageFillPrice.Value - near.AverageFillPrice.Value;
     }
 
     private static bool IsFullyFilled(OrderLegResult l) => l.Success && l.Quantity > 0 && l.FilledQuantity >= l.Quantity;
@@ -150,6 +198,9 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
         var priceText = l.Price is { } p
             ? $"@ {p:0.##}{(string.IsNullOrWhiteSpace(l.PriceReference) ? "" : $" ({Esc(l.PriceReference!)})")}"
             : "@ MKT";
+        // Kite's own confirmed fill price for this leg (what it ACTUALLY executed at), shown
+        // alongside the sent price above when known - see OrderResult.AverageFillPrice.
+        var avgFillText = l.AverageFillPrice is { } avg ? $" | Cut @ {avg:0.##}" : "";
 
         string status;
         if (!l.Success)
@@ -161,9 +212,9 @@ public sealed class TelegramOrderExecutionSink : IOrderExecutionSink
         else
             status = $"⭕ Not filled 0/{l.Quantity}";
 
-        // e.g. "🟢 NIFTY25JULFUT BUY ×75 @ 1190.35 (Bid/Ask) (LIMIT) - ✅ Filled 75/75  [COMPLETE]  #2507...".
+        // e.g. "🟢 NIFTY25JULFUT BUY ×75 @ 1190.35 (Bid/Ask) | Cut @ 1190.40 (LIMIT) - ✅ Filled 75/75  [COMPLETE]  #2507...".
         var orderType = string.IsNullOrWhiteSpace(l.OrderType) ? "" : $" ({Esc(l.OrderType!)})";
-        var line = $"{sideEmoji} <b>{Esc(l.TradingSymbol)}</b> {Esc(l.TransactionType)} ×{l.Quantity} <b>{priceText}</b>{orderType} - {status}";
+        var line = $"{sideEmoji} <b>{Esc(l.TradingSymbol)}</b> {Esc(l.TransactionType)} ×{l.Quantity} <b>{priceText}</b>{avgFillText}{orderType} - {status}";
         if (!string.IsNullOrWhiteSpace(l.Status))
             line += $"  [{Esc(l.Status!)}]";
         if (!string.IsNullOrWhiteSpace(l.OrderId))

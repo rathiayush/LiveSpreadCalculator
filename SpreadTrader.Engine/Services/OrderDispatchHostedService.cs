@@ -213,7 +213,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         {
             var leg = legs[i];
             var result = placements[i];
-            legResults.Add(new OrderLegResult(leg.TradingSymbol, leg.TransactionType, leg.Quantity, result.Success, result.OrderId, result.ErrorMessage, FilledQuantity: result.FilledQuantity, Price: leg.Price, OrderType: leg.OrderType, Status: result.Status, PriceReference: leg.PriceReference));
+            legResults.Add(new OrderLegResult(leg.TradingSymbol, leg.TransactionType, leg.Quantity, result.Success, result.OrderId, result.ErrorMessage, FilledQuantity: result.FilledQuantity, Price: leg.Price, OrderType: leg.OrderType, Status: result.Status, PriceReference: leg.PriceReference, AverageFillPrice: result.AverageFillPrice));
 
             if (!result.Success)
             {
@@ -238,7 +238,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
             RestoreRuleIfNothingFilled(ruleStore, rule.Id); // fully rejected/unfilled - don't burn a shot on this
 
         await _executionSink.PublishAsync(
-            new BasketExecutionEvent(triggerEvent.FireId, rule.Id, spread.Id, spread.Underlying, orderKind, legResults, MarginBlocked: false, BlockedReason: null, DateTimeOffset.UtcNow),
+            new BasketExecutionEvent(triggerEvent.FireId, rule.Id, spread.Id, spread.Underlying, orderKind, legResults, MarginBlocked: false, BlockedReason: null, DateTimeOffset.UtcNow, SpreadValueAtTrigger: triggerEvent.SpreadValueAtTrigger),
             stoppingToken);
     }
 
@@ -353,7 +353,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
 
     private Task PublishBlockedAsync(TriggerEvent triggerEvent, string underlying, string orderKind, string reason, CancellationToken cancellationToken) =>
         _executionSink.PublishAsync(
-            new BasketExecutionEvent(triggerEvent.FireId, triggerEvent.RuleId, triggerEvent.SpreadId, underlying, orderKind, Array.Empty<OrderLegResult>(), MarginBlocked: true, BlockedReason: reason, DateTimeOffset.UtcNow),
+            new BasketExecutionEvent(triggerEvent.FireId, triggerEvent.RuleId, triggerEvent.SpreadId, underlying, orderKind, Array.Empty<OrderLegResult>(), MarginBlocked: true, BlockedReason: reason, DateTimeOffset.UtcNow, SpreadValueAtTrigger: triggerEvent.SpreadValueAtTrigger),
             cancellationToken);
 
     /// <summary>Checks the basket's combined margin requirement (with the near/far hedge
@@ -568,7 +568,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
 
             var flatten = _marketProtection.Protect(flattenLeg, plan.InstrumentToken, plan.TickSize, $"Rule {ruleId} auto-square-off", rule.SlippagePercent);
             var result = await _orderGateway.PlaceOrderAsync(flatten, cancellationToken);
-            squareOffResults.Add(new OrderLegResult(flatten.TradingSymbol, flatten.TransactionType, flatten.Quantity, result.Success, result.OrderId, result.ErrorMessage, IsSquareOff: true, FilledQuantity: result.FilledQuantity, Price: flatten.Price, OrderType: flatten.OrderType, Status: result.Status, PriceReference: flatten.PriceReference));
+            squareOffResults.Add(new OrderLegResult(flatten.TradingSymbol, flatten.TransactionType, flatten.Quantity, result.Success, result.OrderId, result.ErrorMessage, IsSquareOff: true, FilledQuantity: result.FilledQuantity, Price: flatten.Price, OrderType: flatten.OrderType, Status: result.Status, PriceReference: flatten.PriceReference, AverageFillPrice: result.AverageFillPrice));
 
             if (result.Success)
             {

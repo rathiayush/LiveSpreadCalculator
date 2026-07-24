@@ -56,4 +56,12 @@ public sealed class OrderResult
     /// the time the status poll stopped - OPEN here means the poll gave up before Kite reached
     /// a terminal state, not that the order is confirmed still resting.</summary>
     public string? Status { get; set; }
+
+    /// <summary>Kite's own fill-weighted average price for this order (the "average_price" field
+    /// on the order status history - see KiteOrderGateway.PollOrderStatusAsync), i.e. what this leg
+    /// ACTUALLY executed at, as opposed to OrderLegRequest.Price (what it was SENT at - the
+    /// protection-band limit price for a MARKET-converted leg). Null until a fill is confirmed
+    /// (Kite reports 0 for an order with no fill yet, normalized to null here) - used to compute
+    /// the real cut/fill spread rather than an approximation from the sent price.</summary>
+    public decimal? AverageFillPrice { get; set; }
 }

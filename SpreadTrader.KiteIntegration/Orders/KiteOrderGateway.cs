@@ -162,13 +162,21 @@ public sealed class KiteOrderGateway : IOrderGateway
                 var status = latest.TryGetProperty("status", out var s) ? s.GetString() : null;
                 var filledQuantity = latest.TryGetProperty("filled_quantity", out var fq) && fq.TryGetInt32(out var fqv) ? fqv : 0;
                 var rejectionReason = latest.TryGetProperty("status_message", out var sm) ? sm.GetString() : null;
+                // Kite's own fill-weighted average price for this order - present on the same
+                // status-history entry as filled_quantity/status, just not previously read. Reports
+                // 0 for an order with no fill yet, which is normalized to null here (0 is not a
+                // meaningful price).
+                var averageFillPrice = latest.TryGetProperty("average_price", out var ap) && ap.TryGetDecimal(out var apv) && apv > 0
+                    ? apv
+                    : (decimal?)null;
 
                 if (status is not null && TerminalStatuses.Contains(status))
                 {
                     var success = filledQuantity > 0;
                     _logger.LogInformation(
-                        "Order {OrderId} ({Symbol} {Side}) reached {Status}: {Filled}/{Requested} filled",
-                        orderId, leg.TradingSymbol, leg.TransactionType, status, filledQuantity, leg.Quantity);
+                        "Order {OrderId} ({Symbol} {Side}) reached {Status}: {Filled}/{Requested} filled{AvgPrice}",
+                        orderId, leg.TradingSymbol, leg.TransactionType, status, filledQuantity, leg.Quantity,
+                        averageFillPrice is { } avg ? $" @ avg {avg}" : "");
                     return new OrderResult
                     {
                         Success = success,
@@ -176,6 +184,7 @@ public sealed class KiteOrderGateway : IOrderGateway
                         FilledQuantity = filledQuantity,
                         Status = status,
                         ErrorMessage = success ? null : (rejectionReason ?? $"Order ended as {status} with no fill."),
+                        AverageFillPrice = averageFillPrice,
                     };
                 }
                 // Still OPEN/pending (or TRIGGER PENDING etc.) - keep polling until attempts run out.

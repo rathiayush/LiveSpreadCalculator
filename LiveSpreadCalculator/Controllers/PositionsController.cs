@@ -148,7 +148,8 @@ public sealed class PositionsController : ControllerBase
             Price: protectedLeg.Price,
             OrderType: protectedLeg.OrderType,
             Status: result.Status,
-            PriceReference: protectedLeg.PriceReference);
+            PriceReference: protectedLeg.PriceReference,
+            AverageFillPrice: result.AverageFillPrice);
 
         await _executionSink.PublishAsync(
             new BasketExecutionEvent(

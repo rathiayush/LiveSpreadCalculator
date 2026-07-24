@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Card, Row, Col, InputNumber, Select, Switch, Radio, Button, Alert, Typography, Space, Tooltip } from 'antd'
+import { Card, Row, Col, InputNumber, Select, Switch, Radio, Button, Alert, Typography, Space, Tooltip, Modal } from 'antd'
 import { PlusCircleOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import { useLiveSpreads } from '../hooks/spreadHub'
@@ -26,18 +26,29 @@ const OPERATOR_LEG_DEFAULTS = {
   lte: { nearLegAction: 'Sell', farLegAction: 'Buy' },
 }
 
-const emptyForm = {
-  spreadId: '',
-  target: '',
-  thresholdIsPercent: false,
-  operator: 'gte',
-  ...OPERATOR_LEG_DEFAULTS.gte,
-  lots: '',
-  product: 'NRML',
-  orderType: 'MARKET',
-  slippagePercent: 0.10,
-  oneShot: true,
-  maxFireCount: 3,
+// The default fire condition differs by trigger kind: an ordinary (entry) trigger defaults to
+// "Falls below" (near leg Sell / far leg Buy) - the far more common setup for this desk's
+// calendar-spread arb. An EXIT trigger defaults the opposite way, "Rises above" (near leg Buy /
+// far leg Sell) - exits are typically closing out of the position entered via the Falls-below
+// entry default, so the expected close direction is the reverse. See defaultOperatorFor below,
+// used both for the initial form state and to decide which direction change needs a confirmation.
+const defaultOperatorFor = (isExitTrigger) => (isExitTrigger ? 'gte' : 'lte')
+
+const makeEmptyForm = (isExitTrigger) => {
+  const operator = defaultOperatorFor(isExitTrigger)
+  return {
+    spreadId: '',
+    target: '',
+    thresholdIsPercent: false,
+    operator,
+    ...OPERATOR_LEG_DEFAULTS[operator],
+    lots: '',
+    product: 'NRML',
+    orderType: 'MARKET',
+    slippagePercent: 0.10,
+    oneShot: true,
+    maxFireCount: 3,
+  }
 }
 
 // The two-way live quote (same buySpreadValue/sellSpreadValue SpreadGrid's "Buy spread"/"Sell
@@ -95,10 +106,10 @@ function LiveSpreadPrice({ snapshot, thresholdIsPercent }) {
 // initialSpreadId seeds the spread picker once on mount (e.g. "Add trigger" on a Positions & PNL
 // row navigates here with the matching spread already known - see PositionsTable.jsx/
 // TriggersPage.jsx) - only read on the very first render (React's lazy useState initializer),
-// same as every other field in emptyForm; changing the prop after mount does nothing, since this
-// is a one-time default, not a controlled value.
+// same as every other field in makeEmptyForm's result; changing the prop after mount does
+// nothing, since this is a one-time default, not a controlled value.
 export default function TriggerForm({ spreads, onCreated, isExitTrigger = false, initialSpreadId = '' }) {
-  const [form, setForm] = useState(() => ({ ...emptyForm, spreadId: initialSpreadId }))
+  const [form, setForm] = useState(() => ({ ...makeEmptyForm(isExitTrigger), spreadId: initialSpreadId }))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
 
@@ -113,6 +124,46 @@ export default function TriggerForm({ spreads, onCreated, isExitTrigger = false,
   // common case ("far pricier -> buy near/sell far", "near pricier -> sell near/buy far") is set
   // automatically - the two Selects below stay fully editable if you want something else.
   const setOperator = (value) => setForm((f) => ({ ...f, operator: value, ...OPERATOR_LEG_DEFAULTS[value] }))
+
+  // Every operator switch - either direction - resets Near/Far leg action to match the new
+  // operator's combination (see OPERATOR_LEG_DEFAULTS: Rises above -> Near=Buy/Far=Sell, Falls
+  // below -> Near=Sell/Far=Buy), so switching ALWAYS needs an explicit "are you sure", not just
+  // one direction. If the user cancels, the radio simply doesn't change (nothing was set yet, so
+  // the controlled value just keeps showing the current operator).
+  const operatorLabel = (op) => (op === 'gte' ? 'Rises above' : 'Falls below')
+  const legDefaultsLabel = (op) => (op === 'gte' ? 'Near leg = Buy and Far leg = Sell' : 'Near leg = Sell and Far leg = Buy')
+
+  const handleOperatorChange = (e) => {
+    const value = e.target.value
+    if (value === form.operator) return
+    Modal.confirm({
+      title: `Switch to "${operatorLabel(value)}"?`,
+      content: `This changes the fire condition to "${value === 'gte' ? 'Rises to your target or higher' : 'Falls to your target or lower'}" and resets ${legDefaultsLabel(value)}. Continue?`,
+      okText: 'Yes, switch',
+      cancelText: 'Cancel',
+      onOk: () => setOperator(value),
+    })
+  }
+
+  // Rises above pairs with Near=Buy/Far=Sell, and Falls below pairs with Near=Sell/Far=Buy (see
+  // OPERATOR_LEG_DEFAULTS). Whichever operator is CURRENTLY selected - not just this form's own
+  // initial default - deviating either leg action away from its matching combination is worth a
+  // confirmation, symmetrically for both operators. Both Selects stay fully editable either way,
+  // this just asks first.
+  const changeLegAction = (field, label) => (value) => {
+    const expectedDefault = OPERATOR_LEG_DEFAULTS[form.operator][field]
+    if (value !== expectedDefault) {
+      Modal.confirm({
+        title: 'Change leg action?',
+        content: `${operatorLabel(form.operator)} is selected, which auto-sets ${legDefaultsLabel(form.operator)}. You're about to change ${label} to "${value}". Continue?`,
+        okText: 'Yes, change it',
+        cancelText: 'Cancel',
+        onOk: () => set(field)(value),
+      })
+    } else {
+      set(field)(value)
+    }
+  }
 
   // Exchange lot size for whichever spread is selected - both legs of a calendar spread share
   // the same underlying, so near/far always have the same lot size once resolved; used only to
@@ -165,7 +216,7 @@ export default function TriggerForm({ spreads, onCreated, isExitTrigger = false,
         maxFireCount: Number(form.maxFireCount || 0),
         slippagePercent: Number(form.slippagePercent),
       })
-      setForm({ ...emptyForm, spreadId: form.spreadId })
+      setForm({ ...makeEmptyForm(isExitTrigger), spreadId: form.spreadId })
       onCreated()
     } catch (err) {
       setError(err.message)
@@ -234,7 +285,7 @@ export default function TriggerForm({ spreads, onCreated, isExitTrigger = false,
                 optionType="button"
                 buttonStyle="solid"
                 value={form.operator}
-                onChange={(e) => setOperator(e.target.value)}
+                onChange={handleOperatorChange}
                 options={[
                   { label: `Rises to ${form.target === '' ? 'this' : form.target}${unit} or higher`, value: 'gte' },
                   { label: `Falls to ${form.target === '' ? 'this' : form.target}${unit} or lower`, value: 'lte' },
@@ -248,7 +299,7 @@ export default function TriggerForm({ spreads, onCreated, isExitTrigger = false,
               <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Near leg action</Typography.Text>
               <Select
                 value={form.nearLegAction}
-                onChange={set('nearLegAction')}
+                onChange={changeLegAction('nearLegAction', 'Near leg action')}
                 style={{ width: '100%' }}
                 options={LEG_ACTIONS.map((a) => ({ value: a, label: a }))}
               />
@@ -257,7 +308,7 @@ export default function TriggerForm({ spreads, onCreated, isExitTrigger = false,
               <Typography.Text type="secondary" style={{ display: 'block', marginBottom: 4 }}>Far leg action</Typography.Text>
               <Select
                 value={form.farLegAction}
-                onChange={set('farLegAction')}
+                onChange={changeLegAction('farLegAction', 'Far leg action')}
                 style={{ width: '100%' }}
                 options={LEG_ACTIONS.map((a) => ({ value: a, label: a }))}
               />
