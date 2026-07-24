@@ -12,14 +12,33 @@ namespace SpreadTrader.Engine.Services;
 public readonly record struct PositionAnchor(PositionSnapshot Snapshot, uint InstrumentToken);
 
 /// <summary>
-/// The ONE place that periodically re-fetches Kite's authoritative position snapshot (GET
-/// /portfolio/positions via IPositionsService) and keeps it in memory - every other consumer
-/// that needs "what positions are currently open, with a live-tick-projected PNL/Exit PNL" reads
-/// from here via GetProjected() instead of calling Kite itself. Previously LivePositionsHostedService
+/// The ONE place that re-fetches the broker's authoritative position snapshot (GET positions via
+/// IPositionsService) and keeps it in memory - every other consumer that needs "what positions
+/// are currently open, with a live-tick-projected PNL/Exit PNL" reads from here via
+/// GetProjected() instead of calling the broker itself. Previously LivePositionsHostedService
 /// owned this resync loop privately; when PnlAlertHostedService needed the same data, the naive
 /// approach would have been a second independent resync loop hitting the same rate-limited REST
 /// endpoint on its own timer, duplicating work and risking the two ending up with slightly
-/// different numbers. This extraction avoids both problems - one poller, one cache, N readers.
+/// different numbers. This extraction avoids both problems - one fetcher, one cache, N readers.
+///
+/// The resync is EVENT-DRIVEN, not polled. There are exactly two things that fetch positions:
+///
+///  1. STARTUP, retried with backoff until the first snapshot lands. The retry costs no API
+///     calls while logged out - IPositionsService returns "no access token" without touching the
+///     wire - and is what makes the cache come alive on its own once the operator completes the
+///     broker login, without waiting for the first trade.
+///  2. AN ORDER UPDATE from the broker's socket (OrderUpdateReceived), the only thing that can
+///     change quantity, average price or realised PNL. A burst of alerts from one multi-leg
+///     basket coalesces into a single fetch (see CoalesceWindow), and a fetch that fails right
+///     after an execution retries with backoff until it succeeds - stale anchors after a REAL
+///     fill are the one state this cache must never sit in.
+///
+/// There is deliberately NO periodic timer resync. The accepted trade-off: if an order-update
+/// message is lost outright (socket reconnecting at the exact moment a trade placed directly in
+/// the broker's own app executes), the cache stays stale until the next order event - the
+/// Positions page's manual refresh (GET /api/positions, which calls the broker directly) is the
+/// escape hatch. Between fetches, PNL freshness comes from the tick stream, not from here -
+/// see GetProjected().
 ///
 /// Runs unconditionally from process start - deliberately NOT gated on
 /// PositionsViewerTracker.HasViewers the way the live SignalR push in LivePositionsHostedService
@@ -33,15 +52,16 @@ public readonly record struct PositionAnchor(PositionSnapshot Snapshot, uint Ins
 /// </summary>
 public sealed class PositionsCache : BackgroundService
 {
-    // Fallback full REST re-sync, in case an order postback is somehow missed (a brief WebSocket
-    // hiccup, or Kite's postback delivery itself failing) - keeps this from silently drifting
-    // stale indefinitely even if the reactive path fails.
-    private static readonly TimeSpan ResyncInterval = TimeSpan.FromSeconds(20);
+    // How long to sit on an order-update signal before fetching, so the burst of alerts one
+    // basket produces (two legs placed, each traversing TRANSIT/PENDING/TRADED) lands as ONE
+    // positions fetch instead of one per alert. Order events arriving during the window - or
+    // during the fetch itself - simply arm the next round, so nothing is ever dropped.
+    private static readonly TimeSpan CoalesceWindow = TimeSpan.FromMilliseconds(300);
 
-    // How often the loop wakes up just to check "did an order postback arrive" / "has
-    // ResyncInterval elapsed" - deliberately shorter than ResyncInterval itself so a postback
-    // (which should trigger an immediate resync) isn't sitting unnoticed for up to 20s.
-    private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(2);
+    // Backoff for a resync that FAILED (startup before login, or a network/API hiccup right
+    // after an execution). Grows exponentially to the cap, resets on success.
+    private static readonly TimeSpan RetryBackoffInitial = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RetryBackoffMax = TimeSpan.FromSeconds(30);
 
     private readonly IPositionsService _positionsService;
     private readonly IMarketDataFeed _tickerClient;
@@ -52,9 +72,13 @@ public sealed class PositionsCache : BackgroundService
     private readonly object _lock = new();
     private IReadOnlyDictionary<string, PositionAnchor> _anchors = new Dictionary<string, PositionAnchor>();
 
-    // Set (from the ticker's receive loop, via OnOrderUpdate) whenever an order postback arrives;
-    // read and cleared by the main loop below - see LivePositionsHostedService's old doc comment on
-    // this same pattern, unchanged by the extraction.
+    // Order-update signalling: OnOrderUpdate (called on the ticker's receive loop, which must
+    // never block) flips the flag and releases the semaphore exactly once per pending round; the
+    // main loop blocks on the semaphore, so between order events it consumes nothing at all -
+    // no timer, no wake-ups, no API calls. The flag is what coalesces a burst of alerts into one
+    // release: while it is already 1, further alerts are no-ops that ride along with the fetch
+    // the first alert armed.
+    private readonly SemaphoreSlim _resyncSignal = new(0, 1);
     private int _orderUpdatePending;
 
     public PositionsCache(
@@ -76,7 +100,7 @@ public sealed class PositionsCache : BackgroundService
     /// exactly the projection LivePositionsHostedService used to do inline (see PNL(t) =
     /// PnlAtSnapshot + Quantity * (CurrentLtp - LtpAtSnapshot) and PositionExitPricing.Compute),
     /// now shared so every reader gets an identically-computed, up-to-the-tick figure instead of
-    /// the REST snapshot's up-to-ResyncInterval-old one. Empty if nothing is open.</summary>
+    /// the REST snapshot's as-of-last-order-event one. Empty if nothing is open.</summary>
     public IReadOnlyList<PositionSnapshot> GetProjected()
     {
         IReadOnlyDictionary<string, PositionAnchor> anchors;
@@ -164,29 +188,43 @@ public sealed class PositionsCache : BackgroundService
         _tickerClient.OrderUpdateReceived += OnOrderUpdate;
         try
         {
-            // Unlike the old viewer-gated LivePositionsHostedService (which deliberately waited
-            // for the first viewer before spending a REST call), this resyncs once right at
-            // startup - PnlAlertHostedService and the live page can both need this before anyone's
-            // opened a browser tab at all.
-            await ResyncAsync(stoppingToken);
-            var lastResync = DateTimeOffset.UtcNow;
+            // STARTUP: retry until the first snapshot lands. Costs no API calls while logged out
+            // (the positions service early-returns on a missing token), and means completing the
+            // broker login is enough to populate the cache - without this, a purely event-driven
+            // loop would show no positions until the first trade of the day.
+            var backoff = RetryBackoffInitial;
+            while (!stoppingToken.IsCancellationRequested && !await ResyncAsync(stoppingToken))
+            {
+                if (!await DelayAsync(backoff, stoppingToken)) return;
+                backoff = Min(backoff * 2, RetryBackoffMax);
+            }
 
+            // STEADY STATE: block until an order update arrives - nothing runs, and nothing is
+            // fetched, between order events.
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
                 {
-                    await Task.Delay(CheckInterval, stoppingToken);
+                    await _resyncSignal.WaitAsync(stoppingToken);
                 }
                 catch (OperationCanceledException)
                 {
                     break;
                 }
 
-                var orderUpdatePending = Interlocked.Exchange(ref _orderUpdatePending, 0) == 1;
-                if (orderUpdatePending || DateTimeOffset.UtcNow - lastResync > ResyncInterval)
+                // Let the rest of the basket's alerts land, then clear the flag BEFORE fetching:
+                // an execution that happens mid-fetch must arm another round, not be swallowed by
+                // the round that just missed it.
+                if (!await DelayAsync(CoalesceWindow, stoppingToken)) break;
+                Interlocked.Exchange(ref _orderUpdatePending, 0);
+
+                // An order genuinely changed state, so the anchors are now known-stale - retry a
+                // failed fetch until it succeeds rather than sitting on wrong quantities.
+                backoff = RetryBackoffInitial;
+                while (!stoppingToken.IsCancellationRequested && !await ResyncAsync(stoppingToken))
                 {
-                    await ResyncAsync(stoppingToken);
-                    lastResync = DateTimeOffset.UtcNow;
+                    if (!await DelayAsync(backoff, stoppingToken)) return;
+                    backoff = Min(backoff * 2, RetryBackoffMax);
                 }
             }
         }
@@ -196,20 +234,48 @@ public sealed class PositionsCache : BackgroundService
         }
     }
 
-    private void OnOrderUpdate() => Interlocked.Exchange(ref _orderUpdatePending, 1);
+    /// <summary>Called on the ticker's receive loop - must stay non-blocking. The flag+semaphore
+    /// pair means: first alert of a round releases the loop, every further alert until the loop
+    /// clears the flag is coalesced into that same round.</summary>
+    private void OnOrderUpdate()
+    {
+        if (Interlocked.CompareExchange(ref _orderUpdatePending, 1, 0) == 0)
+        {
+            try { _resyncSignal.Release(); }
+            catch (SemaphoreFullException) { /* already armed - coalesced */ }
+        }
+    }
 
-    /// <summary>Re-fetches the authoritative REST snapshot (quantity, average price, Kite's own
-    /// pnl, last_price at fetch time), rebuilds the anchor for every open position, and makes
-    /// sure each one's instrument token is subscribed on the live ticker. A failed fetch (no
-    /// access token yet, transient API error) just logs and keeps whatever anchors already exist -
-    /// a stale-but-recent snapshot is more useful than blanking everything out.</summary>
-    private async Task ResyncAsync(CancellationToken cancellationToken)
+    private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
+
+    /// <summary>Cancellable delay that reports completion instead of throwing, so the loops above
+    /// can exit cleanly on shutdown.</summary>
+    private static async Task<bool> DelayAsync(TimeSpan delay, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(delay, cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Re-fetches the authoritative REST snapshot (quantity, average price, the broker's
+    /// own pnl), rebuilds the anchor for every open position, and makes sure each one's
+    /// instrument token is subscribed on the live ticker. Returns false on a failed fetch (no
+    /// access token yet, transient API error), keeping whatever anchors already exist - a
+    /// stale-but-recent snapshot is more useful than blanking everything out - so the caller's
+    /// retry loop knows to try again.</summary>
+    private async Task<bool> ResyncAsync(CancellationToken cancellationToken)
     {
         var result = await _positionsService.GetPositionsAsync(cancellationToken);
         if (!result.Success)
         {
-            _logger.LogDebug("PositionsCache: REST resync failed ({Error}) - keeping previous snapshot.", result.ErrorMessage);
-            return;
+            _logger.LogDebug("PositionsCache: REST resync failed ({Error}) - keeping previous snapshot, will retry.", result.ErrorMessage);
+            return false;
         }
 
         var newAnchors = new Dictionary<string, PositionAnchor>();
@@ -239,6 +305,8 @@ public sealed class PositionsCache : BackgroundService
 
         if (tokensToSubscribe.Count > 0)
             await _tickerClient.SubscribeAsync(tokensToSubscribe, cancellationToken);
+
+        return true;
     }
 
     private static string AnchorKey(string tradingSymbol, string exchange, string product) =>
