@@ -140,6 +140,41 @@ These are the differences the adapters exist to absorb - worth knowing before to
 - **Margin.** Kite has a basket-margin endpoint and per-segment funds; Dhan has
   `/margincalculator/multi` and an account-wide `/fundlimit` (so the `segment` argument is ignored
   on Dhan, without loss of accuracy - the figure is already net of everything blocked).
+- **Live PNL is computed locally on both, but from different inputs - see below.**
+
+### Live PNL: two WebSockets plus a *reactive* REST poll
+
+Neither broker streams PNL. Both are handled the same way, and it is worth being explicit about
+the shape because the naive alternative - polling the positions endpoint on a fast timer - would
+burn the rate limit and still lag the market:
+
+1. **Market-feed WebSocket** streams tick-by-tick prices into `ITickStore`.
+2. **Order-update WebSocket** signals that *some* order changed state (`OrderUpdateReceived`).
+3. **REST positions fetch runs reactively**, when that signal arrives - not on a fast timer.
+   `PositionsCache` wakes every 2s only to check the flag, and additionally re-syncs every 20s
+   purely as a backstop in case an update is ever missed. That is ~3 requests/minute at idle
+   against Dhan's 20/sec non-trading limit.
+4. **PNL is then computed locally on every tick** by `PositionsCache.GetProjected()`, so the
+   dashboard updates continuously between REST fetches.
+
+Step 4 is where the platforms genuinely differ, because they hand back different raw material:
+
+| | Kite | Dhan |
+|---|---|---|
+| PNL fields on a position | one combined `pnl` | `realizedProfit` **and** `unrealizedProfit`, separately |
+| Last traded price on a position | `last_price` | **not returned at all** |
+| Projection used | `pnl + qty × (ltp − last_price)` | `realized + qty × (ltp − avg_price)` |
+
+Kite supplies the mark its `pnl` was struck at, so the live figure is that snapshot adjusted by
+how far price has moved since. Dhan supplies no mark at all, so the unrealised half is instead
+recomputed from scratch each tick off the average price - which needs no reference price from the
+broker and is exact at every tick.
+
+Using Kite's delta formula on Dhan was a real bug: the adapter fills `LastPrice` from the local
+tick store, which is `0` until that instrument's first tick arrives, and a zero baseline turns the
+delta term into `qty × ltp` - adding the position's entire notional to PNL (~₹7.5 lakh on 500
+RELIANCE) on the Positions & PNL page *and* in `PnlAlertHostedService`, which fires real alerts off
+these numbers. See `PositionsCache.ProjectPnl`.
 
 ### Authentication: Kite requires a login, Dhan doesn't
 
