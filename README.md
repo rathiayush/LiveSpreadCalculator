@@ -63,7 +63,7 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
   "OrderUpdateWsUrl": "wss://api-order-update.dhan.co",
   "ScripMasterUrl": "https://images.dhan.co/api-data/api-scrip-master.csv",
   "TickerMode": "full",
-  "OrdersPerSecond": 15,
+  "OrdersPerSecond": 8,
   "AccessTokenValidityDays": 30
 },
 "Engine": {

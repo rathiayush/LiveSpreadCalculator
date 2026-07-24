@@ -8,7 +8,7 @@ namespace SpreadTrader.DhanIntegration.Orders;
 /// Pre-trade margin checks against Dhan.
 ///
 /// BASKET MARGIN uses POST /v2/margincalculator/multi, Dhan's multi-leg calculator, with
-/// includePosition and includeOrder both on. That combination is what makes the returned figure
+/// includePosition and includeOrders both on. That combination is what makes the returned figure
 /// the INCREMENTAL margin the basket needs on top of what the account's existing positions and
 /// open orders already block - the correct number to compare against available balance, and the
 /// one that has the exchange's hedge benefit applied between the offsetting legs of a calendar
@@ -43,7 +43,7 @@ public sealed class DhanMarginService : IMarginService
         if (!_api.HasSession)
             return new BasketMarginResult(false, null, null, "No Dhan access token - complete the login flow first.");
 
-        var scripList = new List<object>(legs.Count);
+        var scripts = new List<object>(legs.Count);
         foreach (var leg in legs)
         {
             var securityId = ResolveSecurityId(leg);
@@ -51,7 +51,7 @@ public sealed class DhanMarginService : IMarginService
                 return new BasketMarginResult(false, null, null,
                     $"Could not resolve {leg.TradingSymbol} on {leg.Exchange} to a Dhan securityId for the margin check.");
 
-            scripList.Add(new
+            scripts.Add(new
             {
                 exchangeSegment = DhanSymbology.ToDhanSegment(leg.Exchange),
                 transactionType = leg.TransactionType.ToUpperInvariant(),
@@ -63,11 +63,15 @@ public sealed class DhanMarginService : IMarginService
             });
         }
 
+        // Field names here are the multi-leg endpoint's own, which are NOT the single-leg
+        // endpoint's: the leg array is "scripts" (not "scripList") and the open-orders flag is
+        // "includeOrders" (not "includeOrder"). Both were previously wrong, so Dhan saw a request
+        // with no legs in it at all.
         var payload = new
         {
             includePosition = true,
-            includeOrder = true,
-            scripList,
+            includeOrders = true,
+            scripts,
         };
 
         using var response = await _api.SendAsync(
@@ -80,51 +84,37 @@ public sealed class DhanMarginService : IMarginService
         }
 
         var root = response.Root;
-        var final = ReadDecimal(root, "totalMargin");
 
-        // Dhan reports the hedge-benefited total; the un-benefited figure is only available when it
-        // also breaks the basket down per leg. Sum that when present so the dashboard can show what
-        // the hedge actually saved, and leave it null (rather than guessing) when it isn't.
-        var initial = SumPerLegMargins(root) ?? final;
+        // The multi-leg endpoint answers in snake_case with the figures as STRINGS
+        // ("total_margin": "150000.00"), unlike the single-leg endpoint's camelCase numbers. The
+        // camelCase spelling is still accepted as a fallback in case Dhan ever aligns the two.
+        var final = ReadDecimal(root, "total_margin") ?? ReadDecimal(root, "totalMargin");
+        if (final is null)
+        {
+            // Returning "success with no figure" would be worse than an outright failure: the
+            // caller treats an absent total as "nothing to check" and dispatches the basket
+            // unguarded, which is exactly the pre-trade gate it asked for being silently skipped.
+            const string message = "Dhan's basket margin response carried no total_margin figure - treating the check as failed rather than as 'no margin required'.";
+            _logger.LogWarning("{Message} Response: {Response}", message, Truncate(root.ToString()));
+            return new BasketMarginResult(false, null, null, message);
+        }
+
+        // Dhan reports the hedge benefit directly, so the un-benefited figure is the total plus
+        // whatever the offsetting legs saved. It is blank on baskets that earn no benefit, in
+        // which case initial and final are legitimately the same number.
+        var hedgeBenefit = ReadDecimal(root, "hedge_benefit") ?? 0m;
+        var initial = final + hedgeBenefit;
 
         return new BasketMarginResult(true, initial, final, null);
     }
+
+    private static string Truncate(string value) => value.Length <= 300 ? value : value[..300] + "...";
 
     private string? ResolveSecurityId(OrderLegRequest leg)
     {
         if (leg.InstrumentToken != 0) return leg.InstrumentToken.ToString();
         var instrument = _instrumentMaster.Find(leg.TradingSymbol, leg.Exchange);
         return instrument?.InstrumentToken.ToString();
-    }
-
-    /// <summary>Adds up the per-leg totals when Dhan includes a breakdown array, under any of the
-    /// property names it has used for it.</summary>
-    private static decimal? SumPerLegMargins(System.Text.Json.JsonElement root)
-    {
-        foreach (var property in new[] { "scripList", "margins", "marginList" })
-        {
-            if (!root.TryGetProperty(property, out var array) ||
-                array.ValueKind != System.Text.Json.JsonValueKind.Array ||
-                array.GetArrayLength() == 0)
-            {
-                continue;
-            }
-
-            decimal sum = 0;
-            var found = false;
-            foreach (var item in array.EnumerateArray())
-            {
-                if (ReadDecimal(item, "totalMargin") is { } value)
-                {
-                    sum += value;
-                    found = true;
-                }
-            }
-
-            if (found) return sum;
-        }
-
-        return null;
     }
 
     /// <summary>The account's usable balance. Note Dhan's fund limit is ACCOUNT-WIDE, not split by

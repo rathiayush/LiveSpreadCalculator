@@ -389,7 +389,7 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
     // carries tick and lot size too; the detailed list has no usable trading symbol and loads nothing.
     "ScripMasterUrl": "https://images.dhan.co/api-data/api-scrip-master.csv",
     "TickerMode": "full",                   // only "full" carries market depth
-    "OrdersPerSecond": 15,
+    "OrdersPerSecond": 8,
     "AccessTokenValidityDays": 30
   },
   "Engine": {

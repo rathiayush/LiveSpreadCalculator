@@ -70,10 +70,13 @@ public sealed class DhanOptions
     /// depth). "quote" (17) has OHLC/volume but no depth, "ltp" (15) is last price only.</summary>
     public string TickerMode { get; set; } = "full";
 
-    /// <summary>Order placement pacing. Dhan documents 25 orders/sec; the default leaves headroom
-    /// under that rather than riding the ceiling, since a rejected-for-rate-limit leg of a
-    /// two-leg basket is far more expensive than a few extra milliseconds.</summary>
-    public int OrdersPerSecond { get; set; } = 15;
+    /// <summary>Order placement pacing. Dhan's published rate limit for Order APIs is 10 requests
+    /// per second (and 250/minute, 1,000/hour, 7,000/day); the default leaves headroom under that
+    /// rather than riding the ceiling, since a rejected-for-rate-limit leg of a two-leg basket is
+    /// far more expensive than a few extra milliseconds. Note the limit covers order READS as well
+    /// as writes, and every placement here is followed by up to four status polls - so the
+    /// effective request rate per order is several times this number.</summary>
+    public int OrdersPerSecond { get; set; } = 8;
 
     /// <summary>How long a token obtained from the Dhan web portal stays valid, in days. Only used
     /// for static-token mode, to tell the dashboard when to stop offering its cached copy back.
