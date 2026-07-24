@@ -150,10 +150,14 @@ burn the rate limit and still lag the market:
 
 1. **Market-feed WebSocket** streams tick-by-tick prices into `ITickStore`.
 2. **Order-update WebSocket** signals that *some* order changed state (`OrderUpdateReceived`).
-3. **REST positions fetch runs reactively**, when that signal arrives - not on a fast timer.
-   `PositionsCache` wakes every 2s only to check the flag, and additionally re-syncs every 20s
-   purely as a backstop in case an update is ever missed. That is ~3 requests/minute at idle
-   against Dhan's 20/sec non-trading limit.
+3. **REST positions fetch runs ONLY on that signal** - there is no timer at all. `PositionsCache`
+   blocks on the order-update event; a burst of alerts from one basket coalesces into a single
+   fetch, and a fetch that fails right after an execution retries with backoff until it succeeds.
+   The only other fetch is the startup one (retried until the first snapshot lands, so completing
+   the broker login populates the cache without waiting for a trade). Zero requests at idle.
+   Accepted trade-off: a lost order-update message (socket mid-reconnect exactly when a trade
+   placed in the broker's own app fills) stays invisible until the next order event - the
+   Positions page's manual refresh, which calls the broker directly, is the escape hatch.
 4. **PNL is then computed locally on every tick** by `PositionsCache.GetProjected()`, so the
    dashboard updates continuously between REST fetches.
 

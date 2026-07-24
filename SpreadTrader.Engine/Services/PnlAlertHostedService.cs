@@ -12,11 +12,12 @@ namespace SpreadTrader.Engine.Services;
 ///
 /// Reads from PositionsCache.GetProjected() - the same live-tick-projected snapshot
 /// LivePositionsHostedService pushes to the browser - instead of calling IPositionsService
-/// itself. PositionsCache already runs its own unconditional (not viewer-gated) resync loop, so
-/// this makes zero Kite REST calls of its own; adding a second independent poller here would have
-/// duplicated that work against the same rate-limited endpoint for no benefit. Runs on its own,
-/// much longer, cadence purely because a Telegram notification doesn't need sub-second latency -
-/// PositionsCache's own ~20s resync interval is already the limiting factor on freshness here.
+/// itself. PositionsCache already keeps itself in sync (event-driven off the order-update
+/// socket), so this makes zero broker REST calls of its own; adding a second independent poller
+/// here would have duplicated that work against the same rate-limited endpoint for no benefit.
+/// Runs on its own, much longer, cadence purely because a Telegram notification doesn't need
+/// sub-second latency - and the projected PNL it evaluates is tick-fresh regardless, since
+/// GetProjected() recomputes from the live tick store on every read.
 /// </summary>
 public sealed class PnlAlertHostedService : BackgroundService
 {
