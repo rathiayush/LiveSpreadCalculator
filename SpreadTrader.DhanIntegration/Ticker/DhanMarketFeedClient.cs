@@ -391,8 +391,22 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         var handler = TickReceived;
         if (handler is null) return;
 
+        // Only cache instruments we still want. Without this check the merge cache grows without
+        // bound over a long-running process: UnsubscribeAsync drops an instrument's entry, but a
+        // packet already in flight for it re-adds one moments later, and nothing ever removes that
+        // second entry - it belongs to a token no future unsubscribe will name. Across months of
+        // expiry rolls and universe rebuilds (this process is meant to run for weeks - see
+        // ARCHITECTURE.md §8) that is a slow, permanent leak of one Tick per retired contract.
+        bool stillSubscribed;
+        lock (_tokensLock)
+        {
+            stillSubscribed = _subscribedTokens.Contains(packet.SecurityId);
+        }
+
         var tick = Merge(packet);
-        _lastTick[packet.SecurityId] = tick;
+        if (stillSubscribed) _lastTick[packet.SecurityId] = tick;
+        else _lastTick.TryRemove(packet.SecurityId, out _);
+
         handler.Invoke(tick);
     }
 
