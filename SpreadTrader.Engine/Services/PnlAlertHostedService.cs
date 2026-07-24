@@ -11,7 +11,7 @@ namespace SpreadTrader.Engine.Services;
 /// Telegram notification the moment a rule's target is crossed.
 ///
 /// Reads from PositionsCache.GetProjected() - the same live-tick-projected snapshot
-/// LivePositionsHostedService pushes to the browser - instead of calling KitePositionsService
+/// LivePositionsHostedService pushes to the browser - instead of calling IPositionsService
 /// itself. PositionsCache already runs its own unconditional (not viewer-gated) resync loop, so
 /// this makes zero Kite REST calls of its own; adding a second independent poller here would have
 /// duplicated that work against the same rate-limited endpoint for no benefit. Runs on its own,

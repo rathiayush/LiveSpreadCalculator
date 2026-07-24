@@ -3,7 +3,7 @@ import { Card, Button, Alert, Typography, Space, InputNumber, Divider } from 'an
 import { GlobalOutlined, ThunderboltOutlined, GoldOutlined } from '@ant-design/icons'
 import { api } from '../api'
 
-// One button that builds the futures universe straight from Kite's live instrument master -
+// One button that builds the futures universe straight from the broker's live instrument master -
 // every stock currently listed for NFO futures, not a hand-maintained list: resolves near/far
 // month contracts, writes App_Data/universe_futures.csv, and subscribes the live ticker to every
 // one of them - no per-stock setup needed. Re-run this after every monthly expiry roll, or
@@ -57,7 +57,7 @@ export default function UniversePanel({ onSpreadsChanged }) {
     <Card title={<Space><GlobalOutlined style={{ color: '#4da3ff' }} /> Futures universe builder</Space>} style={{ marginBottom: 16 }}>
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <Typography.Text type="secondary">
-          Fetches every stock Kite currently lists NFO futures for (no manual list to maintain),
+          Fetches every stock the broker currently lists NFO futures for (no manual list to maintain),
           resolves each one's current and next month futures contract, saves the resolved set to
           App_Data/universe_futures.csv, and starts streaming all of them immediately.
         </Typography.Text>
@@ -71,7 +71,7 @@ export default function UniversePanel({ onSpreadsChanged }) {
             addonAfter="symbols"
           />
           <Button type="primary" icon={<ThunderboltOutlined />} onClick={build} loading={busy}>
-            Build universe from Kite
+            Build universe from broker
           </Button>
         </Space>
         {error && <Alert type="error" message={error} showIcon />}

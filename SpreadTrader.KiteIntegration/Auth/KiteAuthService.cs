@@ -1,7 +1,10 @@
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SpreadTrader.Core.Brokers;
 using SpreadTrader.KiteIntegration;
 
 namespace SpreadTrader.KiteIntegration.Auth;
@@ -13,21 +16,67 @@ namespace SpreadTrader.KiteIntegration.Auth;
 /// Note: Zerodha does not officially endorse automating this daily login; this only implements
 /// the token-exchange half, not automated credential entry.
 /// </summary>
-public sealed class KiteAuthService
+public sealed class KiteAuthService : IBrokerAuthService
 {
     private readonly HttpClient _httpClient;
     private readonly KiteOptions _options;
     private readonly KiteSession _session;
+    private readonly ILogger<KiteAuthService> _logger;
 
-    public KiteAuthService(HttpClient httpClient, IOptions<KiteOptions> options, KiteSession session)
+    public KiteAuthService(
+        HttpClient httpClient,
+        IOptions<KiteOptions> options,
+        KiteSession session,
+        ILogger<KiteAuthService> logger)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _session = session;
+        _logger = logger;
+    }
+
+    public string PlatformName => "Zerodha Kite";
+
+    /// <summary>Kite's browser login is the only way to obtain a token, so this is always true - a
+    /// missing api_key is a misconfiguration to surface at login time, not a reason to tell the
+    /// dashboard there is no login flow at all.</summary>
+    public bool SupportsInteractiveLogin => true;
+
+    public Task<string> BuildLoginUrlAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_options.ApiKey))
+            throw new InvalidOperationException("Kite:ApiKey is not configured - cannot build a login URL.");
+
+        return Task.FromResult(BuildLoginUrl());
     }
 
     public string BuildLoginUrl() =>
         $"https://kite.zerodha.com/connect/login?v=3&api_key={Uri.EscapeDataString(_options.ApiKey)}";
+
+    /// <summary>Kite redirects back with <c>request_token</c> plus a <c>status</c> of "success"
+    /// once the user actually completed the login (rather than cancelling out of it).</summary>
+    public async Task<BrokerLoginResult> CompleteLoginAsync(
+        IReadOnlyDictionary<string, string?> callbackQuery,
+        CancellationToken cancellationToken)
+    {
+        callbackQuery.TryGetValue("status", out var status);
+        callbackQuery.TryGetValue("request_token", out var requestToken);
+
+        if (!string.Equals(status, "success", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(requestToken))
+            return new BrokerLoginResult(false, null, null, null, "Kite did not redirect back with a successful request_token.");
+
+        try
+        {
+            var accessToken = await ExchangeRequestTokenAsync(requestToken, cancellationToken);
+            return new BrokerLoginResult(
+                true, accessToken, _session.ClientId, GetTokenExpiryUtc(DateTimeOffset.UtcNow), null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Kite token exchange failed");
+            return new BrokerLoginResult(false, null, null, null, ex.Message);
+        }
+    }
 
     public async Task<string> ExchangeRequestTokenAsync(string requestToken, CancellationToken cancellationToken)
     {
@@ -61,6 +110,46 @@ public sealed class KiteAuthService
 
         _session.AccessToken = accessToken;
         return accessToken;
+    }
+
+    /// <summary>Cheapest possible "is this access token still honored by Kite" check - GET
+    /// /user/profile with the candidate token, the same Authorization header shape every other
+    /// Kite-calling service in this app uses. Only needed on the restore path; every other Kite
+    /// call site gets equivalent verification for free as a side effect of the request it was
+    /// going to make anyway (see KiteAuthFailureHandler).</summary>
+    public async Task<bool> VerifyAccessTokenAsync(string accessToken, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(accessToken)) return false;
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{_options.RestBaseUrl}/user/profile");
+            request.Headers.Add("X-Kite-Version", "3");
+            request.Headers.Authorization = new AuthenticationHeaderValue("token", $"{_options.ApiKey}:{accessToken}");
+
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            using var doc = JsonDocument.Parse(body);
+            return string.Equals(doc.RootElement.GetProperty("status").GetString(), "success", StringComparison.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Kite token verification failed (network error or unexpected response) - treating the candidate token as invalid.");
+            return false;
+        }
+    }
+
+    /// <summary>Kite invalidates every access token at roughly 6:00 AM IST daily, regardless of
+    /// when it was issued. IST is UTC+5:30 with no DST, so 6:00 IST is 00:30 UTC on the same
+    /// calendar date - this returns the next such instant at or after
+    /// <paramref name="issuedAtUtc"/>. Mirrors what the dashboard's token cache used to compute
+    /// client-side, now derived server-side so the cache doesn't have to know one broker's
+    /// schedule.</summary>
+    public DateTimeOffset GetTokenExpiryUtc(DateTimeOffset issuedAtUtc)
+    {
+        // 00:30 UTC on the same calendar date as issuedAtUtc.
+        var todayCutoff = new DateTimeOffset(issuedAtUtc.UtcDateTime.Date, TimeSpan.Zero).AddMinutes(30);
+        return issuedAtUtc < todayCutoff ? todayCutoff : todayCutoff.AddDays(1);
     }
 
     private static string ComputeChecksum(string apiKey, string requestToken, string apiSecret)

@@ -1,5 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
-using SpreadTrader.KiteIntegration.Instruments;
+using SpreadTrader.Core.Brokers;
 
 namespace LiveSpreadCalculator.Controllers;
 
@@ -7,9 +7,9 @@ namespace LiveSpreadCalculator.Controllers;
 [Route("api/instruments")]
 public sealed class InstrumentsController : ControllerBase
 {
-    private readonly InstrumentMasterService _instrumentMaster;
+    private readonly IBrokerInstrumentMaster _instrumentMaster;
 
-    public InstrumentsController(InstrumentMasterService instrumentMaster)
+    public InstrumentsController(IBrokerInstrumentMaster instrumentMaster)
     {
         _instrumentMaster = instrumentMaster;
     }

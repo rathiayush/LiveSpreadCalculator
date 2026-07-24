@@ -1,9 +1,12 @@
-namespace SpreadTrader.KiteIntegration;
+namespace SpreadTrader.Core.Brokers;
 
 /// <summary>
 /// Simple fixed-spacing pacer (not a bursty token bucket) used to keep order placement calls
-/// under Kite's rate limits. Good enough for a basket dispatcher that fires a handful of legs
-/// per trigger; not intended for high-frequency use.
+/// under the broker's rate limits. Good enough for a basket dispatcher that fires a handful of
+/// legs per trigger; not intended for high-frequency use.
+///
+/// The ceiling differs per platform - Kite documents ~3-5 order placements/sec, Dhan allows 25/sec -
+/// so the rate is supplied by whichever broker registration is active rather than baked in here.
 /// </summary>
 public sealed class RateLimiter
 {

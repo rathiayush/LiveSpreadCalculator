@@ -2,9 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
-using SpreadTrader.KiteIntegration.Instruments;
-using SpreadTrader.KiteIntegration.Positions;
-using SpreadTrader.KiteIntegration.Ticker;
+using SpreadTrader.Core.Brokers;
 
 namespace SpreadTrader.Engine.Services;
 
@@ -15,7 +13,7 @@ public readonly record struct PositionAnchor(PositionSnapshot Snapshot, uint Ins
 
 /// <summary>
 /// The ONE place that periodically re-fetches Kite's authoritative position snapshot (GET
-/// /portfolio/positions via KitePositionsService) and keeps it in memory - every other consumer
+/// /portfolio/positions via IPositionsService) and keeps it in memory - every other consumer
 /// that needs "what positions are currently open, with a live-tick-projected PNL/Exit PNL" reads
 /// from here via GetProjected() instead of calling Kite itself. Previously LivePositionsHostedService
 /// owned this resync loop privately; when PnlAlertHostedService needed the same data, the naive
@@ -45,10 +43,10 @@ public sealed class PositionsCache : BackgroundService
     // (which should trigger an immediate resync) isn't sitting unnoticed for up to 20s.
     private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(2);
 
-    private readonly KitePositionsService _positionsService;
-    private readonly KiteTickerClient _tickerClient;
+    private readonly IPositionsService _positionsService;
+    private readonly IMarketDataFeed _tickerClient;
     private readonly ITickStore _tickStore;
-    private readonly InstrumentMasterService _instrumentMaster;
+    private readonly IBrokerInstrumentMaster _instrumentMaster;
     private readonly ILogger<PositionsCache> _logger;
 
     private readonly object _lock = new();
@@ -60,10 +58,10 @@ public sealed class PositionsCache : BackgroundService
     private int _orderUpdatePending;
 
     public PositionsCache(
-        KitePositionsService positionsService,
-        KiteTickerClient tickerClient,
+        IPositionsService positionsService,
+        IMarketDataFeed tickerClient,
         ITickStore tickStore,
-        InstrumentMasterService instrumentMaster,
+        IBrokerInstrumentMaster instrumentMaster,
         ILogger<PositionsCache> logger)
     {
         _positionsService = positionsService;
@@ -181,8 +179,8 @@ public sealed class PositionsCache : BackgroundService
 
         foreach (var position in result.Positions)
         {
-            // Already resolved/cached by KitePositionsService.GetPositionsAsync itself (it calls
-            // InstrumentMasterService.EnsureLoadedAsync before resolving LotSize per position),
+            // Already resolved/cached by IPositionsService.GetPositionsAsync itself (it calls
+            // IBrokerInstrumentMaster.EnsureLoadedAsync before resolving LotSize per position),
             // so this is a plain in-memory lookup, not a fresh network round trip.
             var instrument = _instrumentMaster.Find(position.TradingSymbol, position.Exchange);
             var token = instrument?.InstrumentToken ?? 0;

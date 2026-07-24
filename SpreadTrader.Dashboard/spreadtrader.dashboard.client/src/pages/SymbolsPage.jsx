@@ -4,7 +4,7 @@ import { DatabaseOutlined, SyncOutlined } from '@ant-design/icons'
 import { api } from '../api'
 import UniversePanel from '../components/UniversePanel'
 
-// Setup/refresh page: sync the raw futures symbol list from Kite, then build the tradeable
+// Setup/refresh page: sync the raw futures symbol list from the broker, then build the tradeable
 // calendar-spread universe from it. Nothing here is "live" - re-visit this page whenever you
 // want to pick up newly-added F&O stocks or roll to a new expiry.
 export default function SymbolsPage({ onSpreadsChanged }) {
@@ -25,7 +25,7 @@ export default function SymbolsPage({ onSpreadsChanged }) {
     setSyncStatus(null)
     try {
       const result = await api.fetchAllFutures('NFO')
-      setSyncStatus(`Synced ${result.count} futures contracts from Kite.`)
+      setSyncStatus(`Synced ${result.count} futures contracts from the broker.`)
       loadFutures()
     } catch (err) {
       setSyncStatus(`Sync failed: ${err.message}`)
@@ -41,10 +41,10 @@ export default function SymbolsPage({ onSpreadsChanged }) {
           <Typography.Text type="secondary">
             Fetches every futures contract currently listed on NFO (options and equities are
             excluded) and saves them to a CSV file on the server, so the universe builder below
-            doesn't need to hit Kite every time.
+            doesn't need to hit the broker every time.
           </Typography.Text>
           <Button icon={<SyncOutlined />} onClick={syncSymbols} loading={syncing}>
-            Sync symbols from Kite
+            Sync symbols from broker
           </Button>
           {syncStatus && <Typography.Text type="secondary">{syncStatus}</Typography.Text>}
           {futures.length > 0 && <Typography.Text type="secondary">{futures.length} futures contracts currently loaded.</Typography.Text>}

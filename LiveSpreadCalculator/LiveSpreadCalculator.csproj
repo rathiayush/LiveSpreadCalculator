@@ -31,6 +31,7 @@
   <ItemGroup>
     <ProjectReference Include="..\SpreadTrader.Core\SpreadTrader.Core.csproj" />
     <ProjectReference Include="..\SpreadTrader.KiteIntegration\SpreadTrader.KiteIntegration.csproj" />
+    <ProjectReference Include="..\SpreadTrader.DhanIntegration\SpreadTrader.DhanIntegration.csproj" />
     <ProjectReference Include="..\SpreadTrader.Engine\SpreadTrader.Engine.csproj" />
   </ItemGroup>
 

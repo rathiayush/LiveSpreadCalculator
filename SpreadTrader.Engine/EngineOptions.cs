@@ -25,7 +25,7 @@ public sealed class EngineOptions
     public int RankingIntervalMinutes { get; set; } = 3;
 
     /// <summary>Before punching a basket, fetch Kite's basket margin (with the hedge/spread
-    /// benefit applied - see KiteMarginService.GetBasketMarginAsync) and the account's actual
+    /// benefit applied - see IMarginService.GetBasketMarginAsync) and the account's actual
     /// available margin, and refuse to place any leg at all if available margin is short. This
     /// is a fail-safe against ending up with a partially-filled, unhedged position purely
     /// because the account didn't have enough margin for the second leg - see

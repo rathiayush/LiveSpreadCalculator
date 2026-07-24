@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SpreadTrader.Core.Brokers;
 using SpreadTrader.Core.Models;
 using SpreadTrader.KiteIntegration;
 
@@ -19,7 +20,7 @@ namespace SpreadTrader.KiteIntegration.Ticker;
 /// evaluation and duplicate orders if wired to the same trigger engine. Do not scale this
 /// service out horizontally.
 /// </summary>
-public sealed class KiteTickerClient : IAsyncDisposable
+public sealed class KiteTickerClient : IMarketDataFeed
 {
     private readonly KiteOptions _options;
     private readonly KiteSession _session;

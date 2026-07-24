@@ -7,7 +7,8 @@ this document is the "how and why it's built this way" companion to that.
 ## 1. What this system does
 
 SpreadTrader watches calendar spreads (e.g. a stock's July future vs its August future) on the
-NSE/NFO segment, live, via Zerodha's Kite Connect API. For each configured pair of contracts it:
+NSE/NFO segment, live, through a broker API - either Zerodha Kite Connect or DhanHQ, selected by a
+single configuration flag (see §3.1). For each configured pair of contracts it:
 
 1. Streams tick-by-tick market depth over a WebSocket.
 2. Computes the spread as `FarLeg.BestAsk - NearLeg.BestAsk` (best **ask** price, not last
@@ -15,7 +16,7 @@ NSE/NFO segment, live, via Zerodha's Kite Connect API. For each configured pair 
 3. Ranks every spread by `|spread %|` on a slow timer, so "what's moving the most right now"
    is visible without staring at a wall of numbers.
 4. Evaluates user-defined trigger rules against the live spread value.
-5. When a rule fires, dispatches a basket order (one or two legs) through Kite's order API.
+5. When a rule fires, dispatches a basket order (one or two legs) through the broker's order API.
 6. Pushes all of the above to a React dashboard in real time over SignalR.
 
 Nothing about market data is persisted - it only ever exists in process memory, and is
@@ -26,9 +27,9 @@ exception: they're written to a CSV file so your configuration survives a restar
 
 ```mermaid
 flowchart LR
-    subgraph Kite["Zerodha Kite Connect"]
-        WS[("WebSocket ticker\nwss://ws.kite.trade")]
-        REST[("REST API\napi.kite.trade")]
+    subgraph Broker["Broker API (Kite or Dhan - see §3.1)"]
+        WS[("WebSocket feed\nIMarketDataFeed")]
+        REST[("REST API\nIOrderGateway / IMarginService")]
     end
 
     subgraph Api["LiveSpreadCalculator (ASP.NET Core process)"]
@@ -73,14 +74,88 @@ simplification taken for lack of time - see §8 (Singleton constraint).
 
 | Project | Type | Owns |
 |---|---|---|
-| `SpreadTrader.Core` | class library | Domain models (`Tick`, `SpreadDefinition`, `SpreadSnapshot`, `SpreadRanking`, `TriggerRule`, `TriggerEvent`, order request/result types) and the interfaces everything else codes against (`ITickStore`, `ISpreadDefinitionStore`, `ISpreadSnapshotCache`, `ISpreadRankingStore`, `ITriggerRuleStore`, `ISpreadPublisher`, `ITriggerEventSink`, `IOrderGateway`), plus their default (in-memory / CSV) implementations. No dependency on ASP.NET Core, Kite, or anything external. |
-| `SpreadTrader.KiteIntegration` | class library | Everything that talks to Zerodha: `KiteAuthService` (login URL + request-token exchange), `InstrumentMasterService` (instrument CSV download/cache/futures export), `KiteTickPacketParser` + `KiteTickerClient` (the binary WebSocket protocol, reconnect/resubscribe logic), `KiteOrderGateway` (rate-limited REST order placement). Depends on `SpreadTrader.Core` only. |
-| `SpreadTrader.Engine` | class library | The four hosted (background) services that make up the live pipeline - see §4. Depends on `Core` and `KiteIntegration`. Not a standalone executable - `Program.cs`/`Worker.cs` in this project are empty placeholders; the services are registered directly into the Api project's DI container. |
+| `SpreadTrader.Core` | class library | Domain models (`Tick`, `SpreadDefinition`, `SpreadSnapshot`, `SpreadRanking`, `TriggerRule`, `TriggerEvent`, order request/result types) and the interfaces everything else codes against (`ITickStore`, `ISpreadDefinitionStore`, `ISpreadSnapshotCache`, `ISpreadRankingStore`, `ITriggerRuleStore`, `ISpreadPublisher`, `ITriggerEventSink`, `IOrderGateway`), plus their default (in-memory / CSV) implementations. Also owns the **broker abstraction** in `Brokers/` - see §3.1. No dependency on ASP.NET Core, any broker, or anything external. |
+| `SpreadTrader.KiteIntegration` | class library | Everything that talks to Zerodha: `KiteAuthService` (login URL + request-token exchange), `InstrumentMasterService` (instrument CSV download/cache/futures export), `KiteTickPacketParser` + `KiteTickerClient` (the binary WebSocket protocol, reconnect/resubscribe logic), `KiteOrderGateway` (rate-limited REST order placement), `KiteMarginService`, `KitePositionsService`. Depends on `SpreadTrader.Core` only. |
+| `SpreadTrader.DhanIntegration` | class library | The same seven responsibilities against DhanHQ API v2: `DhanAuthService` (static-token or consent flow), `DhanInstrumentMasterService` (scrip-master CSV), `DhanTickPacketParser` + `DhanMarketFeedClient` (Dhan's binary feed plus its separate order-update socket), `DhanOrderGateway`, `DhanMarginService`, `DhanPositionsService`, and `DhanSymbology` - the one translation table between the app's vocabulary and Dhan's. Depends on `SpreadTrader.Core` only. |
+| `SpreadTrader.Engine` | class library | The four hosted (background) services that make up the live pipeline - see §4. Depends on **`Core` only** - it does not reference either broker project, which is what stops broker-specific behaviour leaking into trading logic (a compile error is the backstop). Not a standalone executable - `Program.cs`/`Worker.cs` in this project are empty placeholders; the services are registered directly into the Api project's DI container. |
 | `LiveSpreadCalculator` | ASP.NET Core Web Api | Hosts everything: wires the entire DI graph (`Program.cs`), exposes REST controllers, hosts the SignalR hub, and is the one process you actually run for the backend. |
 | `SpreadTrader.Dashboard/spreadtrader.dashboard.client` | React (Vite) SPA | The UI - see §9. |
 
-`SpreadTrader.Core` and `SpreadTrader.KiteIntegration` still contain a leftover `Class1.cs`
-stub from project scaffolding - harmless, safe to delete whenever.
+## 3.1 The broker abstraction (Kite / Dhan)
+
+The platform the engine trades through is chosen by **one configuration flag**:
+
+```json
+"Broker": { "Platform": "Kite" }   // or "Dhan"
+```
+
+Everything broker-specific sits behind seven interfaces in `SpreadTrader.Core/Brokers/`:
+
+| Interface | Responsibility | Kite | Dhan |
+|---|---|---|---|
+| `IBrokerSession` | Holds the live access token + account id | `KiteSession` | `DhanSession` |
+| `IBrokerAuthService` | Login URL, callback exchange, token verification, token expiry | `KiteAuthService` | `DhanAuthService` |
+| `IBrokerInstrumentMaster` | Symbol → numeric token resolution, futures enumeration | `InstrumentMasterService` | `DhanInstrumentMasterService` |
+| `IMarketDataFeed` | The live tick socket + order-update signal | `KiteTickerClient` | `DhanMarketFeedClient` |
+| `IOrderGateway` | Order placement/cancellation with fill verification | `KiteOrderGateway` | `DhanOrderGateway` |
+| `IMarginService` | Basket margin + available margin | `KiteMarginService` | `DhanMarginService` |
+| `IPositionsService` | Open positions + PNL | `KitePositionsService` | `DhanPositionsService` |
+
+`LiveSpreadCalculator/Brokers/BrokerRegistration.cs` is the only place the flag is read: it
+registers exactly one platform's implementations against those interfaces. The choice is made once
+at startup, never per call - a half-Kite/half-Dhan process would be genuinely dangerous in
+something that places real orders, and per-call branching would put a platform check in the hot
+tick path for nothing.
+
+**The engine keeps its own vocabulary.** Rather than rewriting every service, CSV column and UI
+label to a third neutral vocabulary, the app keeps the Kite-flavoured terms it was built with -
+exchanges `NFO`/`MCX`, products `NRML`/`MIS`, order statuses `COMPLETE`/`REJECTED`/`OPEN` - and the
+Dhan adapter translates at its own boundary via `DhanSymbology`. So `NRML` becomes Dhan's `MARGIN`,
+`NSE_FNO` becomes `NFO`, `TRADED` becomes `COMPLETE`, and `FUTSTK`/`FUTIDX`/`FUTCOM` all normalize
+to `FUT`. That table is the single reviewable place where a wrong mapping would send a real order
+to the wrong product or contract.
+
+### What actually differs between the two platforms
+
+These are the differences the adapters exist to absorb - worth knowing before touching either:
+
+- **Feed encoding.** Kite is big-endian with int32 prices in paise (÷100); Dhan is little-endian
+  with IEEE-754 float32 prices already in rupees. Kite frames a message as "packet count then
+  length-prefixed packets"; Dhan puts a length in each packet's own header and can pack several
+  into one WebSocket frame.
+- **Subscriptions.** Kite subscribes by a globally unique `instrument_token`. Dhan needs
+  `(exchangeSegment, securityId)` and caps a subscription message at 100 instruments, so
+  `DhanMarketFeedClient` resolves segments from the instrument master and batches. `IMarketDataFeed`
+  still takes plain tokens, so no call site has to carry broker-shaped data.
+- **Order updates.** Kite multiplexes order postbacks onto the ticker socket; Dhan has a separate
+  order-update socket with its own JSON login. `DhanMarketFeedClient` runs both and raises one
+  `OrderUpdateReceived`.
+- **Order addressing.** Kite orders carry a tradingsymbol; Dhan orders carry a `securityId` and no
+  symbol at all. `OrderLegRequest.InstrumentToken` carries the already-resolved token so the Dhan
+  gateway never has to re-resolve a symbol that the engine already pinned down.
+- **Login.** Kite's login URL is a pure string built from the api_key, redirected back with
+  `request_token`. Dhan's requires a server-to-server consent call first and redirects back with
+  `tokenId` - which is why `BuildLoginUrlAsync` is async and `/api/auth/callback` hands the whole
+  query string to the adapter instead of naming a parameter. Dhan also supports skipping the browser
+  flow entirely with a token generated in its web portal, in which case
+  `IBrokerAuthService.SupportsInteractiveLogin` is false and the dashboard hides the login button.
+- **Token lifetime.** Kite invalidates every token at ~6:00 AM IST daily; Dhan's last 24 hours
+  (consent) or up to 30 days (portal). The dashboard's token cache no longer assumes either - the
+  backend returns the expiry with the token.
+- **Margin.** Kite has a basket-margin endpoint and per-segment funds; Dhan has
+  `/margincalculator/multi` and an account-wide `/fundlimit` (so the `segment` argument is ignored
+  on Dhan, without loss of accuracy - the figure is already net of everything blocked).
+
+### Switching platforms
+
+Set `Broker:Platform` (or `Broker__Platform`), supply that broker's credentials, restart, then
+**rebuild the universe once** (`POST /api/universe/build`). The two platforms use different
+tradingsymbols (`RELIANCE26JULFUT` vs `RELIANCE-Jul2026-FUT`) and different instrument ids, so
+spread definitions resolved against one cannot be reused against the other. This is cheap because
+spread definitions are in-memory only and trigger rules are cleared daily anyway (§7).
+
+Dhan additionally requires the deployment's outbound IP to be whitelisted before order placement
+works - data APIs work without it. Same requirement `zerodha-ip-whitelist.txt` documents for Kite.
 
 ## 4. The Engine pipeline
 
@@ -176,7 +251,7 @@ definitions.
 | Spread definitions (which symbols form a spread) | `ISpreadDefinitionStore` (in-memory) | **No** - re-add via the Trigger Config page after a restart |
 | Trigger rules (definitions + arm/fire state) | `ITriggerRuleStore` -> `CsvTriggerRuleStore`, file at `Storage:TriggersCsvPath` (default `App_Data/triggers.csv`) | **Yes** |
 | Futures symbol list | Written to `Storage:FuturesCsvPath` (default `App_Data/futures_instruments.csv`) when you click "Sync symbols from Kite"; also kept in `InstrumentMasterService`'s in-memory cache for 12h | File: yes. In-memory cache: no (re-downloads on demand) |
-| Kite access token | `KiteSession` (in-memory, singleton) | No - and wouldn't help anyway, since Kite invalidates it daily regardless |
+| Broker access token | `IBrokerSession` (in-memory, singleton) | No - but the dashboard caches it client-side and offers it back on the next boot (`POST /api/auth/broker-restore`), so a restart doesn't force a re-login while the token is still valid |
 
 `CsvTriggerRuleStore` is intentionally simple: the *entire* rule set is rewritten to a temp file
 and moved over the real one on every single change. That's correct and safe at the scale of
@@ -188,11 +263,12 @@ the `ITriggerRuleStore` interface.
 
 ## 8. Why the Engine runs as one singleton process
 
-Kite Connect caps a single API key at **3 WebSocket connections**, and `TickIngestionHostedService`
-opens exactly one and holds it for the process lifetime. Running more than one instance of the
-Api would mean:
+Both brokers cap the number of concurrent feed connections per account (Kite: 3 per API key; Dhan
+answers an over-limit connection with disconnect code 805), and `TickIngestionHostedService` opens
+exactly one and holds it for the process lifetime. Running more than one instance of the Api would
+mean:
 
-- Multiple WebSocket connections competing for the same 3-connection cap.
+- Multiple WebSocket connections competing for the same per-account connection cap.
 - The same trigger firing (and the same order being placed) more than once, since each instance
   would independently evaluate the same rules against the same market data.
 
@@ -203,7 +279,8 @@ set replica count > 1).
 
 If this is ever split into its own process (e.g. to let the web/SignalR tier scale
 independently), the seam is already there: the Engine only depends on the abstractions in
-`SpreadTrader.Core` (`ITickStore`, `ISpreadPublisher`, `ITriggerEventSink`, `IOrderGateway`).
+`SpreadTrader.Core` (`ITickStore`, `ISpreadPublisher`, `ITriggerEventSink`, `IOrderGateway`,
+`IMarketDataFeed`, ...) and references no broker project at all.
 Swap the SignalR-backed publisher/sink for a message-queue-backed one and the Engine can move to
 its own container without any changes to the Engine code itself.
 
@@ -238,9 +315,12 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/auth/login-url` | Returns the Kite login URL to redirect the browser to |
-| GET | `/api/auth/status` | `{ isAuthenticated }` - whether a Kite access token is currently held |
-| GET | `/api/auth/callback` | Kite redirects here with `request_token` after login; exchanges it for an access token, then redirects back to `Dashboard:BaseUrl` |
+| GET | `/api/auth/broker` | Which broker is live (`platform`, `supportsInteractiveLogin`) - the dashboard labels itself from this |
+| GET | `/api/auth/login-url` | Returns the broker login URL to redirect the browser to |
+| GET | `/api/auth/status` | `{ isAuthenticated }` - whether a broker access token is currently held |
+| GET | `/api/auth/callback` | The broker redirects here after login (Kite with `request_token`, Dhan with `tokenId`); the whole query is handed to the active adapter, which exchanges it for an access token, then redirects back to `Dashboard:BaseUrl` |
+| GET | `/api/auth/broker-token` | Returns the current broker token + its platform-computed expiry, for the dashboard's restore cache |
+| POST | `/api/auth/broker-restore` | Offers a client-cached token back after a restart; verified live against the broker before it's trusted |
 | GET | `/api/instruments/futures?underlying=&exchange=` | Futures contracts for one underlying, ordered by expiry |
 | POST | `/api/instruments/futures/fetch-all?exchange=` | Downloads/refreshes the instrument master, filters to futures only, saves to the futures CSV |
 | GET | `/api/instruments/futures/all?exchange=` | Lists cached futures contracts (for the symbol picker) |
@@ -254,7 +334,7 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
 | POST | `/api/triggers/{id}/enable` / `/disable` | Toggle a rule (re-persists to CSV) |
 | DELETE | `/api/triggers/{id}` | Remove a rule |
 | GET | `/healthz` | Liveness probe (used by the Dockerfile `HEALTHCHECK`) |
-| WS | `/hubs/spreads` | SignalR hub - pushes `spreadUpdate`, `rankingUpdate`, `triggerFired` |
+| WS | `/hubs/spreads` | SignalR hub - pushes `spreadUpdate`, `rankingUpdate`, `triggerFired`, `brokerAuthInvalidated` |
 
 ## 11. Configuration reference
 
@@ -262,6 +342,7 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
 
 ```json
 {
+  "Broker": { "Platform": "Kite" },        // or "Dhan" - see §3.1
   "Kite": {
     "ApiKey": "",
     "ApiSecret": "",
@@ -269,6 +350,21 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
     "WsUrl": "wss://ws.kite.trade",
     "RestBaseUrl": "https://api.kite.trade",
     "TickerMode": "full"
+  },
+  "Dhan": {                                 // only read when Broker:Platform is "Dhan"
+    "ClientId": "",                         // dhanClientId
+    "AccessToken": "",                      // from the Dhan web portal; omit to use the consent flow
+    "AppId": "",                            // partner app credentials - set both to enable
+    "AppSecret": "",                        // the browser consent login flow
+    "RestBaseUrl": "https://api.dhan.co/v2",
+    "AuthBaseUrl": "https://auth.dhan.co",
+    "WsUrl": "wss://api-feed.dhan.co",
+    "OrderUpdateWsUrl": "wss://api-order-update.dhan.co",
+    // Must be the DETAILED list - the only one carrying tick size, which order pricing needs.
+    "ScripMasterUrl": "https://images.dhan.co/api-data/api-scrip-master-detailed.csv",
+    "TickerMode": "full",                   // only "full" carries market depth
+    "OrdersPerSecond": 15,
+    "AccessTokenValidityDays": 30
   },
   "Engine": {
     "SpreadRecalculationIntervalMs": 300,

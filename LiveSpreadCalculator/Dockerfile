@@ -33,6 +33,7 @@ WORKDIR /src
 COPY ["LiveSpreadCalculator/LiveSpreadCalculator.csproj", "LiveSpreadCalculator/"]
 COPY ["SpreadTrader.Core/SpreadTrader.Core.csproj", "SpreadTrader.Core/"]
 COPY ["SpreadTrader.KiteIntegration/SpreadTrader.KiteIntegration.csproj", "SpreadTrader.KiteIntegration/"]
+COPY ["SpreadTrader.DhanIntegration/SpreadTrader.DhanIntegration.csproj", "SpreadTrader.DhanIntegration/"]
 COPY ["SpreadTrader.Engine/SpreadTrader.Engine.csproj", "SpreadTrader.Engine/"]
 RUN dotnet restore "./LiveSpreadCalculator/LiveSpreadCalculator.csproj"
 COPY . .

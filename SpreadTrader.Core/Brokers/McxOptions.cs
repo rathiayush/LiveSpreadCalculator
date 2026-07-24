@@ -1,4 +1,4 @@
-namespace SpreadTrader.KiteIntegration;
+namespace SpreadTrader.Core.Brokers;
 
 /// <summary>
 /// Feature flag + configuration for the MCX commodity calendar/cross-contract arbitrage add-on
@@ -11,7 +11,7 @@ namespace SpreadTrader.KiteIntegration;
 /// logic.
 ///
 /// MCX differs from NFO in two ways this add-on cares about:
-///  1. It is a separate exchange, so its futures live under a different Kite instrument-master
+///  1. It is a separate exchange, so its futures live under a different broker instrument-master
 ///     endpoint (/instruments/MCX) and its positions come back with exchange == "MCX".
 ///  2. It settles against the "commodity" margin segment, not "equity" - see MarginSegment and
 ///     OrderDispatchHostedService's pre-dispatch margin check.
@@ -25,11 +25,11 @@ public sealed class McxOptions
     /// is false.</summary>
     public bool Enabled { get; set; } = false;
 
-    /// <summary>The Kite exchange code for commodities. Only overridden in the extremely unlikely
-    /// event Kite renames the segment; otherwise leave as "MCX".</summary>
+    /// <summary>The canonical exchange code for commodities. Only overridden in the extremely unlikely
+    /// event the exchange code changes; otherwise leave as "MCX".</summary>
     public string Exchange { get; set; } = "MCX";
 
-    /// <summary>Kite's funds/margin segment MCX contracts settle against. NFO (equity F&amp;O)
+    /// <summary>The funds/margin segment MCX contracts settle against. NFO (equity F&amp;O)
     /// uses "equity"; commodities use "commodity". Used by the pre-dispatch available-margin check
     /// whenever a basket contains at least one MCX leg - see
     /// OrderDispatchHostedService.CheckMarginAsync. https://kite.trade/docs/connect/v3/user/#funds-and-margins</summary>
@@ -59,7 +59,7 @@ public sealed class McxOptions
     public int MaxCrossContractExpiryGapDays { get; set; } = 45;
 
     /// <summary>Every MCX commodity underlying to fetch and (if CalendarSpreads is on) build a
-    /// near/far calendar spread for. These are Kite instrument-master "name" values, not
+    /// near/far calendar spread for. These are instrument-master "name" (underlying) values, not
     /// tradingsymbols. Seeded with the common liquid contracts; trim or extend freely - nothing
     /// here is hard-coded anywhere else.</summary>
     public List<string> Underlyings { get; set; } = new()

@@ -140,14 +140,19 @@ export const api = {
 
   getAuthStatus: () => authFetch('/api/auth/status').then(handle),
   getLoginUrl: () => authFetch('/api/auth/login-url').then(handle),
-  // Fetches the current Kite access token so it can be cached client-side (see kiteAuth.js) -
-  // call right after a successful Kite login (kiteLogin=success).
-  getKiteToken: () => authFetch('/api/auth/kite-token').then(handle),
-  // Offers a client-cached Kite token back to the backend after a restart - only takes effect if
-  // the backend's own in-memory session is currently empty (never overwrites a live one). See
-  // AuthController.RestoreKiteToken / kiteAuth.js.
-  restoreKiteToken: (accessToken) =>
-    authFetch('/api/auth/kite-restore', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ accessToken }) }).then(handle),
+  // Which broker this deployment is wired to (see Broker:Platform) and whether it has a browser
+  // login flow at all - lets the UI label itself for the live platform instead of hardcoding one.
+  // { platform, supportsInteractiveLogin, isAuthenticated }.
+  getBrokerInfo: () => authFetch('/api/auth/broker').then(handle),
+  // Fetches the current broker access token, and the expiry the backend computed for it, so it can
+  // be cached client-side (see brokerAuth.js) - call right after a successful login
+  // (brokerLogin=success). { accessToken, expiresUtc }.
+  getBrokerToken: () => authFetch('/api/auth/broker-token').then(handle),
+  // Offers a client-cached broker token back to the backend after a restart - only takes effect if
+  // the backend's own in-memory session is currently empty (never overwrites a live one), and only
+  // after the backend re-verifies it against the broker. See AuthController.RestoreBrokerToken.
+  restoreBrokerToken: (accessToken) =>
+    authFetch('/api/auth/broker-restore', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ accessToken }) }).then(handle),
 
   // Changes the signed-in user's own password. On success the backend invalidates every existing
   // token for this user (security-stamp bump), so the caller must clear the local session and send
