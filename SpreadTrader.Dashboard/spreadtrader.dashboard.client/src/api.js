@@ -148,6 +148,11 @@ export const api = {
   // be cached client-side (see brokerAuth.js) - call right after a successful login
   // (brokerLogin=success). { accessToken, expiresUtc }.
   getBrokerToken: () => authFetch('/api/auth/broker-token').then(handle),
+  // Installs an access token by hand, verified against the broker before it's accepted. The
+  // recovery path for a platform with no browser login (Dhan on a portal-generated token), where
+  // an expired token would otherwise need a config edit + restart. { isAuthenticated, expiresUtc }.
+  setBrokerToken: (accessToken) =>
+    authFetch('/api/auth/broker-token', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ accessToken }) }).then(handle),
   // Offers a client-cached broker token back to the backend after a restart - only takes effect if
   // the backend's own in-memory session is currently empty (never overwrites a live one), and only
   // after the backend re-verifies it against the broker. See AuthController.RestoreBrokerToken.

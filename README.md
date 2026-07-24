@@ -102,6 +102,10 @@ Override it per-deployment with the `Broker__Platform` environment variable.
    `AccessToken` blank. The dashboard's login button then runs Dhan's browser consent handshake;
    register `<your-host>/api/auth/callback` as the app's redirect URL. These tokens last 24 hours.
 
+If a Dhan token expires while the app is running, you don't need a redeploy: the dashboard shows
+**Enter Dhan token**, which posts a freshly generated token to `POST /api/auth/broker-token`. It's
+verified against Dhan before being accepted and takes effect immediately.
+
 Two things to know before trading on Dhan:
 
 - **Whitelist your outbound IP** with Dhan before order placement will work (data APIs work
