@@ -27,6 +27,11 @@ public sealed class EfSpreadHistoryStore : ISpreadHistoryStore
     private readonly string _connectionString;
     private readonly ILogger<EfSpreadHistoryStore> _logger;
 
+    // Guards the one-time "create the table if it doesn't exist" DDL so it runs at most once per
+    // process, whether triggered from startup InitializeAsync or lazily from the first insert.
+    private readonly SemaphoreSlim _ensureLock = new(1, 1);
+    private bool _tableEnsured;
+
     public EfSpreadHistoryStore(
         IDbContextFactory<SpreadHistoryDbContext> contextFactory,
         string connectionString,
@@ -65,29 +70,61 @@ END";
 
     public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
-        // 1) Ensure the database exists (connect to master; CREATE DATABASE can't be parameterized,
-        //    so the name is bracket-quoted with any embedded ']' doubled to prevent injection).
         var builder = new SqlConnectionStringBuilder(_connectionString);
         var databaseName = string.IsNullOrWhiteSpace(builder.InitialCatalog)
             ? "SpreadTraderHistory"
             : builder.InitialCatalog;
-        var masterBuilder = new SqlConnectionStringBuilder(_connectionString) { InitialCatalog = "master" };
-        var safeDbName = "[" + databaseName.Replace("]", "]]") + "]";
 
-        await using (var master = new SqlConnection(masterBuilder.ConnectionString))
+        // 1) BEST-EFFORT: create the database if it's missing. Wrapped so a failure here NEVER
+        //    blocks the table creation below. On Azure SQL the login usually can't open 'master' or
+        //    run CREATE DATABASE (an elevated op) - the database is created in the portal instead.
+        //    Previously that permission error threw and aborted InitializeAsync before CREATE TABLE
+        //    ran, which is exactly why the deployed table was never created.
+        try
         {
+            var masterBuilder = new SqlConnectionStringBuilder(_connectionString) { InitialCatalog = "master" };
+            var safeDbName = "[" + databaseName.Replace("]", "]]") + "]";
+            await using var master = new SqlConnection(masterBuilder.ConnectionString);
             await master.OpenAsync(cancellationToken);
             await using var createDb = master.CreateCommand();
             createDb.CommandText = $"IF DB_ID(@db) IS NULL EXEC('CREATE DATABASE {safeDbName}');";
             createDb.Parameters.AddWithValue("@db", databaseName);
             await createDb.ExecuteNonQueryAsync(cancellationToken);
         }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not ensure database '{Database}' exists via master (the login may lack access " +
+                "or the DB was created out-of-band). Continuing to table creation.", databaseName);
+        }
 
-        // 2) Ensure the table (+ indexes) exist. Idempotent - no-op when already present.
-        await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
-        await context.Database.ExecuteSqlRawAsync(CreateTableSql, cancellationToken);
-
+        // 2) Ensure the table (+ indexes) exist - the step that actually matters, runs regardless of
+        //    whether the master step above succeeded. Called AT STARTUP (see Program.cs, writer
+        //    instance only) so a missing table is caught and created before the first capture runs.
+        await EnsureTableAsync(cancellationToken);
         _logger.LogInformation("SpreadHistory store ready (database {Database}).", databaseName);
+    }
+
+    /// <summary>Creates dbo.SpreadHistory (+ indexes) if it doesn't already exist. Idempotent and
+    /// guarded so the DDL runs at most once per process. Called from InitializeAsync at startup, and
+    /// again defensively from AddBatchAsync before every insert, so captures still self-heal even if
+    /// startup init didn't run on this instance or failed partway through.</summary>
+    private async Task EnsureTableAsync(CancellationToken cancellationToken)
+    {
+        if (_tableEnsured) return;
+        await _ensureLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_tableEnsured) return;
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            await context.Database.ExecuteSqlRawAsync(CreateTableSql, cancellationToken);
+            _tableEnsured = true;
+            _logger.LogInformation("Ensured dbo.SpreadHistory table exists.");
+        }
+        finally
+        {
+            _ensureLock.Release();
+        }
     }
 
     public async Task AddBatchAsync(IReadOnlyList<SpreadHistoryPoint> points, CancellationToken cancellationToken = default)
@@ -95,6 +132,11 @@ END";
         if (points.Count == 0) return;
 
         var rows = points.Select(ToRow).ToList();
+
+        // Safety net: guarantee the table exists before writing, in case startup InitializeAsync
+        // didn't run on this instance or failed partway - so the first capture self-heals instead of
+        // failing with "Invalid object name 'SpreadHistory'".
+        await EnsureTableAsync(cancellationToken);
 
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
         await context.BulkInsertAsync(rows, cancellationToken: cancellationToken);
