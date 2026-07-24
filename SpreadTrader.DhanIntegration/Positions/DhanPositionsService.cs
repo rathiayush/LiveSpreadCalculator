@@ -32,6 +32,7 @@ public sealed class DhanPositionsService : IPositionsService
     private readonly DhanApiClient _api;
     private readonly IBrokerInstrumentMaster _instrumentMaster;
     private readonly ITickStore _tickStore;
+    private readonly DhanSegmentRegistry _segments;
     private readonly ILogger<DhanPositionsService> _logger;
     private readonly HashSet<string> _trackedExchanges;
 
@@ -39,12 +40,14 @@ public sealed class DhanPositionsService : IPositionsService
         DhanApiClient api,
         IBrokerInstrumentMaster instrumentMaster,
         ITickStore tickStore,
+        DhanSegmentRegistry segments,
         ILogger<DhanPositionsService> logger,
         McxOptions? mcx = null)
     {
         _api = api;
         _instrumentMaster = instrumentMaster;
         _tickStore = tickStore;
+        _segments = segments;
         _logger = logger;
 
         // NFO is always tracked; MCX only when the commodity add-on is enabled - same rule as the
@@ -87,7 +90,8 @@ public sealed class DhanPositionsService : IPositionsService
             var quantity = ReadInt(p, "netQty");
             if (quantity == 0) continue; // fully squared off already - nothing to show/act on
 
-            var exchange = DhanSymbology.ToCanonicalExchange(ReadString(p, "exchangeSegment") ?? "");
+            var dhanSegment = ReadString(p, "exchangeSegment") ?? "";
+            var exchange = DhanSymbology.ToCanonicalExchange(dhanSegment);
             if (!_trackedExchanges.Contains(exchange)) continue;
 
             var tradingSymbol = ReadString(p, "tradingSymbol") ?? "";
@@ -106,6 +110,14 @@ public sealed class DhanPositionsService : IPositionsService
             var instrument = _instrumentMaster.Find(tradingSymbol, exchange);
             var token = ReadUInt(p, "securityId") ?? instrument?.InstrumentToken ?? 0;
             var lotSize = instrument?.LotSize ?? 0;
+
+            // Teach the feed client this token's segment. Dhan subscriptions are keyed by
+            // (segment, securityId) and the feed otherwise resolves the segment from the
+            // futures-only instrument master - so without this, an open position that isn't a
+            // future in that master (an option leg placed by hand, say) could never be subscribed,
+            // and its row would sit with no live price, exit price or exit PNL while the same
+            // position streams fine on Kite. See DhanSegmentRegistry.
+            _segments.Remember(token, dhanSegment);
 
             Tick? tick = token != 0 && _tickStore.TryGet(token, out var t) ? t : null;
             var lastPrice = tick?.LastPrice ?? 0m;
