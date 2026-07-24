@@ -80,7 +80,6 @@ simplification taken for lack of time - see §8 (Singleton constraint).
 | `SpreadTrader.Engine` | class library | The four hosted (background) services that make up the live pipeline - see §4. Depends on **`Core` only** - it does not reference either broker project, which is what stops broker-specific behaviour leaking into trading logic (a compile error is the backstop). Not a standalone executable - `Program.cs`/`Worker.cs` in this project are empty placeholders; the services are registered directly into the Api project's DI container. |
 | `LiveSpreadCalculator` | ASP.NET Core Web Api | Hosts everything: wires the entire DI graph (`Program.cs`), exposes REST controllers, hosts the SignalR hub, and is the one process you actually run for the backend. |
 | `SpreadTrader.Dashboard/spreadtrader.dashboard.client` | React (Vite) SPA | The UI - see §9. |
-| `SpreadTrader.Tests` | xunit test project | Byte-level tests for Dhan's binary market-data protocol (`DhanTickPacketParserTests`) and the Kite↔Dhan translation table (`DhanSymbologyTests`). These cover the code that cannot be verified by reading a response body: a wrong endianness, depth offset or price scale decodes into plausible-looking but wrong prices that would feed spread evaluation and could fire a real order at an unintended level. |
 
 ## 3.1 The broker abstraction (Kite / Dhan)
 
