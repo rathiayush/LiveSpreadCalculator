@@ -156,8 +156,10 @@ burn the rate limit and still lag the market:
    The only other fetch is the startup one (retried until the first snapshot lands, so completing
    the broker login populates the cache without waiting for a trade). Zero requests at idle.
    Accepted trade-off: a lost order-update message (socket mid-reconnect exactly when a trade
-   placed in the broker's own app fills) stays invisible until the next order event - the
-   Positions page's manual refresh, which calls the broker directly, is the escape hatch.
+   placed in the broker's own app fills) stays invisible until the next order event. The escape
+   hatch is the Positions page's manual refresh: `GET /api/positions` goes through
+   `PositionsCache.RefreshAsync`, so its one broker call both serves the response and re-anchors
+   the cache - healing the PNL alerts and the live push too, not just the page.
 4. **PNL is then computed locally on every tick** by `PositionsCache.GetProjected()`, so the
    dashboard updates continuously between REST fetches.
 
