@@ -73,6 +73,7 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
     private readonly IBrokerInstrumentMaster _instrumentMaster;
+    private readonly DhanSegmentRegistry _segmentRegistry;
     private readonly DhanAuthFailureHandler _authFailureHandler;
     private readonly ILogger<DhanMarketFeedClient> _logger;
 
@@ -95,12 +96,14 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         IOptions<DhanOptions> options,
         DhanSession session,
         IBrokerInstrumentMaster instrumentMaster,
+        DhanSegmentRegistry segmentRegistry,
         DhanAuthFailureHandler authFailureHandler,
         ILogger<DhanMarketFeedClient> logger)
     {
         _options = options.Value;
         _session = session;
         _instrumentMaster = instrumentMaster;
+        _segmentRegistry = segmentRegistry;
         _authFailureHandler = authFailureHandler;
         _logger = logger;
     }
@@ -303,7 +306,7 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
 
         foreach (var token in tokens)
         {
-            if (segments.TryGetValue(token, out var segment))
+            if (segments.TryGetValue(token, out var segment) || _segmentRegistry.TryGet(token, out segment))
                 entries.Add(new SubscriptionEntry(segment, token.ToString()));
             else
                 unresolved.Add(token);
@@ -320,6 +323,11 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         return entries;
     }
 
+    /// <summary>Token -> Dhan exchange segment for everything currently subscribable. The futures
+    /// instrument master answers for every spread leg; DhanSegmentRegistry fills in tokens it
+    /// cannot know about - notably an open position in something that is not a future in that
+    /// master, which PositionsCache still anchors a subscription for. See DhanSegmentRegistry for
+    /// why the master alone is not enough.</summary>
     private Dictionary<uint, string> BuildSegmentLookup()
     {
         var lookup = new Dictionary<uint, string>();

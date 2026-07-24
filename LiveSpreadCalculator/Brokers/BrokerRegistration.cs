@@ -154,6 +154,11 @@ public static class BrokerRegistration
 
         services.AddSingleton(new RateLimiter(maxOperationsPerSecond: dhanOptions.OrdersPerSecond));
 
+        // Lets the positions service teach the feed client which segment a securityId lives in, so
+        // an open position that isn't a future in the (futures-only) instrument master can still be
+        // subscribed for live price/exit PNL - see DhanSegmentRegistry.
+        services.AddSingleton<DhanSegmentRegistry>();
+
         // Detects a dead Dhan token (HTTP 401 / DH-901 on REST, disconnect code 807 on the feed) at
         // every call site, clears the session, and pushes the dashboard - see its doc comment.
         services.AddSingleton<DhanAuthFailureHandler>();
@@ -199,6 +204,7 @@ public static class BrokerRegistration
             sp.GetRequiredService<DhanApiClient>(),
             sp.GetRequiredService<IBrokerInstrumentMaster>(),
             sp.GetRequiredService<ITickStore>(),
+            sp.GetRequiredService<DhanSegmentRegistry>(),
             sp.GetRequiredService<ILogger<DhanPositionsService>>(),
             mcxOptions));
         services.AddSingleton<IPositionsService>(sp => sp.GetRequiredService<DhanPositionsService>());
