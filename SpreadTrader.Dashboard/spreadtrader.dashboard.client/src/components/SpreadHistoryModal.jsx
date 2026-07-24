@@ -1,15 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Modal, Spin, Empty, Alert, Segmented, Space, Typography } from 'antd'
-import {
-  ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid,
-  Tooltip, Legend, ReferenceLine,
-} from 'recharts'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Modal, Spin, Empty, Alert, Segmented, Space, Typography, Button } from 'antd'
+import { ZoomOutOutlined } from '@ant-design/icons'
+import { createChart, LineSeries, LineStyle, CrosshairMode } from 'lightweight-charts'
 import { api } from '../api'
 
 // "Live Spread" history popup: datetime (x) vs spread value (y), plotted from the hourly snapshots
 // persisted server-side (see EfSpreadHistoryStore / GET /api/spreads/{id}/history). Rendered with
-// Recharts. Both executable directions are stored each capture, so this can show the Buy spread
-// line, the Sell spread line, or both.
+// TradingView's lightweight-charts, which gives mouse-wheel/pinch zoom and drag-to-pan over the
+// full series out of the box. Both executable directions are stored each capture, so this can show
+// the Buy spread line, the Sell spread line, or both.
 //
 // Fully responsive: the modal width tracks the viewport (near full-width on phones), the chart
 // height and axis density shrink on small screens, and the header controls wrap - so it's usable on
@@ -18,6 +17,8 @@ import { api } from '../api'
 const BUY_COLOR = '#3ddc84'
 const SELL_COLOR = '#ff5c5c'
 const AXIS_COLOR = '#9aa4b2'
+const GRID_COLOR = '#ffffff14'
+const BORDER_COLOR = '#ffffff22'
 
 // Tracks the viewport width so the modal/chart can size to the device (updates on rotate/resize).
 function useViewportWidth() {
@@ -39,6 +40,12 @@ export default function SpreadHistoryModal({ spread, open, onClose }) {
   const [error, setError] = useState(null)
   const [points, setPoints] = useState([])
   const [series, setSeries] = useState('Both')
+  const [hover, setHover] = useState(null)
+
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const buySeriesRef = useRef(null)
+  const sellSeriesRef = useRef(null)
 
   const vw = useViewportWidth()
   const isMobile = vw < 576
@@ -63,21 +70,87 @@ export default function SpreadHistoryModal({ spread, open, onClose }) {
     return () => { cancelled = true }
   }, [open, spreadId])
 
-  // Recharts wants a flat data array; keep a numeric timestamp for correct time spacing on the axis.
-  const data = useMemo(() => points.map((p) => ({
-    t: new Date(p.capturedAt).getTime(),
-    buy: p.buySpreadValue,
-    sell: p.sellSpreadValue,
-  })), [points])
+  // lightweight-charts wants unix seconds and strictly ascending, de-duplicated time points.
+  const data = useMemo(() => {
+    const byTime = new Map()
+    for (const p of points) {
+      const time = Math.floor(new Date(p.capturedAt).getTime() / 1000)
+      byTime.set(time, { time, buy: p.buySpreadValue, sell: p.sellSpreadValue })
+    }
+    return [...byTime.values()].sort((a, b) => a.time - b.time)
+  }, [points])
 
   const showBuy = series === 'Both' || series === 'Buy'
   const showSell = series === 'Both' || series === 'Sell'
 
-  // When there are many snapshots, widen the chart so points don't cram together and let the
-  // container scroll horizontally instead. When there are few, it just fills the modal (no scroll).
-  const pxPerPoint = isMobile ? 22 : 30
-  const minChartWidth = Math.max(280, modalWidth - (isMobile ? 24 : 48))
-  const chartPixelWidth = Math.max(minChartWidth, data.length * pxPerPoint)
+  // Create the chart once per dataset and tear it down on unmount/refresh.
+  useEffect(() => {
+    if (!containerRef.current || data.length === 0) return
+
+    const chart = createChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height: chartHeight,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: isMobile ? 9 : 11 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false },
+      crosshair: { mode: CrosshairMode.Normal },
+      handleScroll: true,
+      handleScale: true,
+    })
+    chartRef.current = chart
+
+    const buySeries = chart.addSeries(LineSeries, {
+      color: BUY_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, visible: showBuy,
+    })
+    const sellSeries = chart.addSeries(LineSeries, {
+      color: SELL_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, visible: showSell,
+    })
+    buySeriesRef.current = buySeries
+    sellSeriesRef.current = sellSeries
+
+    buySeries.createPriceLine({
+      price: 0, color: '#ffffff40', lineStyle: LineStyle.Dashed, lineWidth: 1, axisLabelVisible: false,
+    })
+
+    buySeries.setData(data.map((d) => ({ time: d.time, value: d.buy })))
+    sellSeries.setData(data.map((d) => ({ time: d.time, value: d.sell })))
+    chart.timeScale().fitContent()
+
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.time || !param.point) { setHover(null); return }
+      setHover({
+        time: param.time,
+        buy: param.seriesData.get(buySeries)?.value,
+        sell: param.seriesData.get(sellSeries)?.value,
+      })
+    })
+
+    const onResize = () => {
+      if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth })
+    }
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      window.removeEventListener('resize', onResize)
+      chart.remove()
+      chartRef.current = null
+      buySeriesRef.current = null
+      sellSeriesRef.current = null
+      setHover(null)
+    }
+    // Series toggling is handled by the effect below without recreating the chart; only rebuild
+    // when the underlying dataset or sizing actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, chartHeight, isMobile])
+
+  // Toggle Buy/Sell visibility in place, no need to rebuild the chart.
+  useEffect(() => {
+    buySeriesRef.current?.applyOptions({ visible: showBuy })
+    sellSeriesRef.current?.applyOptions({ visible: showSell })
+  }, [showBuy, showSell])
+
+  const resetZoom = () => chartRef.current?.timeScale().fitContent()
 
   return (
     <Modal
@@ -99,63 +172,61 @@ export default function SpreadHistoryModal({ spread, open, onClose }) {
         <Empty description="No history captured yet. Snapshots are recorded hourly during market hours." />
       ) : (
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Space wrap size={[8, 8]}>
-            <Segmented value={series} onChange={setSeries} options={['Both', 'Buy', 'Sell']} size={isMobile ? 'small' : 'middle'} />
-            <Typography.Text type="secondary">{points.length} snapshot{points.length === 1 ? '' : 's'}</Typography.Text>
+          <Space wrap size={[8, 8]} style={{ width: '100%', justifyContent: 'space-between' }}>
+            <Space wrap size={[8, 8]}>
+              <Segmented value={series} onChange={setSeries} options={['Both', 'Buy', 'Sell']} size={isMobile ? 'small' : 'middle'} />
+              <Typography.Text type="secondary">{points.length} snapshot{points.length === 1 ? '' : 's'}</Typography.Text>
+            </Space>
+            <Button size="small" icon={<ZoomOutOutlined />} onClick={resetZoom}>Reset zoom</Button>
           </Space>
 
-          <div style={{ width: '100%', height: chartHeight, overflowX: 'auto', overflowY: 'hidden' }}>
-            <div style={{ width: chartPixelWidth, height: '100%' }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={data} margin={{ top: 10, right: isMobile ? 8 : 20, bottom: 8, left: isMobile ? -8 : 4 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#ffffff14" />
-                <XAxis
-                  dataKey="t"
-                  type="number"
-                  scale="time"
-                  domain={['dataMin', 'dataMax']}
-                  tickFormatter={(t) => formatAxisTime(t, isMobile)}
-                  tick={{ fill: AXIS_COLOR, fontSize: isMobile ? 9 : 11 }}
-                  stroke={AXIS_COLOR}
-                  minTickGap={isMobile ? 56 : 40}
-                />
-                <YAxis
-                  tickFormatter={(v) => Number(v).toFixed(isMobile ? 1 : 2)}
-                  tick={{ fill: AXIS_COLOR, fontSize: isMobile ? 9 : 11 }}
-                  stroke={AXIS_COLOR}
-                  width={isMobile ? 40 : 56}
-                  domain={['auto', 'auto']}
-                />
-                <ReferenceLine y={0} stroke="#ffffff40" strokeDasharray="4 4" />
-                <Tooltip
-                  contentStyle={{ background: '#1f2430', border: '1px solid #ffffff22', borderRadius: 6, fontSize: 12 }}
-                  labelStyle={{ color: '#c9d1d9' }}
-                  labelFormatter={(t) => new Date(t).toLocaleString()}
-                  formatter={(value, name) => [Number(value).toFixed(2), name === 'buy' ? 'Buy spread' : 'Sell spread']}
-                />
-                <Legend
-                  formatter={(v) => (v === 'buy'
-                    ? (isMobile ? 'Buy' : 'Buy spread (BuyNear / SellFar)')
-                    : (isMobile ? 'Sell' : 'Sell spread (SellNear / BuyFar)'))}
-                  wrapperStyle={{ fontSize: 12 }}
-                />
-                {showBuy && <Line type="monotone" dataKey="buy" stroke={BUY_COLOR} strokeWidth={1.75} dot={{ r: isMobile ? 1.5 : 2 }} activeDot={{ r: 4 }} isAnimationActive={false} />}
-                {showSell && <Line type="monotone" dataKey="sell" stroke={SELL_COLOR} strokeWidth={1.75} dot={{ r: isMobile ? 1.5 : 2 }} activeDot={{ r: 4 }} isAnimationActive={false} />}
-              </LineChart>
-            </ResponsiveContainer>
-            </div>
-          </div>
+          <Legend showBuy={showBuy} showSell={showSell} isMobile={isMobile} />
+
+          <div ref={containerRef} style={{ width: '100%', height: chartHeight }} />
+
+          <HoverReadout hover={hover} showBuy={showBuy} showSell={showSell} />
+
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
+            Scroll or pinch to zoom, drag to pan.
+          </Typography.Text>
         </Space>
       )}
     </Modal>
   )
 }
 
-function formatAxisTime(t, isMobile) {
-  const d = new Date(t)
-  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-  const dm = `${d.getDate()}/${d.getMonth() + 1}`
-  // Single-line label (SVG axis ticks don't wrap). Fewer ticks on mobile via minTickGap keeps it
-  // readable; show only the time at midday-ish ticks would need custom logic, so keep D/M HH:mm.
-  return isMobile ? `${dm} ${hm}` : `${dm} ${hm}`
+function Legend({ showBuy, showSell, isMobile }) {
+  return (
+    <Space size={16} wrap>
+      {showBuy && (
+        <Space size={6}>
+          <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: BUY_COLOR }} />
+          <Typography.Text style={{ fontSize: 12 }}>{isMobile ? 'Buy' : 'Buy spread (BuyNear / SellFar)'}</Typography.Text>
+        </Space>
+      )}
+      {showSell && (
+        <Space size={6}>
+          <span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: SELL_COLOR }} />
+          <Typography.Text style={{ fontSize: 12 }}>{isMobile ? 'Sell' : 'Sell spread (SellNear / BuyFar)'}</Typography.Text>
+        </Space>
+      )}
+    </Space>
+  )
+}
+
+function HoverReadout({ hover, showBuy, showSell }) {
+  if (!hover) {
+    return <Typography.Text type="secondary" style={{ fontSize: 12, opacity: 0.6 }}>Hover the chart for values</Typography.Text>
+  }
+  return (
+    <Space size={16} wrap>
+      <Typography.Text style={{ fontSize: 12 }}>{new Date(hover.time * 1000).toLocaleString()}</Typography.Text>
+      {showBuy && hover.buy != null && (
+        <Typography.Text style={{ fontSize: 12, color: BUY_COLOR }}>Buy: {Number(hover.buy).toFixed(2)}</Typography.Text>
+      )}
+      {showSell && hover.sell != null && (
+        <Typography.Text style={{ fontSize: 12, color: SELL_COLOR }}>Sell: {Number(hover.sell).toFixed(2)}</Typography.Text>
+      )}
+    </Space>
+  )
 }
