@@ -73,7 +73,7 @@ public sealed class MarketProtectionService
         if (!_tickStore.TryGet(instrumentToken, out var tick))
         {
             _logger.LogWarning(
-                "{Context}: no tick data yet for {Symbol} - sending as MARKET anyway, Kite will likely reject it (market protection requires a price reference).",
+                "{Context}: no tick data yet for {Symbol} - sending as MARKET anyway, the broker will likely reject it (market protection requires a price reference).",
                 context, leg.TradingSymbol);
             return leg;
         }
@@ -83,7 +83,7 @@ public sealed class MarketProtectionService
         if (!bidAskAvailable)
         {
             _logger.LogWarning(
-                "{Context}: no live bid/ask depth yet for {Symbol} - sending as MARKET anyway rather than pricing off LTP, Kite will likely reject it (market protection requires a real depth reference).",
+                "{Context}: no live bid/ask depth yet for {Symbol} - sending as MARKET anyway rather than pricing off LTP, the broker will likely reject it (market protection requires a real depth reference).",
                 context, leg.TradingSymbol);
             return leg;
         }

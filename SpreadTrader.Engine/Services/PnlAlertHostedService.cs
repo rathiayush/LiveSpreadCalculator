@@ -89,7 +89,7 @@ public sealed class PnlAlertHostedService : BackgroundService
         if (positions.Count == 0)
         {
             _logger.LogWarning(
-                "PnlAlertHostedService: PositionsCache has zero positions - either nothing is open, the Kite " +
+                "PnlAlertHostedService: PositionsCache has zero positions - either nothing is open, the broker " +
                 "session/access token isn't valid, or the cache hasn't completed its first resync yet. No alert " +
                 "can evaluate until this is non-empty.");
             return;
