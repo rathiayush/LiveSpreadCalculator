@@ -103,7 +103,11 @@ public sealed class DhanPositionsService : IPositionsService
                            ?? (quantity > 0 ? ReadDecimal(p, "buyAvg") : ReadDecimal(p, "sellAvg"))
                            ?? 0m;
 
-            var pnl = (ReadDecimal(p, "realizedProfit") ?? 0m) + (ReadDecimal(p, "unrealizedProfit") ?? 0m);
+            // Kept separate as well as summed: the realised half is what PositionsCache adds live,
+            // tick-driven unrealised PNL onto, since Dhan gives us no mark price to measure the
+            // combined figure's movement from - see PositionSnapshot.RealizedPnl.
+            var realizedPnl = ReadDecimal(p, "realizedProfit") ?? 0m;
+            var pnl = realizedPnl + (ReadDecimal(p, "unrealizedProfit") ?? 0m);
 
             // Prefer the securityId Dhan reports over a symbol lookup - it is exactly the tick-store
             // key, and needs no symbol-spelling assumptions.
@@ -127,7 +131,8 @@ public sealed class DhanPositionsService : IPositionsService
                 tradingSymbol, exchange, product, quantity, avgPrice, lastPrice, pnl, lotSize, exitPrice, exitPnl,
                 // Dhan reports securityId on the position row itself, so this needs no symbol-spelling
                 // assumption at all - see PositionSnapshot.InstrumentToken.
-                token));
+                token,
+                realizedPnl));
         }
 
         return new PositionsResult(true, positions, null);

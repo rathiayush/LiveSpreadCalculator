@@ -100,13 +100,51 @@ public sealed class PositionsCache : BackgroundService
             if (hasTick && tick.LastPrice > 0)
                 currentLtp = tick.LastPrice;
 
-            var projectedPnl = snapshot.Pnl + snapshot.Quantity * (currentLtp - snapshot.LastPrice);
+            var projectedPnl = ProjectPnl(snapshot, currentLtp);
             var (exitPrice, exitPnl) = PositionExitPricing.Compute(snapshot.Quantity, snapshot.AveragePrice, hasTick ? tick : null);
 
             projected.Add(snapshot with { LastPrice = currentLtp, Pnl = projectedPnl, ExitPrice = exitPrice, ExitPnl = exitPnl });
         }
 
         return projected;
+    }
+
+    /// <summary>
+    /// Live PNL for one position at <paramref name="currentLtp"/>. Two ways to get there, and which
+    /// one is available depends on what the broker actually told us.
+    ///
+    /// FROM FIRST PRINCIPLES (preferred - used when the broker separates realised PNL, i.e. Dhan):
+    ///     realised + quantity * (live price - average price)
+    /// Everything on the right is either fixed for the life of the position or comes straight off
+    /// the tick stream, so this needs no reference price from the broker at all and is exact at
+    /// every tick.
+    ///
+    /// BY DELTA (used when the broker reports one combined figure, i.e. Kite):
+    ///     broker's PNL at snapshot + quantity * (live price - price the snapshot was struck at)
+    /// This is only valid while <c>LastPrice</c> really is the price the broker computed that PNL
+    /// at. Kite returns exactly that on the position row, so it holds there.
+    ///
+    /// It did NOT hold on Dhan, which returns no last-traded-price on a position at all - the
+    /// adapter fills LastPrice from the local tick store, leaving it at 0 for any position whose
+    /// first tick hasn't arrived yet. A 0 baseline turns the delta term into
+    /// quantity * live price, i.e. it adds the position's ENTIRE NOTIONAL to PNL: ~7.5 lakh of
+    /// phantom profit on 500 RELIANCE, shown on the Positions and PNL page and fed to
+    /// PnlAlertHostedService, which fires real alerts off these numbers. That window opened on
+    /// every restart and every newly-opened position, and lasted until the next resync.
+    ///
+    /// Hence the explicit guard below: with no usable baseline the honest answer is the broker's
+    /// own snapshot figure, not a projection off a price we never had.
+    /// </summary>
+    private static decimal ProjectPnl(PositionSnapshot snapshot, decimal currentLtp)
+    {
+        if (currentLtp <= 0) return snapshot.Pnl;
+
+        if (snapshot.RealizedPnl is { } realized && snapshot.AveragePrice > 0)
+            return realized + snapshot.Quantity * (currentLtp - snapshot.AveragePrice);
+
+        if (snapshot.LastPrice <= 0) return snapshot.Pnl;
+
+        return snapshot.Pnl + snapshot.Quantity * (currentLtp - snapshot.LastPrice);
     }
 
     /// <summary>Instrument tokens for every currently-anchored (open) position - read by

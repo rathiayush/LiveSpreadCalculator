@@ -52,7 +52,18 @@ public sealed record PositionSnapshot(
     /// master's, and a 0 token means the position gets no live tick subscription (so no live PNL or
     /// exit price) and cannot be squared off on a broker that addresses orders by id. 0 only when
     /// the producing service genuinely could not resolve it.</summary>
-    uint InstrumentToken = 0);
+    uint InstrumentToken = 0,
+    /// <summary>Just the BOOKED part of <see cref="Pnl"/> - profit already crystallised by closing
+    /// quantity earlier in the session, which no longer moves with price. Null when the broker
+    /// doesn't separate it (Kite reports one combined <c>pnl</c>); set when it does (Dhan returns
+    /// <c>realizedProfit</c> and <c>unrealizedProfit</c> as separate fields).
+    ///
+    /// This is what lets PositionsCache.GetProjected recompute live PNL from first principles -
+    /// realised, plus quantity times (live price - average price) - instead of adjusting the
+    /// broker's combined figure by how far price has moved since the snapshot. That matters on
+    /// Dhan specifically: the delta approach needs the price the broker's PNL was struck at, and
+    /// Dhan's positions response carries no last-traded-price field at all to supply it.</summary>
+    decimal? RealizedPnl = null);
 
 /// <summary>Result of KitePositionsService.GetPositionsAsync - mirrors AvailableMarginResult's
 /// Success/ErrorMessage shape used elsewhere for Kite calls.</summary>
