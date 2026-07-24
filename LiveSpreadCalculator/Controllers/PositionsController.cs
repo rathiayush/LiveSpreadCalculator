@@ -4,8 +4,7 @@ using LiveSpreadCalculator.Contracts;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 using SpreadTrader.Engine.Services;
-using SpreadTrader.KiteIntegration.Instruments;
-using SpreadTrader.KiteIntegration.Positions;
+using SpreadTrader.Core.Brokers;
 
 namespace LiveSpreadCalculator.Controllers;
 
@@ -18,18 +17,18 @@ namespace LiveSpreadCalculator.Controllers;
 [Route("api/positions")]
 public sealed class PositionsController : ControllerBase
 {
-    private readonly KitePositionsService _positionsService;
+    private readonly IPositionsService _positionsService;
     private readonly IOrderGateway _orderGateway;
     private readonly MarketProtectionService _marketProtection;
-    private readonly InstrumentMasterService _instrumentMaster;
+    private readonly IBrokerInstrumentMaster _instrumentMaster;
     private readonly IOrderExecutionSink _executionSink;
     private readonly ILogger<PositionsController> _logger;
 
     public PositionsController(
-        KitePositionsService positionsService,
+        IPositionsService positionsService,
         IOrderGateway orderGateway,
         MarketProtectionService marketProtection,
-        InstrumentMasterService instrumentMaster,
+        IBrokerInstrumentMaster instrumentMaster,
         IOrderExecutionSink executionSink,
         ILogger<PositionsController> logger)
     {
@@ -94,10 +93,16 @@ public sealed class PositionsController : ControllerBase
             return BadRequest($"Cannot exit {request.Lots} lot(s) ({requestedQuantity}) - only {openLots} lot(s) ({openQuantity}) open on this position.");
         }
 
+        // Resolved up front so the token can be carried on the order leg itself: a broker that
+        // addresses orders by security id rather than tradingsymbol (Dhan) needs it, and market
+        // protection needs the same instrument's tick size and live depth below.
+        var instrument = _instrumentMaster.Find(position.TradingSymbol, position.Exchange);
+
         var leg = new OrderLegRequest
         {
             TradingSymbol = position.TradingSymbol,
             Exchange = position.Exchange,
+            InstrumentToken = instrument?.InstrumentToken ?? 0,
             // Opposite of however the position is currently held: SELL cuts a long, BUY covers
             // a short. Derived from the position's own sign rather than anything the client sent.
             TransactionType = position.Quantity > 0 ? "SELL" : "BUY",
@@ -113,12 +118,11 @@ public sealed class PositionsController : ControllerBase
         // same as every other MARKET-originated leg in this app (triggered baskets and their
         // auto-square-off go through the identical MarketProtectionService.Protect). Routed
         // through the same tick-store-backed Protect() every other order leg uses, priced off
-        // live best bid/ask - never off position.LastPrice (Kite's REST last_price/LTP, which can
+        // live best bid/ask - never off position.LastPrice (the broker's REST LTP, which can
         // be stale between prints). If this instrument isn't part of any currently-subscribed
         // spread, ITickStore has no depth for it and Protect() sends the leg unprotected rather
-        // than falling back to LTP - Kite will then reject the bare MARKET order outright instead
-        // of risking a fill priced off a stale reference.
-        var instrument = _instrumentMaster.Find(position.TradingSymbol, position.Exchange);
+        // than falling back to LTP - the broker will then reject the bare MARKET order outright
+        // instead of risking a fill priced off a stale reference.
         var protectedLeg = _marketProtection.Protect(
             leg,
             instrument?.InstrumentToken ?? 0,

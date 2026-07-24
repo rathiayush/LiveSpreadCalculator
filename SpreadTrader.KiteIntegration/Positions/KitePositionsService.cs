@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Abstractions;
+using SpreadTrader.Core.Brokers;
 using SpreadTrader.Core.Models;
 using SpreadTrader.KiteIntegration.Auth;
 using SpreadTrader.KiteIntegration.Instruments;
@@ -19,7 +20,7 @@ namespace SpreadTrader.KiteIntegration.Positions;
 /// position" mid-session.
 /// https://kite.trade/docs/connect/v3/portfolio/#retrieving-positions
 /// </summary>
-public sealed class KitePositionsService
+public sealed class KitePositionsService : IPositionsService
 {
     private readonly HttpClient _httpClient;
     private readonly KiteOptions _options;

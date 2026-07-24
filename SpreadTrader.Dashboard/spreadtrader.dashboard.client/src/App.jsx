@@ -20,8 +20,8 @@ import {
 } from '@ant-design/icons'
 import { api } from './api'
 import { useAuth, clearSession } from './auth'
-import { getCachedKiteToken, saveKiteToken, clearCachedKiteToken } from './kiteAuth'
-import { useSpreadHubConnectionState, useKiteAuthInvalidated, clearKiteAuthInvalidated, stopConnection, pruneSpreads } from './hooks/spreadHub'
+import { getCachedBrokerToken, saveBrokerToken, clearCachedBrokerToken } from './brokerAuth'
+import { useSpreadHubConnectionState, useBrokerAuthInvalidated, clearBrokerAuthInvalidated, stopConnection, pruneSpreads } from './hooks/spreadHub'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import SpreadsPage from './pages/SpreadsPage'
@@ -205,7 +205,7 @@ function MobileNavDrawer({ open, onClose }) {
   )
 }
 
-function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenuButton, userEmail, onLogout, onProfile }) {
+function TopBar({ authStatus, brokerName, supportsInteractiveLogin, onLogin, mode, onToggleMode, onMenuClick, showMenuButton, userEmail, onLogout, onProfile }) {
   const active = useActiveNavItem()
   const isLight = mode === 'light'
   // Only this hook re-renders on connection state flips (rare - connect/reconnect/disconnect),
@@ -278,16 +278,20 @@ function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenu
           </Tag>
         )}
         {compact ? (
-          <Tooltip title={`Kite: ${authStatus?.isAuthenticated ? 'authenticated' : 'not logged in'}`}>
-            <Tag color={authStatus?.isAuthenticated ? 'success' : 'warning'} style={{ borderRadius: 999, marginInlineEnd: 0 }}>K</Tag>
+          <Tooltip title={`${brokerName}: ${authStatus?.isAuthenticated ? 'authenticated' : 'not logged in'}`}>
+            <Tag color={authStatus?.isAuthenticated ? 'success' : 'warning'} style={{ borderRadius: 999, marginInlineEnd: 0 }}>
+              {brokerName.charAt(0)}
+            </Tag>
           </Tooltip>
         ) : (
           <Tag color={authStatus?.isAuthenticated ? 'success' : 'warning'} style={{ borderRadius: 999, paddingInline: 10 }}>
-            Kite: {authStatus?.isAuthenticated ? 'authenticated' : 'not logged in'}
+            {brokerName}: {authStatus?.isAuthenticated ? 'authenticated' : 'not logged in'}
           </Tag>
         )}
-        {authStatus && !authStatus.isAuthenticated && (
-          <Button size="small" type="primary" onClick={onLogin}>Login to Kite</Button>
+        {/* Hidden when the platform has no browser login flow at all - Dhan configured with a
+            static token from its web portal - where the button could only ever fail. */}
+        {authStatus && !authStatus.isAuthenticated && supportsInteractiveLogin && (
+          <Button size="small" type="primary" onClick={onLogin}>Login to {brokerName}</Button>
         )}
         <Button
           size="small"
@@ -322,6 +326,9 @@ function TopBar({ authStatus, onLogin, mode, onToggleMode, onMenuClick, showMenu
 function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
   const [spreads, setSpreads] = useState([])
   const [authStatus, setAuthStatus] = useState(null)
+  // Which broker this backend is wired to - see GET /api/auth/broker. Seeded with a neutral label
+  // so the header never names the wrong platform in the moment before the real value lands.
+  const [brokerInfo, setBrokerInfo] = useState({ platform: 'Broker', supportsInteractiveLogin: true })
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   // Note: live spread ticks, ranking, and trigger events are deliberately *not* read here - see
@@ -337,12 +344,23 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
     api.getSpreads()
       .then((list) => {
         setSpreads(list)
-        // Whenever we get a fresh definition list (mount, kiteLogin redirect, universe rebuild,
+        // Whenever we get a fresh definition list (mount, brokerLogin redirect, universe rebuild,
         // or a spread being removed on Configured Spreads), drop any live-tick entries for ids
         // that no longer exist - see pruneSpreads' doc comment in hooks/spreadHub.js.
         pruneSpreads(list.map((s) => s.id))
       })
       .catch(() => {})
+  }, [])
+
+  // Which broker is live, loaded once on mount. Falls back to a neutral label rather than naming
+  // a platform, so a failed/pending load can never mislabel the UI as the wrong broker.
+  const loadBrokerInfo = useCallback(() => {
+    api.getBrokerInfo()
+      .then((info) => setBrokerInfo({
+        platform: info.platform || 'Broker',
+        supportsInteractiveLogin: info.supportsInteractiveLogin !== false,
+      }))
+      .catch((err) => console.error('Failed to load broker info:', err))
   }, [])
 
   const loadAuthStatus = useCallback(() => {
@@ -356,30 +374,30 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
           return
         }
         // Backend has no session - most likely a fresh process restart, not an actual logout.
-        // Offer back whatever Kite token this browser cached from an earlier login, as long as
-        // it's not past its computed 6 AM IST expiry - see kiteAuth.js. This is what avoids
-        // showing the "Login to Kite" button (and prompting a real re-login) purely because the
-        // server restarted, while yesterday's token is still genuinely valid.
-        const cachedToken = getCachedKiteToken()
+        // Offer back whatever broker token this browser cached from an earlier login, as long as
+        // it's not past the expiry the backend reported for it - see brokerAuth.js. This is what
+        // avoids showing the login button (and prompting a real re-login) purely because the
+        // server restarted, while the existing token is still genuinely valid.
+        const cachedToken = getCachedBrokerToken()
         if (!cachedToken) {
           setAuthStatus(status)
           return
         }
         try {
-          const restored = await api.restoreKiteToken(cachedToken)
+          const restored = await api.restoreBrokerToken(cachedToken)
           setAuthStatus(restored)
-          // Backend only ever fills an EMPTY session (see AuthController.RestoreKiteToken) and
-          // never round-trips to Kite to pre-verify, so isAuthenticated:false here means the
-          // cached token was empty/malformed, not that Kite rejected it - still fine to drop it,
-          // there's nothing useful left to retry with.
-          if (!restored.isAuthenticated) clearCachedKiteToken()
+          // Backend only ever fills an EMPTY session, and verifies the offered token against the
+          // broker before accepting it (see AuthController.RestoreBrokerToken), so
+          // isAuthenticated:false here means the token was empty/malformed or the broker rejected
+          // it outright. Either way there's nothing useful left to retry with - drop it.
+          if (!restored.isAuthenticated) clearCachedBrokerToken()
         } catch (err) {
-          console.error('Failed to restore cached Kite token:', err)
+          console.error('Failed to restore cached broker token:', err)
           setAuthStatus(status)
         }
       })
       .catch((err) => {
-        console.error('Failed to load Kite auth status:', err)
+        console.error('Failed to load broker auth status:', err)
         setAuthStatus({ isAuthenticated: false })
       })
   }, [])
@@ -387,50 +405,53 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
   useEffect(() => {
     loadSpreads()
     loadAuthStatus()
+    loadBrokerInfo()
 
-    // Kite redirects back here with ?kiteLogin=success|failed after AuthController/callback.
+    // The broker redirects back here with ?brokerLogin=success|failed after AuthController/callback.
     const params = new URLSearchParams(window.location.search)
-    if (params.get('kiteLogin')) {
+    if (params.get('brokerLogin')) {
       window.history.replaceState({}, '', window.location.pathname)
       loadAuthStatus()
       // A fresh login means any earlier "your token died mid-session" notice no longer
       // applies - clear it so it doesn't keep showing after the problem's already fixed.
-      clearKiteAuthInvalidated()
-      // Cache the just-obtained token so a future backend restart can restore this session
-      // instead of forcing another real Kite login - see kiteAuth.js / loadAuthStatus above.
-      if (params.get('kiteLogin') === 'success') {
-        api.getKiteToken()
-          .then((res) => saveKiteToken(res.accessToken))
-          .catch((err) => console.error('Failed to cache Kite token after login:', err))
+      clearBrokerAuthInvalidated()
+      // Cache the just-obtained token, with the expiry the backend computed for this platform, so
+      // a future backend restart can restore this session instead of forcing another real login -
+      // see brokerAuth.js / loadAuthStatus above.
+      if (params.get('brokerLogin') === 'success') {
+        api.getBrokerToken()
+          .then((res) => saveBrokerToken(res.accessToken, res.expiresUtc))
+          .catch((err) => console.error('Failed to cache broker token after login:', err))
       }
     }
-  }, [loadSpreads, loadAuthStatus])
+  }, [loadSpreads, loadAuthStatus, loadBrokerInfo])
 
-  // Pushed live (see hooks/spreadHub.js's "kiteAuthInvalidated" handler) the instant a real Kite
-  // API call fails with TokenException - independent of, and much faster than, the one-time
+  // Pushed live (see hooks/spreadHub.js's "brokerAuthInvalidated" handler) the instant a real
+  // broker API call reveals a dead token - independent of, and much faster than, the one-time
   // check above. The backend has already cleared its own session by the time this arrives; this
   // just makes sure the UI doesn't sit there showing a stale "authenticated" tag (and silently
   // failing orders) until the next full page reload.
-  const kiteAuthInvalidReason = useKiteAuthInvalidated()
+  const brokerAuthInvalidReason = useBrokerAuthInvalidated()
   useEffect(() => {
-    if (!kiteAuthInvalidReason) return
+    if (!brokerAuthInvalidReason) return
     setAuthStatus({ isAuthenticated: false })
-    // The cached token (if any) has now been proven dead by an actual Kite API call - drop it so
-    // a future restart doesn't try to restore this same dead token again. See kiteAuth.js.
-    clearCachedKiteToken()
-    message.warning(`Kite session ended (${kiteAuthInvalidReason}) - please log in again.`, 8)
-  }, [kiteAuthInvalidReason])
+    // The cached token (if any) has now been proven dead by an actual broker API call - drop it so
+    // a future restart doesn't try to restore this same dead token again. See brokerAuth.js.
+    clearCachedBrokerToken()
+    message.warning(`${brokerInfo.platform} session ended (${brokerAuthInvalidReason}) - please log in again.`, 8)
+  }, [brokerAuthInvalidReason, brokerInfo.platform])
 
   const handleLogin = async () => {
     try {
       const { url } = await api.getLoginUrl()
-      if (!url) throw new Error('Backend returned an empty login URL - is Kite:ApiKey set in appsettings.json?')
+      if (!url) throw new Error('Backend returned an empty login URL - check the broker credentials in appsettings.json.')
       window.location.href = url
     } catch (err) {
       // Previously this failed silently (unhandled promise rejection) so clicking the button
-      // looked like it did nothing. Now it's surfaced both in the console and to the user.
-      console.error('Failed to get Kite login URL:', err)
-      message.error(`Could not start Kite login: ${err.message}`)
+      // looked like it did nothing. Now it's surfaced both in the console and to the user - the
+      // backend returns a 400 with the actual reason (missing api key / partner credentials).
+      console.error('Failed to get broker login URL:', err)
+      message.error(`Could not start ${brokerInfo.platform} login: ${err.message}`)
     }
   }
 
@@ -440,6 +461,8 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
       <Layout>
         <TopBar
           authStatus={authStatus}
+          brokerName={brokerInfo.platform}
+          supportsInteractiveLogin={brokerInfo.supportsInteractiveLogin}
           onLogin={handleLogin}
           mode={mode}
           onToggleMode={onToggleMode}

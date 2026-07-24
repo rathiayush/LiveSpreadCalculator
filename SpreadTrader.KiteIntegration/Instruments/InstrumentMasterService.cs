@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SpreadTrader.Core.Brokers;
 using SpreadTrader.Core.Models;
 using SpreadTrader.KiteIntegration;
 
@@ -26,7 +27,7 @@ namespace SpreadTrader.KiteIntegration.Instruments;
 ///     a few hundred rows (all NFO futures contracts) instead of tens of thousands.
 /// If this app ever needs another exchange/instrument type, both of those need revisiting.
 /// </summary>
-public sealed class InstrumentMasterService
+public sealed class InstrumentMasterService : IBrokerInstrumentMaster
 {
     private readonly HttpClient _httpClient;
     private readonly KiteOptions _options;
@@ -35,7 +36,7 @@ public sealed class InstrumentMasterService
     private readonly IReadOnlyList<string> _exchanges;
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
-    private List<KiteInstrument> _instruments = new();
+    private List<BrokerInstrument> _instruments = new();
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
 
     /// <param name="exchanges">Which Kite exchange-scoped instrument dumps to download and merge.
@@ -72,7 +73,7 @@ public sealed class InstrumentMasterService
             // commodity add-on is enabled), merged into one futures list. Each dump is far smaller
             // than Kite's full multi-exchange /instruments, and ParseCsv discards every non-FUT row
             // as it reads - see the class doc comment.
-            var merged = new List<KiteInstrument>();
+            var merged = new List<BrokerInstrument>();
             foreach (var exchange in _exchanges)
             {
                 _logger.LogInformation("Downloading Kite {Exchange} instrument master...", exchange);
@@ -94,14 +95,14 @@ public sealed class InstrumentMasterService
         }
     }
 
-    public KiteInstrument? Find(string tradingSymbol, string exchange) =>
+    public BrokerInstrument? Find(string tradingSymbol, string exchange) =>
         _instruments.FirstOrDefault(i =>
             string.Equals(i.TradingSymbol, tradingSymbol, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(i.Exchange, exchange, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Finds the futures contracts for an underlying, ordered by expiry ascending -
     /// handy for picking "near month" (index 0) and "far month" (index 1) automatically.</summary>
-    public IReadOnlyList<KiteInstrument> FindFutures(string underlyingName, string exchange = "NFO") =>
+    public IReadOnlyList<BrokerInstrument> FindFutures(string underlyingName, string exchange = "NFO") =>
         _instruments
             .Where(i => i.Exchange.Equals(exchange, StringComparison.OrdinalIgnoreCase)
                         && i.InstrumentType.Equals("FUT", StringComparison.OrdinalIgnoreCase)
@@ -112,7 +113,7 @@ public sealed class InstrumentMasterService
 
     /// <summary>All futures contracts (no options, no equities/indices) across the given
     /// exchange, or every exchange if none is given. Ordered for readability.</summary>
-    public IReadOnlyList<KiteInstrument> GetAllFutures(string? exchange = null) =>
+    public IReadOnlyList<BrokerInstrument> GetAllFutures(string? exchange = null) =>
         _instruments
             .Where(i => i.InstrumentType.Equals("FUT", StringComparison.OrdinalIgnoreCase)
                         && (exchange is null || i.Exchange.Equals(exchange, StringComparison.OrdinalIgnoreCase)))
@@ -139,7 +140,7 @@ public sealed class InstrumentMasterService
     /// (explicitly excludes options / equities / indices), and writes them to the configured
     /// futures CSV file (Storage:FuturesCsvPath in appsettings.json) so the symbol list is
     /// available on disk for reference without hitting Kite again.</summary>
-    public async Task<IReadOnlyList<KiteInstrument>> FetchAndSaveFuturesAsync(string? exchange, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<BrokerInstrument>> FetchAndSaveFuturesAsync(string? exchange, CancellationToken cancellationToken)
     {
         await EnsureLoadedAsync(cancellationToken);
         var futures = GetAllFutures(exchange);
@@ -148,7 +149,7 @@ public sealed class InstrumentMasterService
         return futures;
     }
 
-    private async Task SaveFuturesToCsvAsync(IReadOnlyList<KiteInstrument> futures, CancellationToken cancellationToken)
+    private async Task SaveFuturesToCsvAsync(IReadOnlyList<BrokerInstrument> futures, CancellationToken cancellationToken)
     {
         var dir = Path.GetDirectoryName(_futuresCsvPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -189,7 +190,7 @@ public sealed class InstrumentMasterService
         config.TickSize = match.TickSize;
     }
 
-    private static List<KiteInstrument> ParseCsv(Stream stream)
+    private static List<BrokerInstrument> ParseCsv(Stream stream)
     {
         // Columns: instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,strike,
         //          tick_size,lot_size,instrument_type,segment,exchange
@@ -199,7 +200,7 @@ public sealed class InstrumentMasterService
         // (see the class doc comment), so non-FUT rows are discarded right here rather than kept
         // in the returned list and filtered out later by every caller. This is what keeps the
         // retained set at a few hundred rows instead of tens of thousands.
-        var result = new List<KiteInstrument>();
+        var result = new List<BrokerInstrument>();
         using var reader = new StreamReader(stream);
         _ = reader.ReadLine(); // header
 
@@ -216,7 +217,7 @@ public sealed class InstrumentMasterService
             var lotSize = int.TryParse(fields[8], out var lot) ? lot : 0;
             var tickSize = decimal.TryParse(fields[7], NumberStyles.Number, CultureInfo.InvariantCulture, out var tick) ? tick : 0m;
 
-            result.Add(new KiteInstrument(
+            result.Add(new BrokerInstrument(
                 InstrumentToken: token,
                 TradingSymbol: fields[2],
                 Name: fields[3],

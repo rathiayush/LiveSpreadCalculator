@@ -5,7 +5,7 @@ namespace LiveSpreadCalculator.Hubs;
 
 /// <summary>
 /// Mostly push-only hub - the server broadcasts "spreadUpdate", "triggerFired", "basketExecuted",
-/// "kiteAuthInvalidated", and "positionsUpdate" events to every connected client (see
+/// "brokerAuthInvalidated", and "positionsUpdate" events to every connected client (see
 /// SignalRSpreadPublisher / SignalRTriggerEventSink / SignalROrderExecutionSink /
 /// SignalRKiteAuthNotifier / SignalRPositionsPublisher). All configuration still goes through the
 /// REST controllers - the two client-invoked methods below exist purely so

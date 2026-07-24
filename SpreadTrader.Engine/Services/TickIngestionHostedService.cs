@@ -2,8 +2,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
-using SpreadTrader.KiteIntegration.Instruments;
-using SpreadTrader.KiteIntegration.Ticker;
+using SpreadTrader.Core.Brokers;
 
 namespace SpreadTrader.Engine.Services;
 
@@ -32,16 +31,16 @@ public sealed class TickIngestionHostedService : BackgroundService
     private static readonly TimeSpan ReconcileInterval = TimeSpan.FromMinutes(5);
 
     private readonly ISpreadDefinitionStore _spreadStore;
-    private readonly InstrumentMasterService _instrumentMaster;
-    private readonly KiteTickerClient _tickerClient;
+    private readonly IBrokerInstrumentMaster _instrumentMaster;
+    private readonly IMarketDataFeed _tickerClient;
     private readonly ITickStore _tickStore;
     private readonly PositionsCache _positionsCache;
     private readonly ILogger<TickIngestionHostedService> _logger;
 
     public TickIngestionHostedService(
         ISpreadDefinitionStore spreadStore,
-        InstrumentMasterService instrumentMaster,
-        KiteTickerClient tickerClient,
+        IBrokerInstrumentMaster instrumentMaster,
+        IMarketDataFeed tickerClient,
         ITickStore tickStore,
         PositionsCache positionsCache,
         ILogger<TickIngestionHostedService> logger)
