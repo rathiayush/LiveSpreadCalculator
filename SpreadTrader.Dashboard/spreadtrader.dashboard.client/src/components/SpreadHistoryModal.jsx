@@ -95,8 +95,11 @@ export default function SpreadHistoryModal({ spread, open, onClose }) {
       rightPriceScale: { borderColor: BORDER_COLOR },
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false },
       crosshair: { mode: CrosshairMode.Normal },
-      handleScroll: true,
-      handleScale: true,
+      // Pass full option objects rather than `true` shorthand - the library's option merge
+      // overwrites the whole sub-object when given a boolean, which silently disables every
+      // individual flag (pressedMouseMove, mouseWheel, touch drag, pinch, etc).
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+      handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true, axisDoubleClickReset: true },
     })
     chartRef.current = chart
 
