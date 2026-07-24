@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom'
-import { ConfigProvider, Layout, Menu, Space, Tag, Button, Typography, Drawer, Grid, message, theme, Tooltip } from 'antd'
+import { ConfigProvider, Layout, Menu, Space, Tag, Button, Typography, Drawer, Grid, message, theme, Tooltip, Modal, Input } from 'antd'
 import {
   DashboardOutlined,
   LineChartOutlined,
@@ -205,7 +205,7 @@ function MobileNavDrawer({ open, onClose }) {
   )
 }
 
-function TopBar({ authStatus, brokerName, supportsInteractiveLogin, onLogin, mode, onToggleMode, onMenuClick, showMenuButton, userEmail, onLogout, onProfile }) {
+function TopBar({ authStatus, brokerName, supportsInteractiveLogin, onLogin, onEnterToken, mode, onToggleMode, onMenuClick, showMenuButton, userEmail, onLogout, onProfile }) {
   const active = useActiveNavItem()
   const isLight = mode === 'light'
   // Only this hook re-renders on connection state flips (rare - connect/reconnect/disconnect),
@@ -288,10 +288,15 @@ function TopBar({ authStatus, brokerName, supportsInteractiveLogin, onLogin, mod
             {brokerName}: {authStatus?.isAuthenticated ? 'authenticated' : 'not logged in'}
           </Tag>
         )}
-        {/* Hidden when the platform has no browser login flow at all - Dhan configured with a
-            static token from its web portal - where the button could only ever fail. */}
-        {authStatus && !authStatus.isAuthenticated && supportsInteractiveLogin && (
-          <Button size="small" type="primary" onClick={onLogin}>Login to {brokerName}</Button>
+        {/* Two different auth models, so two different actions. Kite has a mandatory browser
+            login; Dhan on a portal-generated token has none at all, so instead of a button that
+            could only ever fail it offers a place to paste a freshly generated token. */}
+        {authStatus && !authStatus.isAuthenticated && (
+          supportsInteractiveLogin ? (
+            <Button size="small" type="primary" onClick={onLogin}>Login to {brokerName}</Button>
+          ) : (
+            <Button size="small" type="primary" onClick={onEnterToken}>Enter {brokerName} token</Button>
+          )
         )}
         <Button
           size="small"
@@ -329,6 +334,11 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
   // Which broker this backend is wired to - see GET /api/auth/broker. Seeded with a neutral label
   // so the header never names the wrong platform in the moment before the real value lands.
   const [brokerInfo, setBrokerInfo] = useState({ platform: 'Broker', supportsInteractiveLogin: true })
+  // Manual access-token entry - only reachable on a platform with no browser login flow, see
+  // handleSubmitToken and AuthController.SetBrokerToken.
+  const [tokenModalOpen, setTokenModalOpen] = useState(false)
+  const [tokenValue, setTokenValue] = useState('')
+  const [tokenSubmitting, setTokenSubmitting] = useState(false)
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
   // Note: live spread ticks, ranking, and trigger events are deliberately *not* read here - see
@@ -455,6 +465,30 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
     }
   }
 
+  // Installs a hand-pasted access token. The backend verifies it against the broker before
+  // accepting, so an expired or mistyped token is rejected here rather than silently breaking the
+  // next order - which is exactly why the error is surfaced instead of being swallowed.
+  const handleSubmitToken = async () => {
+    const token = tokenValue.trim()
+    if (!token) return
+    setTokenSubmitting(true)
+    try {
+      const result = await api.setBrokerToken(token)
+      setAuthStatus({ isAuthenticated: true })
+      // Cache it like any other successfully obtained token, so a later backend restart can
+      // restore this session instead of asking for it again - see brokerAuth.js.
+      saveBrokerToken(token, result.expiresUtc)
+      clearBrokerAuthInvalidated()
+      setTokenModalOpen(false)
+      setTokenValue('')
+      message.success(`${brokerInfo.platform} access token accepted.`)
+    } catch (err) {
+      message.error(err.message || 'That access token was rejected.')
+    } finally {
+      setTokenSubmitting(false)
+    }
+  }
+
   return (
     <Layout style={{ minHeight: '100vh' }}>
       {isDesktopNav && <Sidebar />}
@@ -464,6 +498,7 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
           brokerName={brokerInfo.platform}
           supportsInteractiveLogin={brokerInfo.supportsInteractiveLogin}
           onLogin={handleLogin}
+          onEnterToken={() => setTokenModalOpen(true)}
           mode={mode}
           onToggleMode={onToggleMode}
           showMenuButton={!isDesktopNav}
@@ -518,6 +553,32 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
           onLogout() // password changed -> old token is dead server-side; drop the session locally
         }}
       />
+      {/* Only reachable on a platform without a browser login flow (Dhan on a portal-generated
+          token). Without it, an expired token would need a config edit and a restart of a live
+          process - see AuthController.SetBrokerToken. */}
+      <Modal
+        open={tokenModalOpen}
+        title={`Enter ${brokerInfo.platform} access token`}
+        okText="Save token"
+        confirmLoading={tokenSubmitting}
+        onOk={handleSubmitToken}
+        onCancel={() => { setTokenModalOpen(false); setTokenValue('') }}
+        destroyOnClose
+      >
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
+          {brokerInfo.platform} doesn&apos;t use a browser login here - generate an access token in
+          the {brokerInfo.platform} web portal (Profile &rarr; DhanHQ Trading APIs) and paste it
+          below. It&apos;s verified against {brokerInfo.platform} before being accepted, and takes
+          effect immediately without a restart.
+        </Typography.Paragraph>
+        <Input.Password
+          value={tokenValue}
+          onChange={(e) => setTokenValue(e.target.value)}
+          onPressEnter={handleSubmitToken}
+          placeholder="Access token"
+          autoComplete="off"
+        />
+      </Modal>
     </Layout>
   )
 }

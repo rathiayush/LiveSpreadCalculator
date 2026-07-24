@@ -140,6 +140,46 @@ public sealed class AuthController : ControllerBase
         });
     }
 
+    /// <summary>Installs an access token supplied by hand, after verifying it live against the
+    /// broker. This exists because the two platforms have fundamentally different auth models:
+    ///
+    ///  - Kite has a MANDATORY browser login. Its tokens die at ~6 AM IST daily and can only be
+    ///    reissued by completing that flow, so there is always a login button to fall back on.
+    ///  - Dhan does NOT require a browser login. The usual setup is an access token generated in
+    ///    the Dhan web portal and supplied through configuration, which means
+    ///    SupportsInteractiveLogin is false and there is no login button at all. Without this
+    ///    endpoint, the moment such a token expired (or was invalidated mid-session by the auth
+    ///    failure handler) the only way to get trading again would be editing configuration and
+    ///    restarting a live process holding open positions.
+    ///
+    /// So: paste a freshly generated token here and the process picks it up immediately. Unlike
+    /// /broker-restore, this deliberately REPLACES whatever token the session currently holds -
+    /// it's an operator action, not an opportunistic restore. Still requires the app's own JWT,
+    /// and the token is verified against the broker before being accepted, so a typo or a dead
+    /// token is rejected here rather than silently breaking the next order.</summary>
+    [HttpPost("broker-token")]
+    public async Task<ActionResult<object>> SetBrokerToken([FromBody] SetBrokerTokenRequest request, CancellationToken cancellationToken)
+    {
+        var token = request.AccessToken?.Trim();
+        if (string.IsNullOrWhiteSpace(token))
+            return BadRequest(new { error = "Access token is required." });
+
+        if (!await _brokerAuth.VerifyAccessTokenAsync(token, cancellationToken))
+        {
+            _logger.LogWarning("Rejected a manually supplied broker token - {Platform} does not honor it.", _brokerAuth.PlatformName);
+            return BadRequest(new { error = $"{_brokerAuth.PlatformName} rejected that access token. Check it was copied in full and hasn't expired." });
+        }
+
+        _session.AccessToken = token;
+        _logger.LogInformation("{Platform} access token installed manually via POST /api/auth/broker-token.", _brokerAuth.PlatformName);
+
+        return Ok(new
+        {
+            isAuthenticated = true,
+            expiresUtc = _brokerAuth.GetTokenExpiryUtc(DateTimeOffset.UtcNow),
+        });
+    }
+
     /// <summary>Restores a broker access token the frontend cached from an earlier login (see
     /// brokerAuth.js / GET /api/auth/broker-token) back into this process's in-memory session - the
     /// fix for "every backend restart forces a fresh broker login" even though the previous token

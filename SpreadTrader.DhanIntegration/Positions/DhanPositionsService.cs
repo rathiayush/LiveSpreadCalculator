@@ -112,7 +112,10 @@ public sealed class DhanPositionsService : IPositionsService
             var (exitPrice, exitPnl) = PositionExitPricing.Compute(quantity, avgPrice, tick);
 
             positions.Add(new PositionSnapshot(
-                tradingSymbol, exchange, product, quantity, avgPrice, lastPrice, pnl, lotSize, exitPrice, exitPnl));
+                tradingSymbol, exchange, product, quantity, avgPrice, lastPrice, pnl, lotSize, exitPrice, exitPnl,
+                // Dhan reports securityId on the position row itself, so this needs no symbol-spelling
+                // assumption at all - see PositionSnapshot.InstrumentToken.
+                token));
         }
 
         return new PositionsResult(true, positions, null);

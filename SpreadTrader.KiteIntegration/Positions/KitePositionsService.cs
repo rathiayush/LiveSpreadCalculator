@@ -122,7 +122,11 @@ public sealed class KitePositionsService : IPositionsService
                 Tick? tick = instrument is { } i && _tickStore.TryGet(i.InstrumentToken, out var t) ? t : null;
                 var (exitPrice, exitPnl) = PositionExitPricing.Compute(quantity, avgPrice, tick);
 
-                positions.Add(new PositionSnapshot(tradingSymbol, exchange, product, quantity, avgPrice, lastPrice, pnl, lotSize, exitPrice, exitPnl));
+                positions.Add(new PositionSnapshot(
+                    tradingSymbol, exchange, product, quantity, avgPrice, lastPrice, pnl, lotSize, exitPrice, exitPnl,
+                    // Kite's position rows carry no instrument token, so this is the instrument-master
+                    // lookup already done above for lot size - reused rather than repeated downstream.
+                    instrument?.InstrumentToken ?? 0));
             }
 
             return new PositionsResult(true, positions, null);

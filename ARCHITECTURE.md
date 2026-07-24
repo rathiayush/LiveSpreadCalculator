@@ -80,6 +80,7 @@ simplification taken for lack of time - see §8 (Singleton constraint).
 | `SpreadTrader.Engine` | class library | The four hosted (background) services that make up the live pipeline - see §4. Depends on **`Core` only** - it does not reference either broker project, which is what stops broker-specific behaviour leaking into trading logic (a compile error is the backstop). Not a standalone executable - `Program.cs`/`Worker.cs` in this project are empty placeholders; the services are registered directly into the Api project's DI container. |
 | `LiveSpreadCalculator` | ASP.NET Core Web Api | Hosts everything: wires the entire DI graph (`Program.cs`), exposes REST controllers, hosts the SignalR hub, and is the one process you actually run for the backend. |
 | `SpreadTrader.Dashboard/spreadtrader.dashboard.client` | React (Vite) SPA | The UI - see §9. |
+| `SpreadTrader.Tests` | xunit test project | Byte-level tests for Dhan's binary market-data protocol (`DhanTickPacketParserTests`) and the Kite↔Dhan translation table (`DhanSymbologyTests`). These cover the code that cannot be verified by reading a response body: a wrong endianness, depth offset or price scale decodes into plausible-looking but wrong prices that would feed spread evaluation and could fire a real order at an unintended level. |
 
 ## 3.1 The broker abstraction (Kite / Dhan)
 
@@ -133,18 +134,42 @@ These are the differences the adapters exist to absorb - worth knowing before to
 - **Order addressing.** Kite orders carry a tradingsymbol; Dhan orders carry a `securityId` and no
   symbol at all. `OrderLegRequest.InstrumentToken` carries the already-resolved token so the Dhan
   gateway never has to re-resolve a symbol that the engine already pinned down.
-- **Login.** Kite's login URL is a pure string built from the api_key, redirected back with
-  `request_token`. Dhan's requires a server-to-server consent call first and redirects back with
-  `tokenId` - which is why `BuildLoginUrlAsync` is async and `/api/auth/callback` hands the whole
-  query string to the adapter instead of naming a parameter. Dhan also supports skipping the browser
-  flow entirely with a token generated in its web portal, in which case
-  `IBrokerAuthService.SupportsInteractiveLogin` is false and the dashboard hides the login button.
+- **Login is the biggest behavioural difference - see below.**
 - **Token lifetime.** Kite invalidates every token at ~6:00 AM IST daily; Dhan's last 24 hours
   (consent) or up to 30 days (portal). The dashboard's token cache no longer assumes either - the
   backend returns the expiry with the token.
 - **Margin.** Kite has a basket-margin endpoint and per-segment funds; Dhan has
   `/margincalculator/multi` and an account-wide `/fundlimit` (so the `segment` argument is ignored
   on Dhan, without loss of accuracy - the figure is already net of everything blocked).
+
+### Authentication: Kite requires a login, Dhan doesn't
+
+This is the one place the two platforms differ in *kind* rather than in wire format, so the app
+models both rather than assuming Kite's.
+
+| | Kite | Dhan |
+|---|---|---|
+| Browser login | **Mandatory**, every trading day | Optional - only for a partner app using the consent flow |
+| How a token is obtained | OAuth-style redirect: login URL built from the api_key → back with `request_token` → exchanged using a SHA-256 checksum | Either a token generated in the Dhan web portal (no browser step at all), or the consent flow: server-to-server `generate-consent` → browser login → back with `tokenId` → `consumeApp-consent` |
+| Token lifetime | Dies at ~6:00 AM IST daily, regardless of when issued | 24 hours (consent) or up to 30 days (portal) |
+| `SupportsInteractiveLogin` | Always true | True only when `AppId`/`AppSecret` are set |
+
+Three consequences shaped the code:
+
+1. **`BuildLoginUrlAsync` is async.** Kite's login URL is a pure string; Dhan's requires a
+   server-to-server consent call first to mint the id it is keyed by.
+2. **`/api/auth/callback` hands the whole query string to the adapter** instead of naming a
+   parameter, since Kite redirects with `request_token`+`status` and Dhan with `tokenId`. One
+   callback serves both.
+3. **`POST /api/auth/broker-token` exists for the no-login case.** On Dhan with a portal token
+   there is no login flow to fall back on, so when that token expires - or the auth-failure handler
+   invalidates it mid-session - there would otherwise be no way to recover without editing
+   configuration and restarting a live process holding open positions. That endpoint takes a
+   pasted token, verifies it against the broker, and installs it immediately. The dashboard shows
+   an "Enter token" action instead of a login button whenever `SupportsInteractiveLogin` is false.
+
+Token expiry is computed server-side per platform (`IBrokerAuthService.GetTokenExpiryUtc`) and
+returned with the token, so the dashboard's restore cache no longer assumes Kite's daily cutoff.
 
 ### Switching platforms
 
@@ -320,6 +345,7 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
 | GET | `/api/auth/status` | `{ isAuthenticated }` - whether a broker access token is currently held |
 | GET | `/api/auth/callback` | The broker redirects here after login (Kite with `request_token`, Dhan with `tokenId`); the whole query is handed to the active adapter, which exchanges it for an access token, then redirects back to `Dashboard:BaseUrl` |
 | GET | `/api/auth/broker-token` | Returns the current broker token + its platform-computed expiry, for the dashboard's restore cache |
+| POST | `/api/auth/broker-token` | Installs a hand-supplied access token after verifying it against the broker - the recovery path for a platform with no browser login (Dhan on a portal token) |
 | POST | `/api/auth/broker-restore` | Offers a client-cached token back after a restart; verified live against the broker before it's trusted |
 | GET | `/api/instruments/futures?underlying=&exchange=` | Futures contracts for one underlying, ordered by expiry |
 | POST | `/api/instruments/futures/fetch-all?exchange=` | Downloads/refreshes the instrument master, filters to futures only, saves to the futures CSV |

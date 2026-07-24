@@ -32,6 +32,15 @@ public sealed class BrokerTokenRestoreRequest
     public required string AccessToken { get; set; }
 }
 
+/// <summary>Posted to POST /api/auth/broker-token to install an access token by hand - see that
+/// endpoint's doc comment. This is the recovery path for a platform with no browser login flow
+/// (Dhan running on a token generated in its web portal), where there would otherwise be no way to
+/// replace an expired token without editing configuration and restarting the process.</summary>
+public sealed class SetBrokerTokenRequest
+{
+    public required string AccessToken { get; set; }
+}
+
 public sealed class InstrumentLegRequest
 {
     public required string TradingSymbol { get; set; }

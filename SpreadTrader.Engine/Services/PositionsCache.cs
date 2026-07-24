@@ -179,11 +179,16 @@ public sealed class PositionsCache : BackgroundService
 
         foreach (var position in result.Positions)
         {
-            // Already resolved/cached by IPositionsService.GetPositionsAsync itself (it calls
-            // IBrokerInstrumentMaster.EnsureLoadedAsync before resolving LotSize per position),
-            // so this is a plain in-memory lookup, not a fresh network round trip.
-            var instrument = _instrumentMaster.Find(position.TradingSymbol, position.Exchange);
-            var token = instrument?.InstrumentToken ?? 0;
+            // The positions service already resolved this - on Dhan from the securityId on the
+            // position row itself, on Kite from the instrument-master lookup it does for lot size.
+            // Trust that over re-deriving it here: a symbol lookup silently returns 0 whenever the
+            // broker's spelling differs from the instrument master's, and a 0 token means this
+            // position never gets subscribed, so it would show no live PNL or exit price at all.
+            // The lookup is kept only as a fallback for a snapshot that couldn't resolve one, and
+            // is a plain in-memory hit either way (the master is already loaded by this point).
+            var token = position.InstrumentToken != 0
+                ? position.InstrumentToken
+                : _instrumentMaster.Find(position.TradingSymbol, position.Exchange)?.InstrumentToken ?? 0;
 
             newAnchors[AnchorKey(position.TradingSymbol, position.Exchange, position.Product)] = new PositionAnchor(position, token);
             if (token != 0) tokensToSubscribe.Add(token);

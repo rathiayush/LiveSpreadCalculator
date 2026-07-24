@@ -93,16 +93,22 @@ public sealed class PositionsController : ControllerBase
             return BadRequest($"Cannot exit {request.Lots} lot(s) ({requestedQuantity}) - only {openLots} lot(s) ({openQuantity}) open on this position.");
         }
 
-        // Resolved up front so the token can be carried on the order leg itself: a broker that
-        // addresses orders by security id rather than tradingsymbol (Dhan) needs it, and market
-        // protection needs the same instrument's tick size and live depth below.
+        // The instrument-master lookup supplies tick size for market protection below. The TOKEN,
+        // though, is taken from the position itself whenever it has one: the positions service
+        // resolved it from the most reliable source that broker offers (Dhan puts securityId on
+        // the position row), whereas this lookup silently yields 0 if the broker spells the symbol
+        // differently from the instrument master - and a 0 token means a broker that addresses
+        // orders by id cannot place this square-off at all.
         var instrument = _instrumentMaster.Find(position.TradingSymbol, position.Exchange);
+        var instrumentToken = position.InstrumentToken != 0
+            ? position.InstrumentToken
+            : instrument?.InstrumentToken ?? 0;
 
         var leg = new OrderLegRequest
         {
             TradingSymbol = position.TradingSymbol,
             Exchange = position.Exchange,
-            InstrumentToken = instrument?.InstrumentToken ?? 0,
+            InstrumentToken = instrumentToken,
             // Opposite of however the position is currently held: SELL cuts a long, BUY covers
             // a short. Derived from the position's own sign rather than anything the client sent.
             TransactionType = position.Quantity > 0 ? "SELL" : "BUY",
@@ -125,7 +131,10 @@ public sealed class PositionsController : ControllerBase
         // instead of risking a fill priced off a stale reference.
         var protectedLeg = _marketProtection.Protect(
             leg,
-            instrument?.InstrumentToken ?? 0,
+            // Same token as the leg above - market protection uses it to read this instrument's
+            // live depth out of the tick store, so it must be the one the position is subscribed
+            // under (see PositionsCache), not a possibly-unresolved symbol lookup.
+            instrumentToken,
             instrument?.TickSize ?? 0,
             $"Manual square-off {position.TradingSymbol}",
             // No TriggerRule to draw a per-rule slippage from here - this is a manual, ad-hoc
