@@ -263,6 +263,24 @@ public sealed class PositionsCache : BackgroundService
         }
     }
 
+    /// <summary>The manual-refresh path: fetches positions from the broker ONCE and, when the
+    /// fetch succeeds, folds the snapshot into this cache's anchors exactly as the event-driven
+    /// resync would - then returns the result for the caller to serve. This is what makes the
+    /// Positions page's refresh button a true escape hatch under the no-timer design: with no
+    /// periodic resync, a lost order-update event (socket mid-reconnect while a trade placed in
+    /// the broker's own app fills) would otherwise leave the cache - and the PNL alerts and live
+    /// SignalR push that read it - stale indefinitely, even while the page itself showed the
+    /// operator fresh numbers. One REST call now serves both: the response the browser renders
+    /// and the anchors everything else projects from. A failed fetch is returned as-is and leaves
+    /// the existing anchors untouched.</summary>
+    public async Task<PositionsResult> RefreshAsync(CancellationToken cancellationToken)
+    {
+        var result = await _positionsService.GetPositionsAsync(cancellationToken);
+        if (result.Success)
+            await ApplyAsync(result, cancellationToken);
+        return result;
+    }
+
     /// <summary>Re-fetches the authoritative REST snapshot (quantity, average price, the broker's
     /// own pnl), rebuilds the anchor for every open position, and makes sure each one's
     /// instrument token is subscribed on the live ticker. Returns false on a failed fetch (no
@@ -278,6 +296,17 @@ public sealed class PositionsCache : BackgroundService
             return false;
         }
 
+        await ApplyAsync(result, cancellationToken);
+        return true;
+    }
+
+    /// <summary>Folds one successful positions fetch into the anchors and subscribes every
+    /// resolved token - shared by the event-driven resync and the manual RefreshAsync so the two
+    /// can never drift. Concurrent callers are benign: the anchor dictionary is swapped whole
+    /// under the lock (last completed fetch wins, and both are equally fresh), and ticker
+    /// subscription is idempotent.</summary>
+    private async Task ApplyAsync(PositionsResult result, CancellationToken cancellationToken)
+    {
         var newAnchors = new Dictionary<string, PositionAnchor>();
         var tokensToSubscribe = new List<uint>();
 
@@ -305,8 +334,6 @@ public sealed class PositionsCache : BackgroundService
 
         if (tokensToSubscribe.Count > 0)
             await _tickerClient.SubscribeAsync(tokensToSubscribe, cancellationToken);
-
-        return true;
     }
 
     private static string AnchorKey(string tradingSymbol, string exchange, string product) =>

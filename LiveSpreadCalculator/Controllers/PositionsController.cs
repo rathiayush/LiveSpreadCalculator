@@ -17,7 +17,7 @@ namespace LiveSpreadCalculator.Controllers;
 [Route("api/positions")]
 public sealed class PositionsController : ControllerBase
 {
-    private readonly IPositionsService _positionsService;
+    private readonly PositionsCache _positionsCache;
     private readonly IOrderGateway _orderGateway;
     private readonly MarketProtectionService _marketProtection;
     private readonly IBrokerInstrumentMaster _instrumentMaster;
@@ -25,14 +25,14 @@ public sealed class PositionsController : ControllerBase
     private readonly ILogger<PositionsController> _logger;
 
     public PositionsController(
-        IPositionsService positionsService,
+        PositionsCache positionsCache,
         IOrderGateway orderGateway,
         MarketProtectionService marketProtection,
         IBrokerInstrumentMaster instrumentMaster,
         IOrderExecutionSink executionSink,
         ILogger<PositionsController> logger)
     {
-        _positionsService = positionsService;
+        _positionsCache = positionsCache;
         _orderGateway = orderGateway;
         _marketProtection = marketProtection;
         _instrumentMaster = instrumentMaster;
@@ -40,10 +40,14 @@ public sealed class PositionsController : ControllerBase
         _logger = logger;
     }
 
+    /// <summary>Fetches live positions from the broker AND folds the snapshot into PositionsCache
+    /// (see PositionsCache.RefreshAsync). Since the cache resyncs only on order-update events,
+    /// this manual refresh doubles as the recovery path for a lost event: one click re-anchors
+    /// everything - the live SignalR push and the PNL alerts included - not just this response.</summary>
     [HttpGet]
     public async Task<ActionResult<PositionsResult>> GetPositions(CancellationToken cancellationToken)
     {
-        var result = await _positionsService.GetPositionsAsync(cancellationToken);
+        var result = await _positionsCache.RefreshAsync(cancellationToken);
         return Ok(result);
     }
 
@@ -61,7 +65,9 @@ public sealed class PositionsController : ControllerBase
         if (request.SlippagePercent <= 0)
             return BadRequest("SlippagePercent must be greater than zero.");
 
-        var positionsResult = await _positionsService.GetPositionsAsync(cancellationToken);
+        // Same refresh-through-the-cache as GetPositions: the pre-square-off verification fetch
+        // is fresh data anyway, so let it re-anchor the cache while it's at it.
+        var positionsResult = await _positionsCache.RefreshAsync(cancellationToken);
         if (!positionsResult.Success)
         {
             return Problem(
