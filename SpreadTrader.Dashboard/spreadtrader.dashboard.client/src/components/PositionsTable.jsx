@@ -46,6 +46,10 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
   const isMobile = screens.md === undefined ? true : !screens.md
 
   const totalPnl = useMemo(() => positions.reduce((sum, p) => sum + (p.pnl ?? 0), 0), [positions])
+  // Account-wide Exit PNL - same convention as totalPnl (sum whatever's available, treating a leg
+  // with no live exit price yet as a 0 contribution rather than excluding it) - not scoped to any
+  // one spread, unlike the per-group combinedExitPnl shown on each group row/card.
+  const totalExitPnl = useMemo(() => positions.reduce((sum, p) => sum + (p.exitPnl ?? 0), 0), [positions])
 
   const openLots = (p) => (p.lotSize > 0 ? Math.abs(p.quantity) / p.lotSize : null)
 
@@ -358,8 +362,40 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
         </Space>
       ) : r.tradingSymbol,
     },
-    { title: 'Exchange', key: 'exchange', render: (_, r) => r.isGroup ? '' : r.exchange },
-    { title: 'Product', key: 'product', render: (_, r) => r.isGroup ? '' : r.product },
+    {
+      // Group-only (see averageEnteredAt above) - a naked single leg has no spread value to show
+      // here, same as the blank cells combinedPnl/combinedExitPnl already leave for one. Leads the
+      // table (right after Symbol) alongside Running spread/Avg price - these are what people scan
+      // first for a held position; Exchange/Product are supporting detail, pushed to the end.
+      title: (
+        <Tooltip title="Spread value (Far minus Near) at entry, from each leg's own average fill price - the same figure Add Exit Trigger shows as 'Entered at'.">
+          Entered at
+        </Tooltip>
+      ),
+      key: 'averageEnteredAt',
+      render: (_, r) => (r.isGroup && r.averageEnteredAt !== null) ? r.averageEnteredAt.toFixed(2) : (r.isGroup ? '—' : ''),
+      sorter: (a, b) => (a.isGroup ? (a.averageEnteredAt ?? 0) : 0) - (b.isGroup ? (b.averageEnteredAt ?? 0) : 0),
+    },
+    {
+      title: (
+        <Tooltip title="Spread value (Far minus Near) if you closed both legs right now, priced off each leg's own Exit price (bid if long, ask if short) - not the live-streamed spread value, which is priced for a fresh entry, not for unwinding this held position.">
+          Running spread
+        </Tooltip>
+      ),
+      key: 'exitRunningSpread',
+      render: (_, r) => {
+        if (!r.isGroup) return ''
+        return r.exitRunningSpread === null
+          ? '—'
+          : <Typography.Text strong>{r.exitRunningSpread.toFixed(2)}</Typography.Text>
+      },
+      sorter: (a, b) => (a.isGroup ? (a.exitRunningSpread ?? 0) : 0) - (b.isGroup ? (b.exitRunningSpread ?? 0) : 0),
+    },
+    {
+      title: 'Avg price',
+      key: 'averagePrice',
+      render: (_, r) => r.isGroup ? '' : r.averagePrice?.toFixed(2),
+    },
     {
       title: 'Side',
       key: 'side',
@@ -416,33 +452,6 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
       },
     },
     {
-      // Group-only (see averageEnteredAt above) - a naked single leg has no spread value to show
-      // here, same as the blank cells combinedPnl/combinedExitPnl already leave for one.
-      title: (
-        <Tooltip title="Spread value (Far minus Near) at entry, from each leg's own average fill price - the same figure Add Exit Trigger shows as 'Entered at'.">
-          Entered at
-        </Tooltip>
-      ),
-      key: 'averageEnteredAt',
-      render: (_, r) => (r.isGroup && r.averageEnteredAt !== null) ? r.averageEnteredAt.toFixed(2) : (r.isGroup ? '—' : ''),
-      sorter: (a, b) => (a.isGroup ? (a.averageEnteredAt ?? 0) : 0) - (b.isGroup ? (b.averageEnteredAt ?? 0) : 0),
-    },
-    {
-      title: (
-        <Tooltip title="Spread value (Far minus Near) if you closed both legs right now, priced off each leg's own Exit price (bid if long, ask if short) - not the live-streamed spread value, which is priced for a fresh entry, not for unwinding this held position.">
-          Running spread
-        </Tooltip>
-      ),
-      key: 'exitRunningSpread',
-      render: (_, r) => {
-        if (!r.isGroup) return ''
-        return r.exitRunningSpread === null
-          ? '—'
-          : <Typography.Text strong>{r.exitRunningSpread.toFixed(2)}</Typography.Text>
-      },
-      sorter: (a, b) => (a.isGroup ? (a.exitRunningSpread ?? 0) : 0) - (b.isGroup ? (b.exitRunningSpread ?? 0) : 0),
-    },
-    {
       title: 'Qty (lots)',
       key: 'quantity',
       render: (_, r) => {
@@ -455,11 +464,6 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
           </span>
         )
       },
-    },
-    {
-      title: 'Avg price',
-      key: 'averagePrice',
-      render: (_, r) => r.isGroup ? '' : r.averagePrice?.toFixed(2),
     },
     {
       title: 'LTP',
@@ -483,6 +487,10 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
       },
       sorter: (a, b) => (a.isGroup ? a.combinedPnl : (a.pnl ?? 0)) - (b.isGroup ? b.combinedPnl : (b.pnl ?? 0)),
     },
+    // Exchange/Product pushed to the end - supporting detail, not what people scan this table for
+    // first (see Entered at/Running spread/Avg price up front instead).
+    { title: 'Exchange', key: 'exchange', render: (_, r) => r.isGroup ? '' : r.exchange },
+    { title: 'Product', key: 'product', render: (_, r) => r.isGroup ? '' : r.product },
     {
       title: 'Exit',
       key: 'exit',
@@ -686,12 +694,20 @@ export default function PositionsTable({ positions, spreads, onChanged, refreshi
         </Space>
       }
     >
-      <Typography.Text strong style={{ display: 'block', marginBottom: 12, fontSize: 15 }}>
-        Total PNL:{' '}
-        <span style={{ color: totalPnl >= 0 ? '#3f8600' : '#cf1322' }}>
-          {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)}
-        </span>
-      </Typography.Text>
+      <Space size="large" wrap style={{ marginBottom: 12 }}>
+        <Typography.Text strong style={{ fontSize: 15 }}>
+          Total PNL:{' '}
+          <span style={{ color: totalPnl >= 0 ? '#3f8600' : '#cf1322' }}>
+            {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)}
+          </span>
+        </Typography.Text>
+        <Typography.Text strong style={{ fontSize: 15 }}>
+          Total Exit PNL:{' '}
+          <span style={{ color: totalExitPnl >= 0 ? '#3f8600' : '#cf1322' }}>
+            {totalExitPnl >= 0 ? '+' : ''}{totalExitPnl.toFixed(2)}
+          </span>
+        </Typography.Text>
+      </Space>
       {error && <Alert type="error" message={error} closable onClose={() => setError(null)} style={{ marginBottom: 12 }} />}
       {positions.length === 0 ? (
         <Typography.Text type="secondary">No open positions right now.</Typography.Text>

@@ -26,7 +26,12 @@ public sealed record OrderLegResult(
     decimal? Price = null,
     string? OrderType = null,
     string? Status = null,
-    string? PriceReference = null);
+    string? PriceReference = null,
+    /// <summary>Kite's own fill-weighted average price for this order (see
+    /// OrderResult.AverageFillPrice) - what this leg ACTUALLY executed at, as opposed to Price
+    /// above (what it was SENT at). Null until a fill is confirmed. This is the real "at what price
+    /// did our position get cut" figure - Price is only an approximation via the protection band.</summary>
+    decimal? AverageFillPrice = null);
 
 /// <summary>Published once OrderDispatchHostedService finishes acting on a fired trigger -
 /// correlates back to the TriggerEvent that caused it via FireId, and reports what was actually
@@ -49,4 +54,11 @@ public sealed record BasketExecutionEvent(
     IReadOnlyList<OrderLegResult> Legs,
     bool MarginBlocked,
     string? BlockedReason,
-    DateTimeOffset ExecutedAt);
+    DateTimeOffset ExecutedAt,
+    /// <summary>The spread value that actually crossed the rule's threshold and caused this fire -
+    /// copied straight from TriggerEvent.SpreadValueAtTrigger at dispatch time. Null for a
+    /// BasketExecutionEvent raised outside of a trigger fire (currently only PositionsController's
+    /// manual square-off, which has no TriggerEvent to draw this from). Lets the Telegram
+    /// notification (and any future consumer) show "what level fired this" alongside "what the legs
+    /// actually filled at" - see TelegramOrderExecutionSink.BuildMessage.</summary>
+    decimal? SpreadValueAtTrigger = null);

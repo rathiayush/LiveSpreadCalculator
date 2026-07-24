@@ -114,9 +114,11 @@ export default function SpreadGrid({ definitions, liveValues }) {
     },
     {
       // Always the BuyNear(ask)/SellFar(bid) price, regardless of which direction the Spread/
-      // Spread % columns currently favor - see SpreadSnapshot.BuySpreadValue. Shown alongside
-      // Sell spread as a two-way live quote on the spread itself, so you can see what going
-      // either direction costs right now instead of only the auto-picked one.
+      // Spread % columns currently favor - see SpreadSnapshot.BuySpreadValue. There's no separate
+      // "Sell spread" column - the Spread column itself already is the sell-side (SellNear/
+      // BuyFar) quote (see SpreadSnapshot.SpreadValue/SellSpreadValue), so showing it twice would
+      // be redundant; Buy spread is the one extra number that needs its own column. The raw
+      // sellSpreadValue is still read below (Spread difference), just not shown as its own column.
       title: (
         <Tooltip title="What Buy Near / Sell Far would cost right now (near leg at ask, far leg at bid) - always shown, regardless of which direction the Spread column is currently favoring.">
           Buy spread
@@ -133,26 +135,9 @@ export default function SpreadGrid({ definitions, liveValues }) {
       ),
     },
     {
-      // Always the SellNear(bid)/BuyFar(ask) price - the other side of the two-way quote
-      // alongside Buy spread. See SpreadSnapshot.SellSpreadValue.
-      title: (
-        <Tooltip title="What Sell Near / Buy Far would net right now (near leg at bid, far leg at ask) - always shown, regardless of which direction the Spread column is currently favoring.">
-          Sell spread
-        </Tooltip>
-      ),
-      key: 'sellSpread',
-      sorter: (a, b) => (a.live?.sellSpreadValue ?? 0) - (b.live?.sellSpreadValue ?? 0),
-      render: (_, r) => !r.live ? '—' : (
-        <FlashValue value={r.live.sellSpreadValue}>
-          <span style={{ color: r.live.sellSpreadValue >= 0 ? '#3ddc84' : '#ff5c5c' }}>
-            {r.live.sellSpreadValue.toFixed(2)}
-          </span>
-        </FlashValue>
-      ),
-    },
-    {
-      // Plain gap between the two-way quote above - Sell spread minus Buy spread, no percentage
-      // (a raw rupee/point difference, same units as the two columns it's derived from).
+      // Plain gap between the Spread column (sell-side) and Buy spread above - Sell spread minus
+      // Buy spread, no percentage (a raw rupee/point difference, same units as the two values it's
+      // derived from). sellSpreadValue itself isn't shown as its own column (see Buy spread above).
       title: (
         <Tooltip title="Sell spread minus Buy spread - the gap between the two directions' executable prices right now.">
           Spread difference
