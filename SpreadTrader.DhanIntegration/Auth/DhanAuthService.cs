@@ -7,15 +7,27 @@ using SpreadTrader.Core.Brokers;
 namespace SpreadTrader.DhanIntegration.Auth;
 
 /// <summary>
-/// Dhan's login handshake. Two modes, chosen by whether partner credentials are configured (see
-/// DhanOptions):
+/// Dhan's login handshake. IBrokerAuthService's browser-facing surface (BuildLoginUrlAsync /
+/// CompleteLoginAsync) only ever serves the CONSENT flow described below - TOTP auto-login is a
+/// separate, non-interactive path with its own entry point
+/// (<see cref="GenerateAccessTokenViaTotpAsync"/>) driven by DhanTotpAutoRenewalHostedService, not
+/// by anything the dashboard calls.
 ///
-/// STATIC TOKEN (no AppId/AppSecret) - there is no browser flow at all. A token generated in the
-/// Dhan web portal is supplied through configuration and seeded into DhanSession at startup, so
-/// the app is authenticated from boot. <see cref="SupportsInteractiveLogin"/> is false and the
-/// dashboard hides its login button rather than offering one that cannot work.
+/// STATIC TOKEN (DhanOptions.AuthMode "Static", the default, no AppId/AppSecret) - there is no
+/// browser flow and no code minting tokens on your behalf. A token generated in the Dhan web
+/// portal is supplied through configuration and seeded into DhanSession at startup.
+/// <see cref="SupportsInteractiveLogin"/> is false (unless consent credentials are ALSO set - see
+/// below) and the dashboard hides its login button rather than offering one that cannot work.
 ///
-/// CONSENT FLOW (AppId + AppSecret set) - Dhan's three-legged OAuth-style handshake:
+/// TOTP (DhanOptions.AuthMode "Totp") - also no browser, but also no manual token paste, ever.
+/// GenerateAccessTokenViaTotpAsync computes the current 6-digit code from DhanOptions.TotpSecret
+/// (RFC 6238 - see TotpGenerator) and calls Dhan's own generateAccessToken endpoint with it plus
+/// DhanOptions.Pin. DhanTotpAutoRenewalHostedService is what actually calls this, on its own
+/// schedule (startup, ~1h before every 24h expiry, and immediately on DhanSession.
+/// SessionInvalidated) - nothing in this class or the dashboard drives it directly.
+///
+/// CONSENT FLOW (AppId + AppSecret set) - Dhan's three-legged OAuth-style handshake, independent
+/// of AuthMode and available as a manual fallback on top of either mode above:
 ///   1. POST {auth}/app/generate-consent?client_id={dhanClientId}, authenticated with the
 ///      app_id/app_secret headers, returns a <c>consentAppId</c>.
 ///   2. The browser is sent to {auth}/login/consentApp-login?consentAppId={id}, where the user
@@ -30,8 +42,11 @@ namespace SpreadTrader.DhanIntegration.Auth;
 /// </summary>
 public sealed class DhanAuthService : IBrokerAuthService
 {
-    /// <summary>Dhan's consent-flow tokens are valid for 24 hours from issue.</summary>
-    private static readonly TimeSpan ConsentTokenValidity = TimeSpan.FromHours(24);
+    /// <summary>Dhan's fixed 24-hour validity, shared by both flows this app drives
+    /// programmatically (Consent and TOTP) - as opposed to the Static flow's
+    /// AccessTokenValidityDays, which mirrors whatever validity was chosen in the web portal.
+    /// </summary>
+    private static readonly TimeSpan ProgrammaticTokenValidity = TimeSpan.FromHours(24);
 
     private readonly HttpClient _httpClient;
     private readonly DhanOptions _options;
@@ -164,6 +179,81 @@ public sealed class DhanAuthService : IBrokerAuthService
             : null;
     }
 
+    /// <summary>
+    /// Mints a fresh access token with no browser and no human involved: computes the current
+    /// TOTP code from <see cref="DhanOptions.TotpSecret"/> (see TotpGenerator) and calls
+    /// POST {auth}/app/generateAccessToken with dhanClientId + pin + totp as query parameters,
+    /// exactly as documented at https://dhanhq.co/docs/v2/authentication/. Only
+    /// DhanTotpAutoRenewalHostedService calls this - see the class doc comment for its schedule.
+    ///
+    /// On success, writes the token straight to DhanSession, the same as CompleteLoginAsync does
+    /// for the consent flow, so every other Dhan call site picks it up on its very next request
+    /// with no further plumbing - DhanApiClient/DhanMarketFeedClient both read
+    /// DhanSession.AccessToken fresh on each attempt rather than caching a copy.
+    /// </summary>
+    public async Task<BrokerLoginResult> GenerateAccessTokenViaTotpAsync(CancellationToken cancellationToken)
+    {
+        if (!_options.HasTotpCredentials)
+            return new BrokerLoginResult(false, null, null, null,
+                "Dhan:ClientId / Dhan:Pin / Dhan:TotpSecret are not fully configured for TOTP auto-login.");
+
+        string totp;
+        try
+        {
+            totp = TotpGenerator.GenerateCode(_options.TotpSecret!);
+        }
+        catch (FormatException ex)
+        {
+            return new BrokerLoginResult(false, null, null, null,
+                $"Dhan:TotpSecret is not a valid base32 TOTP secret: {ex.Message}");
+        }
+
+        var url = $"{_options.AuthBaseUrl}/app/generateAccessToken" +
+                  $"?dhanClientId={Uri.EscapeDataString(_options.ClientId)}" +
+                  $"&pin={Uri.EscapeDataString(_options.Pin!)}" +
+                  $"&totp={Uri.EscapeDataString(totp)}";
+
+        try
+        {
+            using var response = await _httpClient.PostAsync(url, content: null, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                // A wrong PIN/secret, a clock far enough out of sync to invalidate the TOTP
+                // window, or Dhan-side throttling all land here - never logged at Error, since
+                // the caller retries with backoff and a single failed attempt is routine, not an
+                // incident.
+                _logger.LogWarning("Dhan TOTP login failed (HTTP {Status}): {Body}", (int)response.StatusCode, Truncate(body));
+                return new BrokerLoginResult(false, null, null, null,
+                    $"Dhan rejected the TOTP login (HTTP {(int)response.StatusCode}).");
+            }
+
+            using var document = JsonDocument.Parse(body);
+            var root = document.RootElement;
+
+            var accessToken = root.TryGetProperty("accessToken", out var at) ? at.GetString() : null;
+            if (string.IsNullOrWhiteSpace(accessToken))
+                return new BrokerLoginResult(false, null, null, null, "Dhan's TOTP login response contained no accessToken.");
+
+            var clientId = root.TryGetProperty("dhanClientId", out var cid) ? cid.GetString() : null;
+            if (string.IsNullOrWhiteSpace(clientId)) clientId = _options.ClientId;
+
+            _session.AccessToken = accessToken;
+            _session.ClientId = clientId;
+
+            var expiresUtc = ReadExpiry(root) ?? GetTokenExpiryUtc(DateTimeOffset.UtcNow);
+            return new BrokerLoginResult(true, accessToken, clientId, expiresUtc, null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Dhan TOTP login failed (network error or unexpected response).");
+            return new BrokerLoginResult(false, null, null, null, ex.Message);
+        }
+    }
+
+    private static string Truncate(string value) => value.Length <= 300 ? value : value[..300] + "...";
+
     /// <summary>GET /v2/profile is Dhan's own "is this token still good" endpoint - it returns the
     /// account's details and token validity, and 401s with DH-901 when the token is dead.</summary>
     public async Task<bool> VerifyAccessTokenAsync(string accessToken, CancellationToken cancellationToken)
@@ -194,12 +284,16 @@ public sealed class DhanAuthService : IBrokerAuthService
         }
     }
 
-    /// <summary>Consent-flow tokens last 24 hours; a token generated in the web portal lasts for
-    /// whatever validity was chosen there (up to 30 days), which the operator mirrors in
-    /// Dhan:AccessTokenValidityDays. Unlike Kite there is no fixed daily wall-clock cutoff, so this
-    /// is a duration from issue rather than "the next 6 AM IST".</summary>
+    /// <summary>Consent-flow and TOTP tokens both last a fixed 24 hours from issue; a token
+    /// generated in the web portal (static mode) lasts for whatever validity Dhan currently
+    /// grants there, mirrored in Dhan:AccessTokenValidityDays (24 hours as of this writing - see
+    /// its doc comment). Unlike Kite there is no fixed daily wall-clock cutoff, so this is always
+    /// a duration from issue rather than "the next 6 AM IST". Checked in this order because a
+    /// deployment can have consent credentials configured as a manual fallback on top of Totp
+    /// mode - in that combination the token actually in play was issued by whichever flow last
+    /// ran, but both share the same 24h validity, so the two checks agree either way.</summary>
     public DateTimeOffset GetTokenExpiryUtc(DateTimeOffset issuedAtUtc) =>
-        _options.HasConsentCredentials
-            ? issuedAtUtc.Add(ConsentTokenValidity)
+        _options.UseTotpAuth || _options.HasConsentCredentials
+            ? issuedAtUtc.Add(ProgrammaticTokenValidity)
             : issuedAtUtc.AddDays(Math.Max(1, _options.AccessTokenValidityDays));
 }

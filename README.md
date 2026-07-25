@@ -53,8 +53,11 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
   "TickerMode": "full"
 },
 "Dhan": {
+  "AuthMode": "Static",
   "ClientId": "",
   "AccessToken": "",
+  "Pin": "",
+  "TotpSecret": "",
   "AppId": "",
   "AppSecret": "",
   "RestBaseUrl": "https://api.dhan.co/v2",
@@ -64,7 +67,7 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
   "ScripMasterUrl": "https://images.dhan.co/api-data/api-scrip-master.csv",
   "TickerMode": "full",
   "OrdersPerSecond": 8,
-  "AccessTokenValidityDays": 30
+  "AccessTokenValidityDays": 1
 },
 "Engine": {
   "SpreadRecalculationIntervalMs": 250,
@@ -92,19 +95,36 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
 Only that platform's config section is read; everything else in the app is identical either way.
 Override it per-deployment with the `Broker__Platform` environment variable.
 
-**Running on Dhan.** Two ways to authenticate:
+**Running on Dhan.** No browser login is required either way - pick between a token you paste in
+yourself, or one the app generates for itself forever:
 
-1. *Static token (simplest).* Generate an access token in the Dhan web portal
-   (Profile -> DhanHQ Trading APIs) and set `Dhan:ClientId` + `Dhan:AccessToken`. There is no
-   browser login step at all - the app is authenticated the moment it starts, and the dashboard
-   hides its login button. Set `AccessTokenValidityDays` to the validity you chose (up to 30).
-2. *Consent flow (registered partner app).* Set `Dhan:AppId` + `Dhan:AppSecret` and leave
+1. *Static token.* Generate an access token in the Dhan web portal (Profile -> DhanHQ Trading
+   APIs) and set `Dhan:ClientId` + `Dhan:AccessToken`. The app is authenticated the moment it
+   starts, and the dashboard hides its login button. **Dhan currently fixes portal tokens at
+   24-hour validity** (there is no longer a longer-lived option), so this needs a fresh token
+   pasted into the dashboard's "Enter Dhan token" box roughly once a day.
+2. *TOTP (fully automatic).* Set `Dhan:AuthMode` to `"Totp"`, plus `Dhan:Pin` and
+   `Dhan:TotpSecret`, and leave `AccessToken` blank. The app computes its own login codes and
+   re-authenticates itself - at startup, about an hour before every 24-hour token expires, and
+   immediately if a token is ever invalidated early - with no daily paste and no browser, ever.
+   Recommended if you don't want a recurring manual step; see the security note below before
+   choosing it.
+3. *Consent flow (registered partner app).* Set `Dhan:AppId` + `Dhan:AppSecret` and leave
    `AccessToken` blank. The dashboard's login button then runs Dhan's browser consent handshake;
    register `<your-host>/api/auth/callback` as the app's redirect URL. These tokens last 24 hours.
+   Independent of `AuthMode` - available as a manual fallback on top of either mode above.
 
-If a Dhan token expires while the app is running, you don't need a redeploy: the dashboard shows
-**Enter Dhan token**, which posts a freshly generated token to `POST /api/auth/broker-token`. It's
-verified against Dhan before being accepted and takes effect immediately.
+**Security note on TOTP mode.** `Dhan:Pin` and `Dhan:TotpSecret` are login credentials, not
+tokens - unlike a leaked access token (which is self-limiting; it expires within 24 hours
+regardless), whoever holds both can mint a fresh valid token at will, indefinitely. Set them only
+via an environment variable or `dotnet user-secrets`, never in a committed file, and rotate the
+TOTP secret (Dhan Web -> Setup TOTP again) if you ever suspect it leaked.
+
+If a Dhan token expires while the app is running and you're on Static mode, you don't need a
+redeploy: the dashboard shows **Enter Dhan token**, which posts a freshly generated token to
+`POST /api/auth/broker-token`. It's verified against Dhan before being accepted and takes effect
+immediately. (On TOTP mode this button is unnecessary - the app has already re-authenticated
+itself by the time you'd notice.)
 
 Two things to know before trading on Dhan:
 
@@ -117,58 +137,86 @@ Two things to know before trading on Dhan:
 
 ### Every `Dhan:*` key
 
-All twelve keys, with the environment variable that overrides each one. Only `ClientId` plus
-either `AccessToken` or `AppId`/`AppSecret` need setting - every other key already defaults to the
+All fifteen keys, with the environment variable that overrides each one. `ClientId` is always
+required; which of `AccessToken` / (`Pin` + `TotpSecret`) / (`AppId` + `AppSecret`) you also need
+depends on `AuthMode` - see "Choosing a broker" above. Every other key already defaults to the
 right value and is only there so a deployment can point at something else without a rebuild.
 
 | Key | Env var | Default | What it does |
 |---|---|---|---|
-| `ClientId` | `Dhan__ClientId` | *(blank)* | **Required.** Your Dhan account id, e.g. `1100123456`. Sent as the `client-id` header on every REST call, as `dhanClientId` in order payloads, and as `clientId` on the feed socket. |
-| `AccessToken` | `Dhan__AccessToken` | *(blank)* | Token from the Dhan portal. Set this for static-token mode; leave blank for the consent flow. **Secret.** |
-| `AppId` | `Dhan__AppId` | *(blank)* | Partner app id. Set together with `AppSecret` to enable the browser consent login. |
+| `AuthMode` | `Dhan__AuthMode` | `Static` | `Static` (paste a token yourself) or `Totp` (the app generates and renews its own, forever - see below). |
+| `ClientId` | `Dhan__ClientId` | *(blank)* | **Required in every mode.** Your Dhan account id, e.g. `1100123456`. Sent as the `client-id` header on every REST call, as `dhanClientId` in order payloads, and as `clientId` on the feed socket. |
+| `AccessToken` | `Dhan__AccessToken` | *(blank)* | `AuthMode: Static` only. Token from the Dhan portal. **Secret.** |
+| `Pin` | `Dhan__Pin` | *(blank)* | `AuthMode: Totp` only. Your Dhan account PIN - sent alongside the TOTP code on every auto-login call. **Secret - see the security note above.** |
+| `TotpSecret` | `Dhan__TotpSecret` | *(blank)* | `AuthMode: Totp` only. The base32 seed from Dhan Web -> Profile -> DhanHQ Trading APIs -> Setup TOTP (the same string/QR code you'd otherwise scan into an authenticator app). **Secret - treat as a login credential, not a token; see the security note above.** |
+| `AppId` | `Dhan__AppId` | *(blank)* | Partner app id. Set together with `AppSecret` to enable the browser consent login - independent of `AuthMode`. |
 | `AppSecret` | `Dhan__AppSecret` | *(blank)* | Partner app secret. **Secret.** |
 | `RestBaseUrl` | `Dhan__RestBaseUrl` | `https://api.dhan.co/v2` | Trading/data REST root. |
-| `AuthBaseUrl` | `Dhan__AuthBaseUrl` | `https://auth.dhan.co` | Consent/login host - a different host from the trading API. |
+| `AuthBaseUrl` | `Dhan__AuthBaseUrl` | `https://auth.dhan.co` | Consent/login/TOTP host - a different host from the trading API. |
 | `WsUrl` | `Dhan__WsUrl` | `wss://api-feed.dhan.co` | Live market feed socket. |
 | `OrderUpdateWsUrl` | `Dhan__OrderUpdateWsUrl` | `wss://api-order-update.dhan.co` | Order-update socket. Dhan keeps this separate from the feed; Kite multiplexes the equivalent onto its ticker. |
 | `ScripMasterUrl` | `Dhan__ScripMasterUrl` | `.../api-scrip-master.csv` | Instrument dump. Must be the **compact** list - the detailed one has no per-contract trading symbol column and loads zero instruments. |
 | `TickerMode` | `Dhan__TickerMode` | `full` | `full`, `quote` or `ltp`. Leave on `full`: it is the only mode carrying best bid/ask, which spreads are evaluated against. |
 | `OrdersPerSecond` | `Dhan__OrdersPerSecond` | `8` | Order pacing. Dhan's published limit is 10/sec and it counts reads too, so this keeps headroom. |
-| `AccessTokenValidityDays` | `Dhan__AccessTokenValidityDays` | `30` | Static-token mode only - how long the portal token you generated is valid, so the dashboard expires its cached copy at the right time. |
+| `AccessTokenValidityDays` | `Dhan__AccessTokenValidityDays` | `1` | `AuthMode: Static` only - how long the portal token you generated is valid (Dhan currently issues these fixed at 24 hours), so the dashboard expires its cached copy at the right time. `Totp` and consent-flow tokens ignore this - both use Dhan's fixed 24-hour validity directly. |
 
 ### Step by step: running on Dhan
 
-1. **Get credentials.** Log in at [web.dhan.co](https://web.dhan.co) → Profile → *DhanHQ Trading
-   APIs*. Note your **client id**, and generate an **access token** (choose its validity - up to
-   30 days).
-2. **Whitelist your outbound IP** in the same section. Without this, data APIs work but every
-   order placement is rejected. For a local run this is your home/office public IP; for Azure it
-   is the Web App's outbound IP.
+Steps 1-3 are the same either way; step 4 branches on which mode you picked.
+
+1. **Whitelist your outbound IP.** Log in at [web.dhan.co](https://web.dhan.co) → Profile →
+   *DhanHQ Trading APIs* and whitelist the deployment's outbound IP. Without this, data APIs work
+   but every order placement is rejected. For a local run this is your home/office public IP; for
+   Azure it is the Web App's outbound IP.
+2. **Note your client id** on the same page (e.g. `1100123456`) - required in every mode.
 3. **Point the app at Dhan.** In `LiveSpreadCalculator/appsettings.json` set:
    ```json
    "Broker": { "Platform": "Dhan" }
    ```
    or, better, set `Broker__Platform=Dhan` as an environment variable so the committed file stays
    on `Kite`.
-4. **Supply the secrets as environment variables** rather than editing the file:
+4. **Get credentials and supply them as environment variables** rather than editing the file -
+   pick one:
+
+   **Static token:**
    ```bash
    export Broker__Platform=Dhan
    export Dhan__ClientId=1100123456
    export Dhan__AccessToken=eyJ0eXAiOi...
    ```
-   On Windows PowerShell use `$env:Dhan__ClientId = "1100123456"`. In Azure these go in the Web
-   App's Application Settings. Note the **double** underscore - that is how .NET maps a flat
-   environment variable onto a nested config key.
-5. **Run it** exactly as for Kite (see "Running locally" below). With a static token there is no
-   login step - the log should show `Instrument master ready: 658 futures across [NFO]` and
-   `Connected to Dhan market feed`.
+   Generate the access token on the same *DhanHQ Trading APIs* page - it's valid 24 hours, so
+   you'll repeat this export (or use the dashboard's "Enter Dhan token" button) roughly once a day.
+
+   **TOTP (fully automatic, recommended if you don't want the daily step above):**
+   ```bash
+   export Broker__Platform=Dhan
+   export Dhan__AuthMode=Totp
+   export Dhan__ClientId=1100123456
+   export Dhan__Pin=123456
+   export Dhan__TotpSecret=JBSWY3DPEHPK3PXP
+   ```
+   Get the TOTP secret from the same page → *Setup TOTP* (it shows you the same base32 string/QR
+   code an authenticator app would use - copy the string rather than scanning the QR, since
+   nothing here reads a QR code). Read the security note above before choosing this mode - the PIN
+   and secret together are a standing login credential, not a rotating token.
+
+   On Windows PowerShell use `$env:Dhan__ClientId = "1100123456"` etc. In Azure these go in the Web
+   App's Application Settings. Note the **double** underscore in every `Dhan__*` name - that is how
+   .NET maps a flat environment variable onto a nested config key.
+5. **Run it** exactly as for Kite (see "Running locally" below). There is no login step either
+   way - the log should show `Instrument master ready: 658 futures across [NFO]` and
+   `Connected to Dhan market feed`; on TOTP mode it should additionally show
+   `Dhan TOTP auto-login succeeded for client ...` within the first couple of seconds.
 6. **Rebuild the universe once**: `POST /api/universe/build`, or the *Build universe* button.
    This is required after switching platforms - see above.
 
 If startup logs `Dhan scrip master ... is missing required columns`, `ScripMasterUrl` is pointing
 at the detailed CSV; set it to the compact one in the table above. If the feed logs a disconnect
-with code `807`/`809`, the token has expired or been invalidated - generate a new one and use the
-dashboard's **Enter Dhan token** button, no redeploy needed.
+with code `807`/`809`, the token has expired or been invalidated - on Static mode, generate a new
+one and use the dashboard's **Enter Dhan token** button (no redeploy needed); on TOTP mode this
+self-heals within seconds and needs no action, so if it persists check the logs for a TOTP
+auto-login failure (wrong PIN/secret, or the deployment's clock is far enough out of sync to
+invalidate the TOTP window).
 
 See ARCHITECTURE.md §3.1 for the interfaces involved and what actually differs between the two.
 
@@ -245,6 +293,6 @@ Runs two containers - `api` (the backend, port 8080) and `web` (nginx serving th
 - **Ticks and spreads are not persisted** - a restart loses live prices and computed spread values (expected: they're only meaningful live). **Spread definitions are also in-memory only** - re-add them via the Trigger Config page after a restart (they're quick to re-add now that the symbol picker is synced). **Trigger rules are the one thing that persists**, via the CSV file described above - but see the next point.
 - **The trigger CSV is a stopgap, not a database.** The whole file is rewritten on every add/remove/fire/enable/disable. Fine at the scale of tens or low hundreds of rules; would not hold up under high write concurrency. If that ever matters, swap `CsvTriggerRuleStore` for a real database behind the same `ITriggerRuleStore` interface - nothing else needs to change.
 - **No official .NET SDK exists for either broker** - the WebSocket tick parsers and REST calls here are hand-implemented against each vendor's documented protocol, not a vendor library.
-- **Daily login is required on Kite.** Kite access tokens expire ~6 AM daily by regulation; there's no way around re-authenticating once a day. Dhan tokens last 24 hours (consent flow) or up to 30 days (portal-generated), so this is a Kite-specific constraint.
+- **Daily login is required on Kite, with no way around it.** Kite access tokens expire ~6 AM daily by regulation, and Kite offers no programmatic way to mint one - a human has to complete the browser flow every trading day. Dhan tokens also last 24 hours, but Dhan's TOTP mode (`Dhan:AuthMode: "Totp"`) lets this app generate and renew its own with zero manual steps, ever - see "Choosing a broker" above. That option doesn't exist on Kite.
 - **Full ticker mode uses more bandwidth than quote mode** since it carries market depth on every change - necessary for ask-price triggers, but worth knowing if you scale well past ~200 instruments.
 - **This places real orders.** SEBI's retail algo-trading framework (mandatory since April 2026) requires algo orders to carry an exchange-assigned Algo-ID tagged through your broker - confirm with Zerodha how a self-built strategy like this should be tagged before running it live.

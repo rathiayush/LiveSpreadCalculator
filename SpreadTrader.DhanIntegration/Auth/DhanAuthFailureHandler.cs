@@ -90,7 +90,10 @@ public sealed class DhanAuthFailureHandler
     private async Task<bool> InvalidateAsync(string context, CancellationToken cancellationToken)
     {
         var alreadyCleared = string.IsNullOrEmpty(_session.AccessToken);
-        _session.AccessToken = null;
+        // ClearAccessToken (rather than setting the property directly) is what wakes
+        // DhanTotpAutoRenewalHostedService, when that mode is running, to mint a replacement
+        // immediately instead of waiting for its next scheduled renewal.
+        _session.ClearAccessToken();
 
         _logger.LogError(
             "Dhan session invalidated while {Context} - the access token is no longer valid. " +

@@ -179,6 +179,13 @@ public static class BrokerRegistration
             sp.GetRequiredService<ILogger<DhanAuthService>>()));
         services.AddSingleton<IBrokerAuthService>(sp => sp.GetRequiredService<DhanAuthService>());
 
+        // Only when Dhan:AuthMode is "Totp": mints and renews the session's access token with no
+        // browser and no manual paste, ever - see the class doc comment for its full schedule. In
+        // the default "Static" mode this is never registered, and behaviour is unchanged from
+        // before this existed (DhanSession seeds itself from Dhan:AccessToken at construction).
+        if (dhanOptions.UseTotpAuth)
+            services.AddHostedService<DhanTotpAutoRenewalHostedService>();
+
         services.AddSingleton(sp => new DhanInstrumentMasterService(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(InstrumentMasterHttpClient),
             sp.GetRequiredService<IOptions<DhanOptions>>(),

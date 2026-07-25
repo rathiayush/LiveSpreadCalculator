@@ -25,8 +25,8 @@ public sealed class ChangePasswordRequest
 /// frontend's own cached copy of a previously-obtained broker access token (see brokerAuth.js),
 /// offered back to the backend so a process restart doesn't force a fresh broker login while
 /// that token is still genuinely valid (Kite tokens last until ~6 AM IST the next day, Dhan's
-/// for 24 hours or up to 30 days depending on how they were issued - either way independent of
-/// this app's own uptime).</summary>
+/// currently run 24 hours regardless of how they were issued - either way independent of this
+/// app's own uptime).</summary>
 public sealed class BrokerTokenRestoreRequest
 {
     public required string AccessToken { get; set; }
