@@ -86,7 +86,7 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
 - **AccessToken**: leave blank. It's obtained by completing the login flow (below) and is held in memory from then on - Kite invalidates it daily around 6 AM regardless of how it was issued.
 - **TickerMode**: leave as `"full"` unless you have a specific reason not to - see "Ask price, not last traded price" above.
 - **Dashboard.BaseUrl**: where the React app is served from. Used for CORS and for redirecting back after Kite login.
-- **Storage paths**: relative to the Api project's content root. `TriggersCsvPath` is where trigger rules are persisted (rewritten on every add/remove/fire/enable/disable). `FuturesCsvPath` is where the futures symbol list gets written when you click "Sync symbols from broker" on the Trigger Config page. Both directories are created automatically if missing.
+- **Storage paths**: relative to the Api project's content root. `TriggersCsvPath` is where trigger rules are persisted (rewritten on every add/remove/fire/enable/disable). `FuturesCsvPath` is where the futures symbol list gets written when you click "Sync symbols from broker" on the Trigger Config page. `DhanScripMasterCachePath` (Dhan only) is where the raw scrip master is saved after every successful download - it's what lets a restart warm the in-memory instrument index from disk instead of always re-downloading Dhan's ~26 MB dump first; see "Choosing a broker" below. All directories are created automatically if missing.
 - If you'd rather not put ApiKey/ApiSecret in a file that might end up in source control, override them with environment variables instead (`Kite__ApiKey`, `Kite__ApiSecret`, `Dhan__ClientId`, `Dhan__AccessToken` - see Docker section) or `dotnet user-secrets`. Either way, keep real values out of git - and add `App_Data/` to `.gitignore` too, since the CSV files it holds aren't meant to be committed either.
 
 ## Choosing a broker
@@ -134,6 +134,11 @@ Two things to know before trading on Dhan:
   button) once after changing platform and restarting. Kite and Dhan use different tradingsymbols
   and different instrument ids, so spreads resolved against one broker's instrument master can't be
   reused against the other's. Spread definitions are in-memory only, so this costs nothing.
+- **The Dhan scrip master refreshes once a day** (06:00 IST by default -
+  `Engine:InstrumentMasterRefreshTimeIst`), not on every request - this app mostly trades monthly
+  F&O contracts, which don't need intraday-fresh listings. The download is also saved to disk
+  (`Storage:DhanScripMasterCachePath`), so a restart loads instantly from that local file instead
+  of waiting on a fresh ~26 MB download from Dhan before anything can resolve a symbol.
 
 ### Every `Dhan:*` key
 
