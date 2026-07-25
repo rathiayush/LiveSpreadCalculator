@@ -17,6 +17,7 @@ import {
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
+  ApiOutlined,
 } from '@ant-design/icons'
 import { api } from './api'
 import { useAuth, clearSession } from './auth'
@@ -30,6 +31,7 @@ import ConfiguredSpreadsPage from './pages/ConfiguredSpreadsPage'
 import TriggersPage from './pages/TriggersPage'
 import TriggerActivityPage from './pages/TriggerActivityPage'
 import PositionsPage from './pages/PositionsPage'
+import BrokerPlatformPage from './pages/BrokerPlatformPage'
 import ProfileModal from './components/ProfileModal'
 
 const { Header, Content, Sider } = Layout
@@ -68,6 +70,7 @@ const NAV_ITEMS = [
   { key: '/positions', label: 'Positions & PNL', icon: <ScissorOutlined />, subtitle: 'Open positions, live PNL, and manual square-off' },
   { key: '/symbols', label: 'Symbols', icon: <CloudSyncOutlined />, subtitle: 'Sync the F&O symbol list and build the tradeable universe', group: 'admin' },
   { key: '/configured-spreads', label: 'Configured Spreads', icon: <UnorderedListOutlined />, subtitle: 'Every spread definition currently streaming', group: 'admin' },
+  { key: '/broker-platform', label: 'Broker Platform', icon: <ApiOutlined />, subtitle: 'Switch which broker the app trades through (restarts the app)', group: 'admin' },
 ]
 
 const ADMIN_GROUP_KEY = 'admin-group'
@@ -540,6 +543,10 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
             <Route
               path="/positions"
               element={<PositionsPage />}
+            />
+            <Route
+              path="/broker-platform"
+              element={<BrokerPlatformPage />}
             />
           </Routes>
         </Content>
