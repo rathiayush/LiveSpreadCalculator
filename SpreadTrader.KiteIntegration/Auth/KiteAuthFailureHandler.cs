@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using SpreadTrader.Core.Abstractions;
+using SpreadTrader.Core.Brokers;
 
 namespace SpreadTrader.KiteIntegration.Auth;
 
@@ -15,16 +16,16 @@ namespace SpreadTrader.KiteIntegration.Auth;
 /// whether the in-memory string is non-empty, not whether Kite still honors it) for however
 /// long the process happened to stay up. Calling HandleIfTokenExceptionAsync at every place a
 /// Kite response is parsed fixes both: the session is cleared the instant Kite itself says the
-/// token is dead, and connected dashboards are told immediately via IKiteAuthNotifier instead of
+/// token is dead, and connected dashboards are told immediately via IBrokerAuthNotifier instead of
 /// only finding out next time they reload the page.
 /// </summary>
 public sealed class KiteAuthFailureHandler
 {
     private readonly KiteSession _session;
-    private readonly IKiteAuthNotifier _notifier;
+    private readonly IBrokerAuthNotifier _notifier;
     private readonly ILogger<KiteAuthFailureHandler> _logger;
 
-    public KiteAuthFailureHandler(KiteSession session, IKiteAuthNotifier notifier, ILogger<KiteAuthFailureHandler> logger)
+    public KiteAuthFailureHandler(KiteSession session, IBrokerAuthNotifier notifier, ILogger<KiteAuthFailureHandler> logger)
     {
         _session = session;
         _notifier = notifier;

@@ -1,12 +1,8 @@
-using System.Net.Http.Headers;
-using System.Text.Json;
 using LiveSpreadCalculator.Auth;
 using LiveSpreadCalculator.Contracts;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
-using SpreadTrader.KiteIntegration;
-using SpreadTrader.KiteIntegration.Auth;
+using SpreadTrader.Core.Brokers;
 
 namespace LiveSpreadCalculator.Controllers;
 
@@ -14,33 +10,27 @@ namespace LiveSpreadCalculator.Controllers;
 [Route("api/auth")]
 public sealed class AuthController : ControllerBase
 {
-    private readonly KiteAuthService _authService;
-    private readonly KiteSession _session;
+    private readonly IBrokerAuthService _brokerAuth;
+    private readonly IBrokerSession _session;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AuthController> _logger;
     private readonly CsvUserStore _userStore;
     private readonly JwtTokenService _tokenService;
-    private readonly IHttpClientFactory _httpClientFactory;
-    private readonly KiteOptions _kiteOptions;
 
     public AuthController(
-        KiteAuthService authService,
-        KiteSession session,
+        IBrokerAuthService brokerAuth,
+        IBrokerSession session,
         IConfiguration configuration,
         ILogger<AuthController> logger,
         CsvUserStore userStore,
-        JwtTokenService tokenService,
-        IHttpClientFactory httpClientFactory,
-        IOptions<KiteOptions> kiteOptions)
+        JwtTokenService tokenService)
     {
-        _authService = authService;
+        _brokerAuth = brokerAuth;
         _session = session;
         _configuration = configuration;
         _logger = logger;
         _userStore = userStore;
         _tokenService = tokenService;
-        _httpClientFactory = httpClientFactory;
-        _kiteOptions = kiteOptions.Value;
     }
 
     /// <summary>App login. Validates email/password against App_Data/users.csv and, on success,
@@ -89,48 +79,124 @@ public sealed class AuthController : ControllerBase
         return Ok(new { message = "Password updated. Please sign in again." });
     }
 
-    /// <summary>Returns the Kite login URL the frontend should redirect the browser to.
-    /// Register this app's redirect URL (pointing at /api/auth/callback) in the Kite Connect
-    /// developer console for your api_key.</summary>
-    [HttpGet("login-url")]
-    public ActionResult<object> GetLoginUrl() => Ok(new { url = _authService.BuildLoginUrl() });
-
-    [HttpGet("status")]
-    public ActionResult<object> GetStatus() => Ok(new { isAuthenticated = !string.IsNullOrEmpty(_session.AccessToken) });
-
-    /// <summary>Hands the CURRENT Kite access token back to an already-authenticated frontend, so
-    /// it can cache it locally (see kiteAuth.js) and offer it back via POST /api/auth/kite-restore
-    /// after a future process restart - this is what avoids a real Kite login every time the
-    /// backend restarts while yesterday's token is still genuinely valid (Kite tokens are good
-    /// until ~6 AM IST the next day, regardless of this app's own process lifetime). Deliberately
-    /// requires the same JWT bearer as everything else - this is not a new anonymous way to read
-    /// the Kite token, just a value only an already-logged-in dashboard can fetch for itself.
-    /// Call right after a successful Kite login (kiteLogin=success) - see App.jsx.</summary>
-    [HttpGet("kite-token")]
-    public ActionResult<object> GetKiteToken()
+    /// <summary>Which broker this deployment is wired to (see Broker:Platform) and whether it has a
+    /// browser login flow at all. The dashboard reads this to label its status pill and login
+    /// button for the live platform rather than hardcoding one, and to hide the button entirely
+    /// when the platform is configured for static-token access (Dhan with a token generated in the
+    /// web portal), where a login button could only ever fail.</summary>
+    [HttpGet("broker")]
+    public ActionResult<object> GetBroker() => Ok(new
     {
-        if (string.IsNullOrEmpty(_session.AccessToken))
-            return NotFound(new { error = "No active Kite session to return a token for." });
+        platform = _brokerAuth.PlatformName,
+        supportsInteractiveLogin = _brokerAuth.SupportsInteractiveLogin,
+        isAuthenticated = _session.IsAuthenticated,
+        notAuthenticatedGuidance = _brokerAuth.NotAuthenticatedGuidance,
+    });
 
-        return Ok(new { accessToken = _session.AccessToken });
+    /// <summary>Returns the broker login URL the frontend should redirect the browser to. Register
+    /// this app's redirect URL (pointing at /api/auth/callback) in the broker's developer console -
+    /// the Kite Connect console for a Kite api_key, or the Dhan partner app settings.</summary>
+    [HttpGet("login-url")]
+    public async Task<ActionResult<object>> GetLoginUrl(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var url = await _brokerAuth.BuildLoginUrlAsync(cancellationToken);
+            return Ok(new { url });
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Misconfiguration (no api key / no partner credentials) or a platform with no login
+            // flow at all - a 400 with the reason is far more useful to the dashboard than an
+            // empty URL it has to guess about.
+            _logger.LogWarning(ex, "Could not build a broker login URL");
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
-    /// <summary>Restores a Kite access token the frontend cached from an earlier login (see
-    /// kiteAuth.js / GET /api/auth/kite-token) back into this process's in-memory KiteSession -
-    /// the fix for "every backend restart forces a fresh Kite login" even though the previous
-    /// token is often still hours away from Kite's own ~6 AM IST daily expiry. The backend's own
-    /// in-memory token is always authoritative when present: this only FILLS the session when it's
-    /// currently empty (fresh process start), it never overwrites a token this process already has.
+    [HttpGet("status")]
+    public ActionResult<object> GetStatus() => Ok(new { isAuthenticated = _session.IsAuthenticated });
+
+    /// <summary>Hands the CURRENT broker access token back to an already-authenticated frontend, so
+    /// it can cache it locally (see brokerAuth.js) and offer it back via POST /api/auth/broker-restore
+    /// after a future process restart - this is what avoids a real broker login every time the
+    /// backend restarts while the existing token is still genuinely valid. Deliberately requires
+    /// the same JWT bearer as everything else - this is not a new anonymous way to read the broker
+    /// token, just a value only an already-logged-in dashboard can fetch for itself.
     ///
-    /// The offered token is verified LIVE against Kite (a single cheap GET /user/profile call)
-    /// before it's ever trusted - a candidate that's actually dead (expired past Kite's own ~6 AM
-    /// IST cutoff, revoked by a fresh login elsewhere, or just garbage) is rejected right here,
-    /// synchronously, so the caller finds out immediately instead of the UI showing "authenticated"
-    /// off an unverified value and only discovering it's dead whenever some other Kite call happens
-    /// to run next. isAuthenticated:false in the response means exactly that: the frontend should
-    /// drop its cached copy (see App.jsx's loadAuthStatus) and show the Login to Kite button.</summary>
-    [HttpPost("kite-restore")]
-    public async Task<ActionResult<object>> RestoreKiteToken([FromBody] KiteTokenRestoreRequest request, CancellationToken cancellationToken)
+    /// The expiry is computed by the active platform (see IBrokerAuthService.GetTokenExpiryUtc)
+    /// rather than assumed by the client, because the two brokers expire tokens on completely
+    /// different schedules - Kite at a fixed ~6 AM IST daily cutoff, Dhan a fixed duration from
+    /// issue.</summary>
+    [HttpGet("broker-token")]
+    public ActionResult<object> GetBrokerToken()
+    {
+        if (string.IsNullOrEmpty(_session.AccessToken))
+            return NotFound(new { error = "No active broker session to return a token for." });
+
+        return Ok(new
+        {
+            accessToken = _session.AccessToken,
+            expiresUtc = _brokerAuth.GetTokenExpiryUtc(DateTimeOffset.UtcNow),
+        });
+    }
+
+    /// <summary>Installs an access token supplied by hand, after verifying it live against the
+    /// broker. This exists because the two platforms have fundamentally different auth models:
+    ///
+    ///  - Kite has a MANDATORY browser login. Its tokens die at ~6 AM IST daily and can only be
+    ///    reissued by completing that flow, so there is always a login button to fall back on.
+    ///  - Dhan does NOT require a browser login. The usual setup is an access token generated in
+    ///    the Dhan web portal and supplied through configuration, which means
+    ///    SupportsInteractiveLogin is false and there is no login button at all. Without this
+    ///    endpoint, the moment such a token expired (or was invalidated mid-session by the auth
+    ///    failure handler) the only way to get trading again would be editing configuration and
+    ///    restarting a live process holding open positions.
+    ///
+    /// So: paste a freshly generated token here and the process picks it up immediately. Unlike
+    /// /broker-restore, this deliberately REPLACES whatever token the session currently holds -
+    /// it's an operator action, not an opportunistic restore. Still requires the app's own JWT,
+    /// and the token is verified against the broker before being accepted, so a typo or a dead
+    /// token is rejected here rather than silently breaking the next order.</summary>
+    [HttpPost("broker-token")]
+    public async Task<ActionResult<object>> SetBrokerToken([FromBody] SetBrokerTokenRequest request, CancellationToken cancellationToken)
+    {
+        var token = request.AccessToken?.Trim();
+        if (string.IsNullOrWhiteSpace(token))
+            return BadRequest(new { error = "Access token is required." });
+
+        if (!await _brokerAuth.VerifyAccessTokenAsync(token, cancellationToken))
+        {
+            _logger.LogWarning("Rejected a manually supplied broker token - {Platform} does not honor it.", _brokerAuth.PlatformName);
+            return BadRequest(new { error = $"{_brokerAuth.PlatformName} rejected that access token. Check it was copied in full and hasn't expired." });
+        }
+
+        _session.AccessToken = token;
+        _logger.LogInformation("{Platform} access token installed manually via POST /api/auth/broker-token.", _brokerAuth.PlatformName);
+
+        return Ok(new
+        {
+            isAuthenticated = true,
+            expiresUtc = _brokerAuth.GetTokenExpiryUtc(DateTimeOffset.UtcNow),
+        });
+    }
+
+    /// <summary>Restores a broker access token the frontend cached from an earlier login (see
+    /// brokerAuth.js / GET /api/auth/broker-token) back into this process's in-memory session - the
+    /// fix for "every backend restart forces a fresh broker login" even though the previous token
+    /// is often still hours (or days) away from its own expiry. The backend's own in-memory token
+    /// is always authoritative when present: this only FILLS the session when it's currently empty
+    /// (fresh process start), it never overwrites a token this process already has.
+    ///
+    /// The offered token is verified LIVE against the broker (a single cheap profile call) before
+    /// it's ever trusted - a candidate that's actually dead (expired, revoked by a fresh login
+    /// elsewhere, or just garbage) is rejected right here, synchronously, so the caller finds out
+    /// immediately instead of the UI showing "authenticated" off an unverified value and only
+    /// discovering it's dead whenever some other broker call happens to run next.
+    /// isAuthenticated:false in the response means exactly that: the frontend should drop its
+    /// cached copy (see App.jsx's loadAuthStatus) and show the login button.</summary>
+    [HttpPost("broker-restore")]
+    public async Task<ActionResult<object>> RestoreBrokerToken([FromBody] BrokerTokenRestoreRequest request, CancellationToken cancellationToken)
     {
         if (!string.IsNullOrEmpty(_session.AccessToken))
             return Ok(new { isAuthenticated = true }); // already has a live session - nothing to restore
@@ -138,67 +204,43 @@ public sealed class AuthController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.AccessToken))
             return Ok(new { isAuthenticated = false });
 
-        if (!await VerifyKiteTokenAsync(request.AccessToken, cancellationToken))
+        if (!await _brokerAuth.VerifyAccessTokenAsync(request.AccessToken, cancellationToken))
         {
-            _logger.LogInformation("Rejected a frontend-cached Kite token during restore - Kite no longer honors it.");
+            _logger.LogInformation("Rejected a frontend-cached broker token during restore - {Platform} no longer honors it.", _brokerAuth.PlatformName);
             return Ok(new { isAuthenticated = false });
         }
 
         _session.AccessToken = request.AccessToken;
-        _logger.LogInformation("Kite session restored from a frontend-cached access token (verified live against Kite).");
+        _logger.LogInformation("{Platform} session restored from a frontend-cached access token (verified live against the broker).", _brokerAuth.PlatformName);
         return Ok(new { isAuthenticated = true });
     }
 
-    /// <summary>Cheapest possible "is this access token still honored by Kite" check - GET
-    /// /user/profile with the candidate token, same Authorization header shape every other
-    /// Kite-calling service in this app uses (see KitePositionsService/KiteMarginService). Only
-    /// used by RestoreKiteToken above; every other Kite call site already gets equivalent
-    /// verification "for free" as a side effect of the request it was going to make anyway (see
-    /// KiteAuthFailureHandler), so this dedicated check exists purely for the restore path, where
-    /// there's no other Kite call happening yet to naturally reveal an invalid token.</summary>
-    private async Task<bool> VerifyKiteTokenAsync(string accessToken, CancellationToken cancellationToken)
-    {
-        try
-        {
-            var client = _httpClientFactory.CreateClient();
-            using var request = new HttpRequestMessage(HttpMethod.Get, $"{_kiteOptions.RestBaseUrl}/user/profile");
-            request.Headers.Add("X-Kite-Version", "3");
-            request.Headers.Authorization = new AuthenticationHeaderValue("token", $"{_kiteOptions.ApiKey}:{accessToken}");
-
-            using var response = await client.SendAsync(request, cancellationToken);
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            using var doc = JsonDocument.Parse(body);
-            return string.Equals(doc.RootElement.GetProperty("status").GetString(), "success", StringComparison.Ordinal);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Kite token verification failed (network error or unexpected response) - treating the candidate token as invalid.");
-            return false;
-        }
-    }
-
-    /// <summary>Kite redirects the browser here with request_token after a successful login.
-    /// Exchanges it for an access_token, then bounces the browser back to the dashboard. Must be
-    /// anonymous: it's an external redirect from Kite's servers, which can't attach our Bearer
-    /// token. The request_token itself is the short-lived secret Kite vouches for here.</summary>
+    /// <summary>The broker redirects the browser here after a successful login. Must be anonymous:
+    /// it's an external redirect from the broker's servers, which can't attach our Bearer token.
+    /// The short-lived token in the query string is the secret the broker vouches for here.
+    ///
+    /// The entire query string is handed to the active platform's auth service rather than being
+    /// destructured here, because the two brokers redirect with different parameters - Kite with
+    /// <c>request_token</c> plus a <c>status</c>, Dhan with a <c>tokenId</c>. Keeping that
+    /// knowledge inside the platform adapter is what lets this one callback serve both.</summary>
     [AllowAnonymous]
     [HttpGet("callback")]
-    public async Task<IActionResult> Callback([FromQuery(Name = "request_token")] string? requestToken, [FromQuery] string? status, CancellationToken cancellationToken)
+    public async Task<IActionResult> Callback(CancellationToken cancellationToken)
     {
         var dashboardUrl = _configuration["Dashboard:BaseUrl"] ?? "https://localhost:63061";
 
-        if (!string.Equals(status, "success", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(requestToken))
-            return Redirect($"{dashboardUrl}?kiteLogin=failed");
+        var query = Request.Query.ToDictionary(
+            kv => kv.Key,
+            kv => (string?)kv.Value.ToString(),
+            StringComparer.OrdinalIgnoreCase);
 
-        try
+        var result = await _brokerAuth.CompleteLoginAsync(query, cancellationToken);
+        if (!result.Success)
         {
-            await _authService.ExchangeRequestTokenAsync(requestToken, cancellationToken);
-            return Redirect($"{dashboardUrl}?kiteLogin=success");
+            _logger.LogError("{Platform} login callback failed: {Error}", _brokerAuth.PlatformName, result.Error);
+            return Redirect($"{dashboardUrl}?brokerLogin=failed");
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Kite token exchange failed");
-            return Redirect($"{dashboardUrl}?kiteLogin=failed");
-        }
+
+        return Redirect($"{dashboardUrl}?brokerLogin=success");
     }
 }

@@ -46,18 +46,18 @@ let positionsList = []
 // a fetch/push succeeds. Kept separate from positionsList so a transient fetch failure doesn't
 // have to also decide whether to blank out data that's still perfectly good to show.
 let positionsError = null
-// Non-null once the backend has told us (via "kiteAuthInvalidated" - see
-// KiteAuthFailureHandler/SignalRKiteAuthNotifier) that a real Kite API call failed with a
+// Non-null once the backend has told us (via "brokerAuthInvalidated" - see the active broker's
+// auth-failure handler / SignalRBrokerAuthNotifier) that a real broker API call failed with a
 // TokenException mid-session. Distinct from the one-time GET /api/auth/status check App.jsx
 // does on load - this is how the app finds out *live*, without waiting for a page reload, that
 // the token died partway through the day.
-let kiteAuthInvalidReason = null
+let brokerAuthInvalidReason = null
 
 const spreadsListeners = new Set()
 const rankingListeners = new Set()
 const triggerListeners = new Set()
 const connectionListeners = new Set()
-const kiteAuthListeners = new Set()
+const brokerAuthListeners = new Set()
 const positionsListeners = new Set()
 const positionsErrorListeners = new Set()
 
@@ -81,7 +81,7 @@ const subscribeSpreads = subscribe(spreadsListeners)
 const subscribeRanking = subscribe(rankingListeners)
 const subscribeTriggers = subscribe(triggerListeners)
 const subscribeConnection = subscribe(connectionListeners)
-const subscribeKiteAuth = subscribe(kiteAuthListeners)
+const subscribeBrokerAuth = subscribe(brokerAuthListeners)
 const subscribePositions = subscribe(positionsListeners)
 const subscribePositionsError = subscribe(positionsErrorListeners)
 
@@ -89,7 +89,7 @@ const getSpreadsSnapshot = () => spreadsMap
 const getRankingSnapshot = () => rankingList
 const getTriggersSnapshot = () => triggerEventsList
 const getConnectionSnapshot = () => connectionState
-const getKiteAuthSnapshot = () => kiteAuthInvalidReason
+const getBrokerAuthSnapshot = () => brokerAuthInvalidReason
 const getPositionsSnapshot = () => positionsList
 const getPositionsErrorSnapshot = () => positionsError
 
@@ -243,14 +243,14 @@ function ensureConnection() {
     notify(positionsErrorListeners)
   })
 
-  // Pushed the instant KiteAuthFailureHandler sees a TokenException from any real Kite call
+  // Pushed the instant the broker's auth-failure handler sees a dead token on any real API call
   // (order placement, margin check, order status/cancel) - see that class on the backend. The
   // session is already cleared server-side by the time this arrives, so GET /api/auth/status
   // would report the same thing on next load anyway; this just means the UI doesn't have to
   // wait for that reload to tell you your session died.
-  connection.on('kiteAuthInvalidated', (payload) => {
-    kiteAuthInvalidReason = payload?.reason || 'Your Kite session is no longer valid.'
-    notify(kiteAuthListeners)
+  connection.on('brokerAuthInvalidated', (payload) => {
+    brokerAuthInvalidReason = payload?.reason || 'Your broker session is no longer valid.'
+    notify(brokerAuthListeners)
   })
 
   connection.onreconnecting(() => {
@@ -307,7 +307,7 @@ export function stopConnection() {
   spreadsMap = {}
   rankingList = []
   triggerEventsList = []
-  kiteAuthInvalidReason = null
+  brokerAuthInvalidReason = null
   positionsList = []
   positionsError = null
   // Not carried over to the next login - if Positions & PNL happens to still be mounted across a
@@ -366,17 +366,17 @@ export function useSpreadHubConnectionState() {
 }
 
 // Null when the session is fine (or hasn't been checked yet); a reason string once the backend
-// has pushed "kiteAuthInvalidated". App.jsx uses this to flip the auth tag and prompt re-login
+// has pushed "brokerAuthInvalidated". App.jsx uses this to flip the auth tag and prompt re-login
 // immediately, without waiting for a page reload.
-export function useKiteAuthInvalidated() {
-  return useSyncExternalStore(subscribeKiteAuth, getKiteAuthSnapshot)
+export function useBrokerAuthInvalidated() {
+  return useSyncExternalStore(subscribeBrokerAuth, getBrokerAuthSnapshot)
 }
 
-// Called once the user re-completes the Kite login flow (see App.jsx's kiteLogin=success
+// Called once the user re-completes the broker login flow (see App.jsx's brokerLogin=success
 // handling), so a stale invalidation notice doesn't keep showing after they've already fixed it.
-export function clearKiteAuthInvalidated() {
-  kiteAuthInvalidReason = null
-  notify(kiteAuthListeners)
+export function clearBrokerAuthInvalidated() {
+  brokerAuthInvalidReason = null
+  notify(brokerAuthListeners)
 }
 
 // Live open positions/PNL - see LivePositionsHostedService on the backend. Updates roughly every
@@ -410,7 +410,7 @@ export function refreshPositions() {
 }
 
 // Tells the backend a browser tab now has the Positions & PNL page open, so
-// LivePositionsHostedService resumes its Kite REST resync + live PNL push for as long as at
+// LivePositionsHostedService resumes its broker REST resync + live PNL push for as long as at
 // least one tab has called this - see PositionsViewerTracker/SpreadHub.JoinPositions on the
 // backend. Call from that page's mount; call leavePositionsView() on its unmount. Safe to call
 // even before the SignalR connection has finished starting (invokeIfConnected no-ops until

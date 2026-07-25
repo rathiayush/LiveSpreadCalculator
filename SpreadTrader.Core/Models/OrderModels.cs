@@ -4,6 +4,14 @@ public sealed class OrderLegRequest
 {
     public required string TradingSymbol { get; set; }
     public required string Exchange { get; set; }
+
+    /// <summary>The broker's numeric handle for this contract, when the caller already resolved
+    /// one. Kite's order API addresses orders by tradingsymbol and ignores this; Dhan's has no
+    /// symbol field at all and addresses them by securityId, so supplying it here saves the Dhan
+    /// gateway a lookup - and, more importantly, means a leg the engine already resolved can never
+    /// be re-resolved to a different contract by a symbol collision. 0 when unknown, in which case
+    /// the gateway falls back to looking the symbol up in the instrument master.</summary>
+    public uint InstrumentToken { get; set; }
     public required string TransactionType { get; set; } // BUY or SELL
     public required int Quantity { get; set; }
     public string Product { get; set; } = "NRML";

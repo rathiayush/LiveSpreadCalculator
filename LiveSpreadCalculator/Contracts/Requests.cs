@@ -21,12 +21,22 @@ public sealed class ChangePasswordRequest
     public required string NewPassword { get; set; }
 }
 
-/// <summary>Posted to POST /api/auth/kite-restore - see that endpoint's doc comment. The
-/// frontend's own cached copy of a previously-obtained Kite access token (see kiteAuth.js),
-/// offered back to the backend so a process restart doesn't force a fresh Kite login while
-/// that token is still genuinely valid (Kite tokens are valid until ~6 AM IST the next day,
-/// independent of this app's own uptime).</summary>
-public sealed class KiteTokenRestoreRequest
+/// <summary>Posted to POST /api/auth/broker-restore - see that endpoint's doc comment. The
+/// frontend's own cached copy of a previously-obtained broker access token (see brokerAuth.js),
+/// offered back to the backend so a process restart doesn't force a fresh broker login while
+/// that token is still genuinely valid (Kite tokens last until ~6 AM IST the next day, Dhan's
+/// currently run 24 hours regardless of how they were issued - either way independent of this
+/// app's own uptime).</summary>
+public sealed class BrokerTokenRestoreRequest
+{
+    public required string AccessToken { get; set; }
+}
+
+/// <summary>Posted to POST /api/auth/broker-token to install an access token by hand - see that
+/// endpoint's doc comment. This is the recovery path for a platform with no browser login flow
+/// (Dhan running on a token generated in its web portal), where there would otherwise be no way to
+/// replace an expired token without editing configuration and restarting the process.</summary>
+public sealed class SetBrokerTokenRequest
 {
     public required string AccessToken { get; set; }
 }
