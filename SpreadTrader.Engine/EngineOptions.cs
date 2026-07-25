@@ -25,7 +25,7 @@ public sealed class EngineOptions
     public int RankingIntervalMinutes { get; set; } = 3;
 
     /// <summary>Before punching a basket, fetch Kite's basket margin (with the hedge/spread
-    /// benefit applied - see KiteMarginService.GetBasketMarginAsync) and the account's actual
+    /// benefit applied - see IMarginService.GetBasketMarginAsync) and the account's actual
     /// available margin, and refuse to place any leg at all if available margin is short. This
     /// is a fail-safe against ending up with a partially-filled, unhedged position purely
     /// because the account didn't have enough margin for the second leg - see
@@ -130,6 +130,14 @@ public sealed class EngineOptions
     /// closed on Saturday/Sunday, so there's no reason to clear triggers/activity or purge history
     /// then. Set false to run it every day.</summary>
     public bool DailyMaintenanceWeekdaysOnly { get; set; } = true;
+
+    /// <summary>IST clock time ("HH:mm") InstrumentMasterRefreshHostedService re-downloads the
+    /// broker's instrument/scrip master. Default 06:00 - same slot as daily maintenance, well
+    /// before the 09:15 open, so the day's trading starts against the current month's contract
+    /// list rather than whatever was cached at the last restart. Runs every day, including
+    /// weekends - there's no trading-state reason to skip them here, and it means Monday's open
+    /// isn't the first time the week's data gets refreshed.</summary>
+    public string InstrumentMasterRefreshTimeIst { get; set; } = "06:00";
 
     /// <summary>Daily job wipes ALL entry trigger rules (ITriggerRuleStore.RemoveAll).</summary>
     public bool DailyMaintenanceClearTriggers { get; set; } = true;

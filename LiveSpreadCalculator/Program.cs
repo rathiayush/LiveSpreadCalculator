@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json.Serialization;
 using LiveSpreadCalculator.Auth;
+using LiveSpreadCalculator.Brokers;
 using LiveSpreadCalculator.Hubs;
 using LiveSpreadCalculator.Notifications;
 using LiveSpreadCalculator.Persistence;
@@ -12,22 +13,16 @@ using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using SpreadTrader.Core.Abstractions;
+using SpreadTrader.Core.Brokers;
 using SpreadTrader.Core.Realtime;
 using SpreadTrader.Core.Store;
 using SpreadTrader.Engine;
 using SpreadTrader.Engine.Services;
-using SpreadTrader.KiteIntegration;
-using SpreadTrader.KiteIntegration.Auth;
-using SpreadTrader.KiteIntegration.Instruments;
-using SpreadTrader.KiteIntegration.Orders;
-using SpreadTrader.KiteIntegration.Positions;
-using SpreadTrader.KiteIntegration.Ticker;
 
 var builder = WebApplication.CreateBuilder(args);
 
 const string DashboardCorsPolicy = "Dashboard";
 
-builder.Services.Configure<KiteOptions>(builder.Configuration.GetSection(KiteOptions.SectionName));
 builder.Services.Configure<EngineOptions>(builder.Configuration.GetSection(EngineOptions.SectionName));
 
 // MCX commodity arbitrage add-on (silver/gold/crude/natgas calendar + cross-contract spreads).
@@ -58,6 +53,19 @@ var pnlAlertsCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:PnlAlertsCsvPath"] ?? "App_Data/pnl-alerts.csv");
 var futuresCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:FuturesCsvPath"] ?? "App_Data/futures_instruments.csv");
+// Dhan only: the raw scrip master exactly as downloaded (not the filtered futures list above),
+// persisted to disk so a process restart can warm its in-memory instrument index from the local
+// file instead of always re-downloading Dhan's ~26 MB dump first - see
+// DhanInstrumentMasterService.EnsureLoadedAsync's doc comment. Unused on Kite.
+var dhanScripMasterCachePath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:DhanScripMasterCachePath"] ?? "App_Data/dhan_scrip_master_cache.csv");
+
+// A broker switch made from the dashboard (see BrokerPlatformController/BrokerSwitchState) writes
+// its choice here - read inside AddBrokerIntegration to seed BrokerSwitchState's initial value, so
+// a later literal restart also comes up on whichever platform was last switched to, even though
+// the switch itself no longer needs a restart to take effect.
+var brokerPlatformOverridePath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:BrokerPlatformOverridePath"] ?? "App_Data/broker-platform-override.txt");
 // The universe builder pulls its symbol list live from the Kite instrument master (every stock
 // currently listed for NFO futures - see InstrumentMasterService.GetAllFuturesUnderlyings) rather
 // than a hand-maintained CSV. How many symbols get built is configurable per-request via
@@ -113,66 +121,24 @@ builder.Services.AddSingleton<ISpreadHistoryStore>(sp =>
 // can reseed the Trigger Activity feed after a browser refresh - see TriggerActivityEntry.
 builder.Services.AddSingleton<ITriggerActivityStore, InMemoryTriggerActivityStore>();
 
-// ---- Kite integration -----------------------------------------------------------------------
-builder.Services.AddHttpClient();
-builder.Services.AddSingleton<KiteSession>();
-builder.Services.AddSingleton(new RateLimiter(maxOperationsPerSecond: 3));
+// ---- Broker integration ---------------------------------------------------------------------
+// Registers BOTH Kite's and Dhan's implementations of the interfaces in SpreadTrader.Core.Brokers,
+// always - Broker:Platform only picks which one is active at startup, and the dashboard can switch
+// which one is active afterwards with no restart (see BrokerSwitchState). Everything below this
+// line (engine, controllers, hub) is written against those interfaces and is identical either way.
+// See BrokerRegistration for the full wiring.
+builder.Services.AddBrokerIntegration(builder.Configuration, mcxOptions, futuresCsvPath, dhanScripMasterCachePath, brokerPlatformOverridePath);
 
-builder.Services.AddSingleton(sp => new InstrumentMasterService(
-    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(InstrumentMasterService)),
-    sp.GetRequiredService<IOptions<KiteOptions>>(),
-    sp.GetRequiredService<ILogger<InstrumentMasterService>>(),
-    futuresCsvPath,
-    // ["NFO"] when the MCX add-on is off (unchanged behaviour), ["NFO","MCX"] when on.
-    mcxOptions.ResolveExchanges()));
+// Refreshes the instrument master (Dhan's ~26 MB scrip master, or Kite's per-exchange dump) on a
+// background timer well inside its own 12h cache window, so no live request - the Add Spread
+// pickers, GET /api/positions, POST /api/spreads - is ever the one that pays for a stale-cache
+// reload. See InstrumentMasterRefreshHostedService's doc comment for the full reasoning.
+builder.Services.AddHostedService<InstrumentMasterRefreshHostedService>();
 
-builder.Services.AddSingleton(sp => new KiteAuthService(
-    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KiteAuthService)),
-    sp.GetRequiredService<IOptions<KiteOptions>>(),
-    sp.GetRequiredService<KiteSession>()));
-
-// Detects Kite's TokenException (access token invalid/expired) at every call site that hits
-// Kite's REST API, clears KiteSession immediately, and pushes IKiteAuthNotifier (below) so
-// connected dashboards flip to "not logged in" the instant a real API call fails - not just on
-// next page load. See KiteAuthFailureHandler's own doc comment.
-builder.Services.AddSingleton<KiteAuthFailureHandler>();
-builder.Services.AddSingleton<IKiteAuthNotifier, SignalRKiteAuthNotifier>();
-
-builder.Services.AddSingleton(sp => new KiteOrderGateway(
-    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KiteOrderGateway)),
-    sp.GetRequiredService<IOptions<KiteOptions>>(),
-    sp.GetRequiredService<KiteSession>(),
-    sp.GetRequiredService<RateLimiter>(),
-    sp.GetRequiredService<KiteAuthFailureHandler>(),
-    sp.GetRequiredService<ILogger<KiteOrderGateway>>()));
-builder.Services.AddSingleton<IOrderGateway>(sp => sp.GetRequiredService<KiteOrderGateway>());
-
-builder.Services.AddSingleton(sp => new KiteMarginService(
-    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KiteMarginService)),
-    sp.GetRequiredService<IOptions<KiteOptions>>(),
-    sp.GetRequiredService<KiteSession>(),
-    sp.GetRequiredService<KiteAuthFailureHandler>(),
-    sp.GetRequiredService<ILogger<KiteMarginService>>()));
-
-// Live positions/PNL + manual square-off (PositionsController) - see KitePositionsService's doc
-// comment for why this exists (lets the dashboard replace checking PNL via the Kite app, which
-// invalidates this app's own session).
-builder.Services.AddSingleton(sp => new KitePositionsService(
-    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KitePositionsService)),
-    sp.GetRequiredService<IOptions<KiteOptions>>(),
-    sp.GetRequiredService<KiteSession>(),
-    sp.GetRequiredService<KiteAuthFailureHandler>(),
-    sp.GetRequiredService<InstrumentMasterService>(),
-    sp.GetRequiredService<ITickStore>(),
-    sp.GetRequiredService<ILogger<KitePositionsService>>(),
-    mcxOptions));
-
-// Shared MARKET -> protected-LIMIT conversion (Kite rejects raw MARKET orders for F&O - see
+// Shared MARKET -> protected-LIMIT conversion (brokers reject raw MARKET orders for F&O - see
 // MarketProtectionService's doc comment). Used by both OrderDispatchHostedService (triggered
 // baskets, registered below) and PositionsController (manual square-off).
 builder.Services.AddSingleton<MarketProtectionService>();
-
-builder.Services.AddSingleton<KiteTickerClient>();
 
 // ---- Engine (singleton pipeline: ingest -> calculate -> evaluate -> dispatch) ---------------
 // TickIngestionHostedService is also registered as itself (not just IHostedService) because
@@ -251,7 +217,7 @@ builder.Services.AddHostedService<PnlAlertHostedService>();
 
 // ---- Universe builder + bulk trigger template ---------------------------------------------
 builder.Services.AddSingleton(sp => new UniverseBuilderService(
-    sp.GetRequiredService<InstrumentMasterService>(),
+    sp.GetRequiredService<IBrokerInstrumentMaster>(),
     sp.GetRequiredService<ISpreadDefinitionStore>(),
     sp.GetRequiredService<TickIngestionHostedService>(),
     sp.GetRequiredService<ILogger<UniverseBuilderService>>(),

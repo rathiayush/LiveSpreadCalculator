@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Abstractions;
+using SpreadTrader.Core.Brokers;
 using SpreadTrader.Core.Models;
 using SpreadTrader.KiteIntegration.Auth;
 using SpreadTrader.KiteIntegration.Instruments;
@@ -19,7 +20,7 @@ namespace SpreadTrader.KiteIntegration.Positions;
 /// position" mid-session.
 /// https://kite.trade/docs/connect/v3/portfolio/#retrieving-positions
 /// </summary>
-public sealed class KitePositionsService
+public sealed class KitePositionsService : IPositionsService
 {
     private readonly HttpClient _httpClient;
     private readonly KiteOptions _options;
@@ -121,7 +122,11 @@ public sealed class KitePositionsService
                 Tick? tick = instrument is { } i && _tickStore.TryGet(i.InstrumentToken, out var t) ? t : null;
                 var (exitPrice, exitPnl) = PositionExitPricing.Compute(quantity, avgPrice, tick);
 
-                positions.Add(new PositionSnapshot(tradingSymbol, exchange, product, quantity, avgPrice, lastPrice, pnl, lotSize, exitPrice, exitPnl));
+                positions.Add(new PositionSnapshot(
+                    tradingSymbol, exchange, product, quantity, avgPrice, lastPrice, pnl, lotSize, exitPrice, exitPnl,
+                    // Kite's position rows carry no instrument token, so this is the instrument-master
+                    // lookup already done above for lot size - reused rather than repeated downstream.
+                    instrument?.InstrumentToken ?? 0));
             }
 
             return new PositionsResult(true, positions, null);

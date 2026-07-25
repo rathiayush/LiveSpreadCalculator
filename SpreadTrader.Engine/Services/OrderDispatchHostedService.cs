@@ -4,8 +4,7 @@ using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 using SpreadTrader.Engine;
-using SpreadTrader.KiteIntegration;
-using SpreadTrader.KiteIntegration.Orders;
+using SpreadTrader.Core.Brokers;
 
 namespace SpreadTrader.Engine.Services;
 
@@ -17,7 +16,7 @@ namespace SpreadTrader.Engine.Services;
 /// "Basket" here means two things:
 ///  1. Before placing anything, the basket's combined margin requirement is checked against
 ///     Kite's basket-margin API (which applies the hedge/spread benefit between offsetting near
-///     and far legs on the same underlying - see KiteMarginService.GetBasketMarginAsync) and,
+///     and far legs on the same underlying - see IMarginService.GetBasketMarginAsync) and,
 ///     if EngineOptions.VerifyMarginBeforeDispatch is on, against the account's actual available
 ///     margin (GetAvailableMarginAsync). If the account can't cover it, nothing is placed at
 ///     all - see CheckMarginAsync.
@@ -66,7 +65,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
     private readonly IExitTriggerRuleStore _exitRuleStore;
     private readonly ISpreadDefinitionStore _spreadStore;
     private readonly IOrderGateway _orderGateway;
-    private readonly KiteMarginService _marginService;
+    private readonly IMarginService _marginService;
     private readonly IOrderExecutionSink _executionSink;
     private readonly MarketProtectionService _marketProtection;
     private readonly TriggerInFlightTracker _inFlightTracker;
@@ -80,7 +79,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         IExitTriggerRuleStore exitRuleStore,
         ISpreadDefinitionStore spreadStore,
         IOrderGateway orderGateway,
-        KiteMarginService marginService,
+        IMarginService marginService,
         IOrderExecutionSink executionSink,
         MarketProtectionService marketProtection,
         TriggerInFlightTracker inFlightTracker,
@@ -357,7 +356,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
             cancellationToken);
 
     /// <summary>Checks the basket's combined margin requirement (with the near/far hedge
-    /// benefit applied - see KiteMarginService.GetBasketMarginAsync) against the account's
+    /// benefit applied - see IMarginService.GetBasketMarginAsync) against the account's
     /// actual available margin. Returns null if dispatch should proceed, or a human-readable
     /// reason if it should be blocked entirely (published to the dashboard via
     /// PublishBlockedAsync). Only called at all when EngineOptions.VerifyMarginBeforeDispatch is
@@ -559,6 +558,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
             {
                 TradingSymbol = leg.TradingSymbol,
                 Exchange = leg.Exchange,
+                InstrumentToken = leg.InstrumentToken,
                 TransactionType = leg.TransactionType == "BUY" ? "SELL" : "BUY",
                 Quantity = filledQuantity, // flatten exactly what filled, not the original requested quantity
                 Product = leg.Product,
@@ -587,10 +587,10 @@ public sealed class OrderDispatchHostedService : BackgroundService
     }
 
     /// <summary>An order leg paired with the instrument token it prices off of and its tick
-    /// size - BuildLegs knows both (spread.NearLeg/FarLeg.InstrumentToken / .TickSize) but
-    /// OrderLegRequest itself has neither field (Kite's order API only wants tradingsymbol+
-    /// exchange+price), so they're carried alongside rather than looked up later - see
-    /// MarketProtectionService.Protect.</summary>
+    /// size - BuildLegs knows both (spread.NearLeg/FarLeg.InstrumentToken / .TickSize). The token
+    /// is also copied onto OrderLegRequest itself (brokers that address orders by security id
+    /// rather than tradingsymbol need it - see OrderLegRequest.InstrumentToken); tick size stays
+    /// here because only market protection uses it - see MarketProtectionService.Protect.</summary>
     private readonly record struct LegPlan(OrderLegRequest Request, uint InstrumentToken, decimal TickSize);
 
     private static List<LegPlan> BuildLegs(TriggerRule rule, SpreadDefinition spread)
@@ -607,6 +607,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
                 {
                     TradingSymbol = spread.NearLeg.TradingSymbol,
                     Exchange = spread.NearLeg.Exchange,
+                    InstrumentToken = spread.NearLeg.InstrumentToken,
                     TransactionType = nearAction == TriggerLegAction.Buy ? "BUY" : "SELL",
                     Quantity = rule.Quantity,
                     Product = rule.Product,
@@ -624,6 +625,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
                 {
                     TradingSymbol = spread.FarLeg.TradingSymbol,
                     Exchange = spread.FarLeg.Exchange,
+                    InstrumentToken = spread.FarLeg.InstrumentToken,
                     TransactionType = farAction == TriggerLegAction.Buy ? "BUY" : "SELL",
                     Quantity = rule.Quantity,
                     Product = rule.Product,
@@ -639,7 +641,9 @@ public sealed class OrderDispatchHostedService : BackgroundService
 
     private static string BuildTag(string ruleId)
     {
-        // Kite tags must be alphanumeric and <= 20 chars.
+        // Order tags/correlation ids must be alphanumeric and short (Kite caps them at 20 chars,
+        // Dhan's correlationId at 30 and restricts it to alphanumerics plus space/underscore/
+        // hyphen) - 20 alphanumerics satisfies both.
         var raw = "str" + new string(ruleId.Where(char.IsLetterOrDigit).ToArray());
         return raw.Length > 20 ? raw[..20] : raw;
     }

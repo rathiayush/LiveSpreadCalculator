@@ -4,8 +4,7 @@ using LiveSpreadCalculator.Contracts;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 using SpreadTrader.Engine.Services;
-using SpreadTrader.KiteIntegration.Instruments;
-using SpreadTrader.KiteIntegration.Positions;
+using SpreadTrader.Core.Brokers;
 
 namespace LiveSpreadCalculator.Controllers;
 
@@ -18,22 +17,22 @@ namespace LiveSpreadCalculator.Controllers;
 [Route("api/positions")]
 public sealed class PositionsController : ControllerBase
 {
-    private readonly KitePositionsService _positionsService;
+    private readonly PositionsCache _positionsCache;
     private readonly IOrderGateway _orderGateway;
     private readonly MarketProtectionService _marketProtection;
-    private readonly InstrumentMasterService _instrumentMaster;
+    private readonly IBrokerInstrumentMaster _instrumentMaster;
     private readonly IOrderExecutionSink _executionSink;
     private readonly ILogger<PositionsController> _logger;
 
     public PositionsController(
-        KitePositionsService positionsService,
+        PositionsCache positionsCache,
         IOrderGateway orderGateway,
         MarketProtectionService marketProtection,
-        InstrumentMasterService instrumentMaster,
+        IBrokerInstrumentMaster instrumentMaster,
         IOrderExecutionSink executionSink,
         ILogger<PositionsController> logger)
     {
-        _positionsService = positionsService;
+        _positionsCache = positionsCache;
         _orderGateway = orderGateway;
         _marketProtection = marketProtection;
         _instrumentMaster = instrumentMaster;
@@ -41,10 +40,14 @@ public sealed class PositionsController : ControllerBase
         _logger = logger;
     }
 
+    /// <summary>Fetches live positions from the broker AND folds the snapshot into PositionsCache
+    /// (see PositionsCache.RefreshAsync). Since the cache resyncs only on order-update events,
+    /// this manual refresh doubles as the recovery path for a lost event: one click re-anchors
+    /// everything - the live SignalR push and the PNL alerts included - not just this response.</summary>
     [HttpGet]
     public async Task<ActionResult<PositionsResult>> GetPositions(CancellationToken cancellationToken)
     {
-        var result = await _positionsService.GetPositionsAsync(cancellationToken);
+        var result = await _positionsCache.RefreshAsync(cancellationToken);
         return Ok(result);
     }
 
@@ -62,7 +65,9 @@ public sealed class PositionsController : ControllerBase
         if (request.SlippagePercent <= 0)
             return BadRequest("SlippagePercent must be greater than zero.");
 
-        var positionsResult = await _positionsService.GetPositionsAsync(cancellationToken);
+        // Same refresh-through-the-cache as GetPositions: the pre-square-off verification fetch
+        // is fresh data anyway, so let it re-anchor the cache while it's at it.
+        var positionsResult = await _positionsCache.RefreshAsync(cancellationToken);
         if (!positionsResult.Success)
         {
             return Problem(
@@ -94,10 +99,22 @@ public sealed class PositionsController : ControllerBase
             return BadRequest($"Cannot exit {request.Lots} lot(s) ({requestedQuantity}) - only {openLots} lot(s) ({openQuantity}) open on this position.");
         }
 
+        // The instrument-master lookup supplies tick size for market protection below. The TOKEN,
+        // though, is taken from the position itself whenever it has one: the positions service
+        // resolved it from the most reliable source that broker offers (Dhan puts securityId on
+        // the position row), whereas this lookup silently yields 0 if the broker spells the symbol
+        // differently from the instrument master - and a 0 token means a broker that addresses
+        // orders by id cannot place this square-off at all.
+        var instrument = _instrumentMaster.Find(position.TradingSymbol, position.Exchange);
+        var instrumentToken = position.InstrumentToken != 0
+            ? position.InstrumentToken
+            : instrument?.InstrumentToken ?? 0;
+
         var leg = new OrderLegRequest
         {
             TradingSymbol = position.TradingSymbol,
             Exchange = position.Exchange,
+            InstrumentToken = instrumentToken,
             // Opposite of however the position is currently held: SELL cuts a long, BUY covers
             // a short. Derived from the position's own sign rather than anything the client sent.
             TransactionType = position.Quantity > 0 ? "SELL" : "BUY",
@@ -113,15 +130,17 @@ public sealed class PositionsController : ControllerBase
         // same as every other MARKET-originated leg in this app (triggered baskets and their
         // auto-square-off go through the identical MarketProtectionService.Protect). Routed
         // through the same tick-store-backed Protect() every other order leg uses, priced off
-        // live best bid/ask - never off position.LastPrice (Kite's REST last_price/LTP, which can
+        // live best bid/ask - never off position.LastPrice (the broker's REST LTP, which can
         // be stale between prints). If this instrument isn't part of any currently-subscribed
         // spread, ITickStore has no depth for it and Protect() sends the leg unprotected rather
-        // than falling back to LTP - Kite will then reject the bare MARKET order outright instead
-        // of risking a fill priced off a stale reference.
-        var instrument = _instrumentMaster.Find(position.TradingSymbol, position.Exchange);
+        // than falling back to LTP - the broker will then reject the bare MARKET order outright
+        // instead of risking a fill priced off a stale reference.
         var protectedLeg = _marketProtection.Protect(
             leg,
-            instrument?.InstrumentToken ?? 0,
+            // Same token as the leg above - market protection uses it to read this instrument's
+            // live depth out of the tick store, so it must be the one the position is subscribed
+            // under (see PositionsCache), not a possibly-unresolved symbol lookup.
+            instrumentToken,
             instrument?.TickSize ?? 0,
             $"Manual square-off {position.TradingSymbol}",
             // No TriggerRule to draw a per-rule slippage from here - this is a manual, ad-hoc

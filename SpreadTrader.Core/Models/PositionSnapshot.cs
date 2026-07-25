@@ -41,7 +41,29 @@ public sealed record PositionSnapshot(
     /// exiting NOW - buying back whichever leg you sold, selling whichever leg you bought - is
     /// actually worth it net of both legs' bid/ask spread, not just where LTP happens to sit.
     /// </summary>
-    decimal ExitPnl);
+    decimal ExitPnl,
+    /// <summary>The broker's numeric handle for this contract, resolved by the positions service
+    /// that produced this snapshot. Carried on the snapshot rather than re-derived downstream
+    /// because the two brokers can resolve it from different, unequally reliable sources: Dhan
+    /// returns the securityId on the position row itself (authoritative), whereas Kite's rows carry
+    /// only a tradingsymbol that has to be looked up in the instrument master. Re-deriving it
+    /// downstream by symbol - which PositionsCache and the manual square-off both used to do -
+    /// silently yields 0 whenever the broker's spelling of a symbol differs from the instrument
+    /// master's, and a 0 token means the position gets no live tick subscription (so no live PNL or
+    /// exit price) and cannot be squared off on a broker that addresses orders by id. 0 only when
+    /// the producing service genuinely could not resolve it.</summary>
+    uint InstrumentToken = 0,
+    /// <summary>Just the BOOKED part of <see cref="Pnl"/> - profit already crystallised by closing
+    /// quantity earlier in the session, which no longer moves with price. Null when the broker
+    /// doesn't separate it (Kite reports one combined <c>pnl</c>); set when it does (Dhan returns
+    /// <c>realizedProfit</c> and <c>unrealizedProfit</c> as separate fields).
+    ///
+    /// This is what lets PositionsCache.GetProjected recompute live PNL from first principles -
+    /// realised, plus quantity times (live price - average price) - instead of adjusting the
+    /// broker's combined figure by how far price has moved since the snapshot. That matters on
+    /// Dhan specifically: the delta approach needs the price the broker's PNL was struck at, and
+    /// Dhan's positions response carries no last-traded-price field at all to supply it.</summary>
+    decimal? RealizedPnl = null);
 
 /// <summary>Result of KitePositionsService.GetPositionsAsync - mirrors AvailableMarginResult's
 /// Success/ErrorMessage shape used elsewhere for Kite calls.</summary>

@@ -11,12 +11,13 @@ namespace SpreadTrader.Engine.Services;
 /// Telegram notification the moment a rule's target is crossed.
 ///
 /// Reads from PositionsCache.GetProjected() - the same live-tick-projected snapshot
-/// LivePositionsHostedService pushes to the browser - instead of calling KitePositionsService
-/// itself. PositionsCache already runs its own unconditional (not viewer-gated) resync loop, so
-/// this makes zero Kite REST calls of its own; adding a second independent poller here would have
-/// duplicated that work against the same rate-limited endpoint for no benefit. Runs on its own,
-/// much longer, cadence purely because a Telegram notification doesn't need sub-second latency -
-/// PositionsCache's own ~20s resync interval is already the limiting factor on freshness here.
+/// LivePositionsHostedService pushes to the browser - instead of calling IPositionsService
+/// itself. PositionsCache already keeps itself in sync (event-driven off the order-update
+/// socket), so this makes zero broker REST calls of its own; adding a second independent poller
+/// here would have duplicated that work against the same rate-limited endpoint for no benefit.
+/// Runs on its own, much longer, cadence purely because a Telegram notification doesn't need
+/// sub-second latency - and the projected PNL it evaluates is tick-fresh regardless, since
+/// GetProjected() recomputes from the live tick store on every read.
 /// </summary>
 public sealed class PnlAlertHostedService : BackgroundService
 {
@@ -89,7 +90,7 @@ public sealed class PnlAlertHostedService : BackgroundService
         if (positions.Count == 0)
         {
             _logger.LogWarning(
-                "PnlAlertHostedService: PositionsCache has zero positions - either nothing is open, the Kite " +
+                "PnlAlertHostedService: PositionsCache has zero positions - either nothing is open, the broker " +
                 "session/access token isn't valid, or the cache hasn't completed its first resync yet. No alert " +
                 "can evaluate until this is non-empty.");
             return;

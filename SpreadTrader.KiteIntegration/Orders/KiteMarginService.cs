@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SpreadTrader.Core.Brokers;
 using SpreadTrader.Core.Models;
 using SpreadTrader.KiteIntegration.Auth;
 
@@ -27,7 +28,7 @@ namespace SpreadTrader.KiteIntegration.Orders;
 /// (network/API hiccup), on the other hand, is not treated as fatal - Kite's own order entry still
 /// enforces margin regardless - so dispatch proceeds in that case.
 /// </summary>
-public sealed class KiteMarginService
+public sealed class KiteMarginService : IMarginService
 {
     private readonly HttpClient _httpClient;
     private readonly KiteOptions _options;
@@ -152,6 +153,3 @@ public sealed class KiteMarginService
         }
     }
 }
-
-/// <summary>Success/Net from GET /user/margins/{segment} - see KiteMarginService.GetAvailableMarginAsync.</summary>
-public sealed record AvailableMarginResult(bool Success, decimal? Net, string? ErrorMessage);

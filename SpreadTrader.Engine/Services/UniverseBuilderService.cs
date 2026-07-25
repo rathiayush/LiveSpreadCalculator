@@ -3,8 +3,7 @@ using System.Text;
 using Microsoft.Extensions.Logging;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
-using SpreadTrader.KiteIntegration;
-using SpreadTrader.KiteIntegration.Instruments;
+using SpreadTrader.Core.Brokers;
 
 namespace SpreadTrader.Engine.Services;
 
@@ -13,7 +12,7 @@ namespace SpreadTrader.Engine.Services;
 /// for on NFO into a live-streamed calendar spread universe in one call - no hand-maintained
 /// symbol list required:
 ///   1. asks the Kite instrument master for every distinct underlying with an NFO futures
-///      contract right now (see InstrumentMasterService.GetAllFuturesUnderlyings), optionally
+///      contract right now (see IBrokerInstrumentMaster.GetAllFuturesUnderlyings), optionally
 ///      capped to the first maxSymbols of them,
 ///   2. resolves each symbol's near/far month futures contract,
 ///   3. writes the resolved set to a CSV (App_Data/universe_futures.csv) - this is the
@@ -27,7 +26,7 @@ namespace SpreadTrader.Engine.Services;
 /// </summary>
 public sealed class UniverseBuilderService
 {
-    private readonly InstrumentMasterService _instrumentMaster;
+    private readonly IBrokerInstrumentMaster _instrumentMaster;
     private readonly ISpreadDefinitionStore _spreadStore;
     private readonly TickIngestionHostedService _tickIngestion;
     private readonly ILogger<UniverseBuilderService> _logger;
@@ -62,7 +61,7 @@ public sealed class UniverseBuilderService
     private readonly Dictionary<string, string> _mcxCalendarSpreadIdBySymbol = new(StringComparer.OrdinalIgnoreCase);
 
     public UniverseBuilderService(
-        InstrumentMasterService instrumentMaster,
+        IBrokerInstrumentMaster instrumentMaster,
         ISpreadDefinitionStore spreadStore,
         TickIngestionHostedService tickIngestion,
         ILogger<UniverseBuilderService> logger,
@@ -227,7 +226,7 @@ public sealed class UniverseBuilderService
         var requested = 0;
 
         // Shared upsert+subscribe so calendar and cross-contract rows go through identical wiring.
-        void AddSpread(string spreadId, string underlying, KiteInstrument near, KiteInstrument far)
+        void AddSpread(string spreadId, string underlying, BrokerInstrument near, BrokerInstrument far)
         {
             if (!seenSpreadIds.Add(spreadId))
                 return; // already built this exact pair in this run
@@ -377,7 +376,7 @@ public sealed class UniverseBuilderService
     /// removes it first if this build's near/far produced a different spreadId (e.g. the front
     /// month rolled between builds). This is what keeps a rebuild from leaving a stale duplicate
     /// calendar spread behind for a symbol whose contracts changed since the last build.</summary>
-    private UniverseBuildRow UpsertMcxCalendarSpread(string symbol, KiteInstrument near, KiteInstrument far, HashSet<uint> allTokens)
+    private UniverseBuildRow UpsertMcxCalendarSpread(string symbol, BrokerInstrument near, BrokerInstrument far, HashSet<uint> allTokens)
     {
         // Day-precise tag (not just month) - MCX contracts of the same commodity can expire on
         // different days even within what looks like "the same month" at a glance (e.g. one
@@ -410,7 +409,7 @@ public sealed class UniverseBuilderService
             far.TradingSymbol, far.Expiry, far.LotSize);
     }
 
-    private static InstrumentConfig ToLeg(KiteInstrument instrument, string underlying) => new()
+    private static InstrumentConfig ToLeg(BrokerInstrument instrument, string underlying) => new()
     {
         TradingSymbol = instrument.TradingSymbol,
         Exchange = instrument.Exchange,
@@ -424,7 +423,7 @@ public sealed class UniverseBuilderService
     /// <summary>One matched cross-contract pair: the two contracts whose expiries are closest,
     /// already ordered so EarlierExpiry &lt;= LaterExpiry, plus the gap between them in days
     /// (0 = a genuine same-expiry match). Names/tokens live on the KiteInstruments themselves.</summary>
-    private readonly record struct CrossPair(KiteInstrument EarlierExpiry, KiteInstrument LaterExpiry, int GapDays);
+    private readonly record struct CrossPair(BrokerInstrument EarlierExpiry, BrokerInstrument LaterExpiry, int GapDays);
 
     /// <summary>Across every (a-contract, b-contract) combination that both have a listed expiry,
     /// returns the pair whose expiries are CLOSEST together, tie-broken toward the nearest
@@ -434,8 +433,8 @@ public sealed class UniverseBuilderService
     /// SILVERM (Aug/Nov) at their nearest expiries instead of being skipped for lack of an exact
     /// same-month match.</summary>
     private static CrossPair? FindClosestExpiryPair(
-        IReadOnlyList<KiteInstrument> contractsA,
-        IReadOnlyList<KiteInstrument> contractsB)
+        IReadOnlyList<BrokerInstrument> contractsA,
+        IReadOnlyList<BrokerInstrument> contractsB)
     {
         CrossPair? best = null;
         foreach (var a in contractsA.Where(c => c.Expiry is not null))
