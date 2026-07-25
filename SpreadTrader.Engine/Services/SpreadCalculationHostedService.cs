@@ -32,10 +32,20 @@ public sealed class SpreadCalculationHostedService : BackgroundService
     private readonly TriggerEventChannel _triggerChannel;
     private readonly ISpreadSnapshotCache _snapshotCache;
     private readonly TriggerInFlightTracker _inFlightTracker;
+    private readonly IPnlAlertNotifier _notifier;
     private readonly EngineOptions _options;
     private readonly ILogger<SpreadCalculationHostedService> _logger;
 
     private readonly Dictionary<string, decimal> _lastValues = new();
+
+    // Daily spread-threshold alert state - see CheckDailySpreadAlertsAsync. Keyed by the
+    // threshold value itself (not an index), so re-ordering/adding/removing tiers in config
+    // between restarts never mixes up which tier "already fired today" refers to. Plain in-memory
+    // state, not a CSV/database row - a restart losing "did tier X already fire today" costs at
+    // most one duplicate message that day, which is a fine trade against not adding a new file to
+    // manage for a once-a-day notification.
+    private readonly TimeZoneInfo _ist;
+    private readonly Dictionary<decimal, DateOnly> _tierLastAlertedIst = new();
 
     public SpreadCalculationHostedService(
         ISpreadDefinitionStore spreadStore,
@@ -47,6 +57,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
         TriggerEventChannel triggerChannel,
         ISpreadSnapshotCache snapshotCache,
         TriggerInFlightTracker inFlightTracker,
+        IPnlAlertNotifier notifier,
         IOptions<EngineOptions> options,
         ILogger<SpreadCalculationHostedService> logger)
     {
@@ -59,8 +70,10 @@ public sealed class SpreadCalculationHostedService : BackgroundService
         _triggerChannel = triggerChannel;
         _snapshotCache = snapshotCache;
         _inFlightTracker = inFlightTracker;
+        _notifier = notifier;
         _options = options.Value;
         _logger = logger;
+        _ist = ResolveIstTimeZone();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -84,6 +97,12 @@ public sealed class SpreadCalculationHostedService : BackgroundService
     {
         var changed = new List<SpreadSnapshot>();
         var currentIds = new HashSet<string>();
+        // Fed alongside `changed` below but independent of it - the daily alert needs THIS
+        // cycle's spread % for every spread that resolved a value, not just the ones whose value
+        // happened to change since last cycle (a spread sitting motionless above a tier all day
+        // must still be eligible to be the one that trips it the moment the tier itself opens up
+        // for the day - e.g. right after DailySpreadAlertStartTimeIst).
+        var spreadPercents = new List<(string Underlying, decimal SpreadPercent)>();
 
         foreach (var spread in _spreadStore.GetAll())
         {
@@ -169,6 +188,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             // Always kept fresh for the ranking job / GET /api/spreads/snapshot, independent of
             // whether the value actually changed since the last cycle.
             _snapshotCache.Upsert(snapshot);
+            spreadPercents.Add((spread.Underlying, spreadPercent));
 
             // This "did it change" check only gates the SignalR push below - it must NOT gate
             // trigger evaluation. Previously it did both (a `continue` skipped evaluation
@@ -205,6 +225,73 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             foreach (var staleId in _lastValues.Keys.Where(id => !currentIds.Contains(id)).ToArray())
                 _lastValues.Remove(staleId);
         }
+
+        await CheckDailySpreadAlertsAsync(spreadPercents, stoppingToken);
+    }
+
+    /// <summary>
+    /// Once per configured tier per IST calendar day (see EngineOptions.DailySpreadAlertThresholdsPercent),
+    /// sends one Telegram message listing every spread whose |spread %| is currently at or past that
+    /// tier, each with its own SIGNED spread % (not the absolute value, so the message shows which way
+    /// each spread has moved). Runs inline at the end of every recalculation cycle rather than as its
+    /// own hosted service/timer or CSV-backed store - this already has, for free, exactly the fresh
+    /// spread % for every spread that a separate poller would have to fetch or recompute itself.
+    ///
+    /// Silent before EngineOptions.DailySpreadAlertStartTimeIst (spread % right at the open can be
+    /// noisy before real liquidity shows up) and silent again for the rest of the day once a given
+    /// tier has already fired - tracked by calendar date, not a timer, so this is naturally correct
+    /// across restarts (a restart mid-day does NOT re-send a tier that already fired earlier today
+    /// unless the in-memory _tierLastAlertedIst was itself lost by that same restart - see its field
+    /// comment for why that's an accepted trade-off rather than persisted).
+    /// </summary>
+    private async Task CheckDailySpreadAlertsAsync(
+        List<(string Underlying, decimal SpreadPercent)> spreadPercents, CancellationToken cancellationToken)
+    {
+        if (!_options.DailySpreadAlertEnabled || _options.DailySpreadAlertThresholdsPercent.Count == 0)
+            return;
+
+        var nowIst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, _ist);
+        if (!TimeSpan.TryParse(_options.DailySpreadAlertStartTimeIst, out var startTime) || nowIst.TimeOfDay < startTime)
+            return;
+
+        var today = DateOnly.FromDateTime(nowIst.DateTime);
+
+        foreach (var threshold in _options.DailySpreadAlertThresholdsPercent)
+        {
+            if (_tierLastAlertedIst.TryGetValue(threshold, out var lastAlerted) && lastAlerted == today)
+                continue; // already sent this tier's alert today
+
+            var crossers = spreadPercents
+                .Where(s => Math.Abs(s.SpreadPercent) >= threshold)
+                .OrderByDescending(s => Math.Abs(s.SpreadPercent))
+                .ToList();
+            if (crossers.Count == 0) continue;
+
+            var lines = crossers.Select(s => $"{s.Underlying}: {(s.SpreadPercent >= 0 ? "+" : "")}{s.SpreadPercent:0.00}%");
+            var text = $"⚠️ <b>Daily spread alert - {threshold:0.##}% tier</b>\n" +
+                       $"{crossers.Count} spread(s) at or past ±{threshold:0.##}% today:\n\n" +
+                       string.Join("\n", lines);
+
+            await _notifier.SendAsync(text, cancellationToken);
+            _tierLastAlertedIst[threshold] = today;
+
+            _logger.LogInformation(
+                "Daily spread alert sent for the {Threshold}% tier - {Count} spread(s): {Underlyings}",
+                threshold, crossers.Count, string.Join(", ", crossers.Select(c => c.Underlying)));
+        }
+    }
+
+    private static TimeZoneInfo ResolveIstTimeZone()
+    {
+        foreach (var id in new[] { "India Standard Time", "Asia/Kolkata" })
+        {
+            try { return TimeZoneInfo.FindSystemTimeZoneById(id); }
+            catch (TimeZoneNotFoundException) { }
+            catch (InvalidTimeZoneException) { }
+        }
+
+        // IST is a fixed UTC+05:30 with no DST, so a hand-built zone is exact.
+        return TimeZoneInfo.CreateCustomTimeZone("IST", TimeSpan.FromMinutes(330), "India Standard Time", "IST");
     }
 
     private async Task EvaluateTriggersAsync(SpreadDefinition spread, SpreadSnapshot snapshot, ITriggerRuleStore ruleStore, bool isExitTrigger, CancellationToken stoppingToken)

@@ -152,4 +152,29 @@ public sealed class EngineOptions
     /// (ISpreadHistoryStore.PurgeOlderThanAsync) - an age-based retention cap independent of the
     /// per-leg expiry flush. Set to 0 or less to skip age-based trimming.</summary>
     public int SpreadHistoryRetentionDays { get; set; } = 30;
+
+    // ---- Daily spread threshold alert (see SpreadCalculationHostedService.CheckDailySpreadAlertsAsync) ----
+
+    /// <summary>Master switch for the once-a-day Telegram alert listing every spread whose
+    /// |spread %| has reached a configured tier (see DailySpreadAlertThresholdsPercent). Piggybacks
+    /// on the same recalculation cycle that already computes spread % for every spread every
+    /// SpreadRecalculationIntervalMs - deliberately not a separate hosted service or CSV file,
+    /// since there's nothing this needs that isn't already computed/held in memory there every
+    /// cycle.</summary>
+    public bool DailySpreadAlertEnabled { get; set; } = true;
+
+    /// <summary>Each value is an independent tier: the first time, on a given IST calendar day,
+    /// that any spread's |spread %| reaches or exceeds this number, one Telegram message listing
+    /// every spread currently past it (with its signed spread %) is sent - then that tier goes
+    /// quiet for the rest of the day, even if more spreads cross it or the same ones cross it
+    /// again. A spread past the higher tier is also past the lower one, so it can appear in both
+    /// tiers' messages the same day; that's intentional - they're independent notifications, not
+    /// mutually exclusive buckets.</summary>
+    public List<decimal> DailySpreadAlertThresholdsPercent { get; set; } = new() { 2.5m, 3.0m };
+
+    /// <summary>IST clock time ("HH:mm") before which the daily spread alert never fires, even if
+    /// a tier is technically crossed - spread % right at/after the 09:15 open can be noisy before
+    /// the market settles into real liquidity, and this is a way to skip that window rather than
+    /// alert on it. Default 09:25, ten minutes after open.</summary>
+    public string DailySpreadAlertStartTimeIst { get; set; } = "09:25";
 }
