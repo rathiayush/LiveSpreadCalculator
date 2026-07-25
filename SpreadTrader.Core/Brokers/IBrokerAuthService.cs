@@ -10,8 +10,8 @@ namespace SpreadTrader.Core.Brokers;
 /// returns one (Dhan does; Kite does not).</param>
 /// <param name="ExpiresUtc">When this token stops being valid, as best the platform can say. Handed
 /// to the dashboard so its client-side cache expires the token at the right moment instead of
-/// assuming one broker's schedule - Kite invalidates daily at ~6 AM IST, Dhan's consent tokens run
-/// 24 hours from issue, and a portal-generated Dhan token can be valid for up to 30 days.</param>
+/// assuming one broker's schedule - Kite invalidates daily at ~6 AM IST; every Dhan token
+/// (portal-generated, consent-flow, or TOTP-minted) currently runs 24 hours from issue.</param>
 public sealed record BrokerLoginResult(
     bool Success,
     string? AccessToken,

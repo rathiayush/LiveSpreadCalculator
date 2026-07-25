@@ -31,4 +31,20 @@ public sealed class DhanSession : IBrokerSession
     public string? ClientId { get; set; }
 
     public bool IsAuthenticated => !string.IsNullOrEmpty(AccessToken) && !string.IsNullOrEmpty(ClientId);
+
+    /// <summary>Raised by <see cref="ClearAccessToken"/> - the one signal
+    /// <see cref="Auth.DhanTotpAutoRenewalHostedService"/> needs to react to a dead session
+    /// immediately instead of waiting for its next scheduled renewal. Not raised by an ordinary
+    /// successful login (setting AccessToken directly), only by the "this token just died" path.
+    /// </summary>
+    public event Action? SessionInvalidated;
+
+    /// <summary>The one place a dead token is recorded - see DhanAuthFailureHandler, the only
+    /// caller. Clears the token AND tells anything waiting on a live session (the TOTP
+    /// auto-renewal loop) to try again right away, rather than on its own timer.</summary>
+    public void ClearAccessToken()
+    {
+        AccessToken = null;
+        SessionInvalidated?.Invoke();
+    }
 }

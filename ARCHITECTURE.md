@@ -134,9 +134,10 @@ These are the differences the adapters exist to absorb - worth knowing before to
   symbol at all. `OrderLegRequest.InstrumentToken` carries the already-resolved token so the Dhan
   gateway never has to re-resolve a symbol that the engine already pinned down.
 - **Login is the biggest behavioural difference - see below.**
-- **Token lifetime.** Kite invalidates every token at ~6:00 AM IST daily; Dhan's last 24 hours
-  (consent) or up to 30 days (portal). The dashboard's token cache no longer assumes either - the
-  backend returns the expiry with the token.
+- **Token lifetime.** Kite invalidates every token at ~6:00 AM IST daily; every Dhan token
+  currently runs a fixed 24 hours from issue, however it was obtained (portal, consent, or TOTP -
+  Dhan removed the longer-lived portal option this app originally supported). The dashboard's
+  token cache doesn't hardcode either schedule - the backend returns the expiry with the token.
 - **Margin.** Kite has a basket-margin endpoint and per-segment funds; Dhan has
   `/margincalculator/multi` and an account-wide `/fundlimit` (so the `segment` argument is ignored
   on Dhan, without loss of accuracy - the figure is already net of everything blocked).
@@ -182,34 +183,63 @@ delta term into `qty × ltp` - adding the position's entire notional to PNL (~�
 RELIANCE) on the Positions & PNL page *and* in `PnlAlertHostedService`, which fires real alerts off
 these numbers. See `PositionsCache.ProjectPnl`.
 
-### Authentication: Kite requires a login, Dhan doesn't
+### Authentication: Kite requires a login, Dhan doesn't (and can log itself back in)
 
 This is the one place the two platforms differ in *kind* rather than in wire format, so the app
-models both rather than assuming Kite's.
+models both rather than assuming Kite's. Dhan itself further splits into three ways to obtain a
+token, selected by `Dhan:AuthMode` plus whether consent credentials happen to also be set - see
+`DhanOptions`'s class doc comment for the full decision table.
 
-| | Kite | Dhan |
-|---|---|---|
-| Browser login | **Mandatory**, every trading day | Optional - only for a partner app using the consent flow |
-| How a token is obtained | OAuth-style redirect: login URL built from the api_key → back with `request_token` → exchanged using a SHA-256 checksum | Either a token generated in the Dhan web portal (no browser step at all), or the consent flow: server-to-server `generate-consent` → browser login → back with `tokenId` → `consumeApp-consent` |
-| Token lifetime | Dies at ~6:00 AM IST daily, regardless of when issued | 24 hours (consent) or up to 30 days (portal) |
-| `SupportsInteractiveLogin` | Always true | True only when `AppId`/`AppSecret` are set |
+| | Kite | Dhan (Static) | Dhan (Totp) | Dhan (Consent) |
+|---|---|---|---|---|
+| Browser login | **Mandatory**, every trading day | None | None, ever | Optional, only for a registered partner app |
+| Human effort, ongoing | Daily login | Paste a fresh token roughly daily | **None** - fully automatic | Daily login if used as the primary path |
+| How a token is obtained | OAuth-style redirect: login URL built from the api_key → back with `request_token` → exchanged using a SHA-256 checksum | Generated once in the Dhan web portal, pasted into config | `DhanTotpAutoRenewalHostedService` computes an RFC 6238 code from a stored TOTP seed and calls `generateAccessToken` with it + the account PIN - see below | Server-to-server `generate-consent` → browser login → back with `tokenId` → `consumeApp-consent` |
+| Token lifetime | Dies at ~6:00 AM IST daily, regardless of when issued | 24 hours (Dhan's current portal validity) | 24 hours, renewed automatically ~1h before expiry | 24 hours |
+| `SupportsInteractiveLogin` | Always true | False (unless consent creds are also set) | False (never needed) | True |
 
-Three consequences shaped the code:
+**TOTP mode trades a bigger secret for zero manual effort.** `Dhan:Pin` and `Dhan:TotpSecret`
+(the same base32 seed you'd otherwise scan into an authenticator app - see Dhan Web → Profile →
+DhanHQ Trading APIs → Setup TOTP) together let the app mint a valid token at will, indefinitely -
+unlike a leaked access token, which is self-limiting because it expires within 24 hours regardless
+of what anyone does with it. `DhanOptions.TotpSecret`'s doc comment spells out the handling this
+implies: environment variable or user-secrets only, never a committed file, rotated (not just
+reset) if it ever leaks.
 
-1. **`BuildLoginUrlAsync` is async.** Kite's login URL is a pure string; Dhan's requires a
-   server-to-server consent call first to mint the id it is keyed by.
+`DhanTotpAutoRenewalHostedService` (only registered when `Dhan:AuthMode` is `"Totp"` - see
+`BrokerRegistration.AddDhan`) mints a token in exactly three situations: at startup (retried with
+backoff until it succeeds, so the app is authenticated within seconds of boot with zero
+configuration beyond the three TOTP values); proactively, about an hour before the current token's
+own expiry, so an ordinary trading request essentially never meets an expired token; and reactively,
+the instant `DhanSession.SessionInvalidated` fires (Dhan revoking a token early, a login from
+elsewhere, or any REST/feed call surfacing a dead session) - the same event
+`DhanAuthFailureHandler.InvalidateAsync` raises via `DhanSession.ClearAccessToken()`. A failed
+renewal attempt is retried with exponential backoff (2s → 30s cap) rather than giving up, since
+unlike a login button there is no operator standing by to click "try again."
+
+Four consequences shaped the code:
+
+1. **`BuildLoginUrlAsync` is async.** Kite's login URL is a pure string; Dhan's consent flow
+   requires a server-to-server consent call first to mint the id it is keyed by. TOTP mode never
+   calls this at all - `GenerateAccessTokenViaTotpAsync` is a separate entry point on
+   `DhanAuthService`, driven by the hosted service above, not by anything the dashboard calls.
 2. **`/api/auth/callback` hands the whole query string to the adapter** instead of naming a
-   parameter, since Kite redirects with `request_token`+`status` and Dhan with `tokenId`. One
-   callback serves both.
+   parameter, since Kite redirects with `request_token`+`status` and Dhan's consent flow with
+   `tokenId`. One callback serves both; TOTP mode never reaches it.
 3. **`POST /api/auth/broker-token` exists for the no-login case.** On Dhan with a portal token
-   there is no login flow to fall back on, so when that token expires - or the auth-failure handler
-   invalidates it mid-session - there would otherwise be no way to recover without editing
-   configuration and restarting a live process holding open positions. That endpoint takes a
-   pasted token, verifies it against the broker, and installs it immediately. The dashboard shows
-   an "Enter token" action instead of a login button whenever `SupportsInteractiveLogin` is false.
+   (Static mode) there is no login flow to fall back on, so when that token expires - or the
+   auth-failure handler invalidates it mid-session - there would otherwise be no way to recover
+   without editing configuration and restarting a live process holding open positions. That
+   endpoint takes a pasted token, verifies it against the broker, and installs it immediately. The
+   dashboard shows an "Enter token" action instead of a login button whenever
+   `SupportsInteractiveLogin` is false - which in TOTP mode simply never needs using, since the
+   hosted service above heals a dead session before an operator would notice.
+4. **`DhanSession.SessionInvalidated`** is the one piece of plumbing TOTP mode needed that Static
+   mode has no use for: a way for "the token just died" to wake a background loop instead of
+   waiting on either a human or a fixed timer.
 
 Token expiry is computed server-side per platform (`IBrokerAuthService.GetTokenExpiryUtc`) and
-returned with the token, so the dashboard's restore cache no longer assumes Kite's daily cutoff.
+returned with the token, so the dashboard's restore cache doesn't hardcode Kite's daily cutoff.
 
 ### Switching platforms
 
@@ -418,10 +448,13 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
     "TickerMode": "full"
   },
   "Dhan": {                                 // only read when Broker:Platform is "Dhan"
-    "ClientId": "",                         // dhanClientId
-    "AccessToken": "",                      // from the Dhan web portal; omit to use the consent flow
-    "AppId": "",                            // partner app credentials - set both to enable
-    "AppSecret": "",                        // the browser consent login flow
+    "AuthMode": "Static",                   // "Static" (paste a token) or "Totp" (fully automatic)
+    "ClientId": "",                         // dhanClientId - required in every mode
+    "AccessToken": "",                      // Static mode: from the Dhan web portal
+    "Pin": "",                              // Totp mode: your Dhan account PIN
+    "TotpSecret": "",                       // Totp mode: base32 seed from Dhan Web -> Setup TOTP
+    "AppId": "",                            // partner app credentials - set both to enable the
+    "AppSecret": "",                        // browser consent flow, independent of AuthMode
     "RestBaseUrl": "https://api.dhan.co/v2",
     "AuthBaseUrl": "https://auth.dhan.co",
     "WsUrl": "wss://api-feed.dhan.co",
@@ -431,7 +464,7 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
     "ScripMasterUrl": "https://images.dhan.co/api-data/api-scrip-master.csv",
     "TickerMode": "full",                   // only "full" carries market depth
     "OrdersPerSecond": 8,
-    "AccessTokenValidityDays": 30
+    "AccessTokenValidityDays": 1            // Static mode only - Dhan's current portal validity
   },
   "Engine": {
     "SpreadRecalculationIntervalMs": 300,
