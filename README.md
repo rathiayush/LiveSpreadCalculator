@@ -86,7 +86,7 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
 - **AccessToken**: leave blank. It's obtained by completing the login flow (below) and is held in memory from then on - Kite invalidates it daily around 6 AM regardless of how it was issued.
 - **TickerMode**: leave as `"full"` unless you have a specific reason not to - see "Ask price, not last traded price" above.
 - **Dashboard.BaseUrl**: where the React app is served from. Used for CORS and for redirecting back after Kite login.
-- **Storage paths**: relative to the Api project's content root. `TriggersCsvPath` is where trigger rules are persisted (rewritten on every add/remove/fire/enable/disable). `FuturesCsvPath` is where the futures symbol list gets written when you click "Sync symbols from broker" on the Trigger Config page. `DhanScripMasterCachePath` (Dhan only) is where the raw scrip master is saved after every successful download - it's what lets a restart warm the in-memory instrument index from disk instead of always re-downloading Dhan's ~26 MB dump first; see "Choosing a broker" below. All directories are created automatically if missing.
+- **Storage paths**: relative to the Api project's content root. `TriggersCsvPath` is where trigger rules are persisted (rewritten on every add/remove/fire/enable/disable). `FuturesCsvPath` is where the futures symbol list gets written when you click "Sync symbols from broker" on the Trigger Config page. `DhanScripMasterCachePath` (Dhan only) is where the raw scrip master is saved after every successful download - it's what lets a restart warm the in-memory instrument index from disk instead of always re-downloading Dhan's ~26 MB dump first; see "Choosing a broker" below. `BrokerPlatformOverridePath` is where a broker switch made from the dashboard (Admin -> Broker Platform) is saved, taking precedence over `Broker:Platform`/`Broker__Platform` once written - see "Choosing a broker" below. All directories are created automatically if missing.
 - If you'd rather not put ApiKey/ApiSecret in a file that might end up in source control, override them with environment variables instead (`Kite__ApiKey`, `Kite__ApiSecret`, `Dhan__ClientId`, `Dhan__AccessToken` - see Docker section) or `dotnet user-secrets`. Either way, keep real values out of git - and add `App_Data/` to `.gitignore` too, since the CSV files it holds aren't meant to be committed either.
 
 ## Choosing a broker
@@ -94,6 +94,19 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
 `Broker:Platform` decides which broker the whole app talks to - `"Kite"` (default) or `"Dhan"`.
 Only that platform's config section is read; everything else in the app is identical either way.
 Override it per-deployment with the `Broker__Platform` environment variable.
+
+**Switching from the dashboard.** Admin -> Broker Platform lets you switch between Kite and Dhan
+without editing config or redeploying. Picking a platform there writes the choice to
+`Storage:BrokerPlatformOverridePath` (a one-line file, `App_Data/broker-platform-override.txt` by
+default) - read at startup ahead of `Broker:Platform`/`Broker__Platform`, so it wins over both once
+set - and then asks the running process to stop so it comes back up wired to the new platform (see
+`BrokerPlatformController`). Whether it actually comes back up on its own depends on the host: Azure
+App Service ("Always On") and Docker with a restart policy both bring a stopped process straight
+back; a bare `dotnet` process with nothing supervising it will just stay down until started again
+manually. Either way the override file is written *before* the process is asked to stop, so the
+choice is never lost - the next start, however it happens, boots on the newly chosen platform. Like
+any platform switch, this drops every in-memory tick/spread and needs a universe rebuild afterwards
+(see below).
 
 **Running on Dhan.** No browser login is required either way - pick between a token you paste in
 yourself, or one the app generates for itself forever:

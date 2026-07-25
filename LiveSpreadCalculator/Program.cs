@@ -59,6 +59,22 @@ var futuresCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 // DhanInstrumentMasterService.EnsureLoadedAsync's doc comment. Unused on Kite.
 var dhanScripMasterCachePath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:DhanScripMasterCachePath"] ?? "App_Data/dhan_scrip_master_cache.csv");
+
+// A broker switch made from the dashboard (see BrokerPlatformController) writes its choice here
+// instead of editing appsettings.json - persisted so it survives the restart applying it requires.
+// Read BEFORE AddBrokerIntegration below (which is the only place Broker:Platform actually gets
+// consumed) and layered on top of it as an in-memory config source, so a value written here beats
+// both appsettings.json and the Broker__Platform environment variable - see
+// BrokerPlatformOverrideStore's doc comment.
+var brokerPlatformOverridePath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:BrokerPlatformOverridePath"] ?? "App_Data/broker-platform-override.txt");
+if (BrokerPlatformOverrideStore.TryRead(brokerPlatformOverridePath) is { } brokerPlatformOverride)
+{
+    builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        [$"{BrokerOptions.SectionName}:Platform"] = brokerPlatformOverride.ToString(),
+    });
+}
 // The universe builder pulls its symbol list live from the Kite instrument master (every stock
 // currently listed for NFO futures - see InstrumentMasterService.GetAllFuturesUnderlyings) rather
 // than a hand-maintained CSV. How many symbols get built is configurable per-request via
