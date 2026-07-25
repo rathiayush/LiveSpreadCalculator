@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Card, Radio, Button, Typography, Space, Alert, Modal } from 'antd'
 import { ApiOutlined } from '@ant-design/icons'
 import { api } from '../api'
+import { clearCachedBrokerToken } from '../brokerAuth'
 
 const PLATFORMS = [
   { value: 'Kite', label: 'Zerodha Kite' },
@@ -64,6 +65,13 @@ export default function BrokerPlatformPage() {
       const result = await api.switchBrokerPlatform(selected)
       setNotice(result.message)
       if (result.switched) {
+        // brokerAuth.js's cached token is a single slot with no idea which platform it belongs to
+        // (see its own doc comment). Left in place across a switch, the OUTGOING platform's token
+        // would get offered to the INCOMING platform's restore/verify endpoint on the reload below,
+        // get rejected as garbage, and be wiped - silently costing the outgoing platform its cached
+        // session too. Drop it here so the incoming platform starts from a clean slate instead.
+        clearCachedBrokerToken()
+
         // The BACKEND switch is already done and doesn't need a restart, but the FRONTEND still
         // does - the spread cache (hooks/spreadHub.js), AppShell's own `spreads`/`brokerInfo`/
         // `authStatus` state, and the SignalR connection's one-time REST seed are all seeded once

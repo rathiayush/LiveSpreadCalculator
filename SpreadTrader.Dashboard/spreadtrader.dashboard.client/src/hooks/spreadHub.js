@@ -52,12 +52,19 @@ let positionsError = null
 // does on load - this is how the app finds out *live*, without waiting for a page reload, that
 // the token died partway through the day.
 let brokerAuthInvalidReason = null
+// Monotonically increasing counter, bumped once per "brokerAuthRestored" push (see
+// SignalRBrokerAuthNotifier.NotifyAuthRestoredAsync) - the counterpart to brokerAuthInvalidReason
+// above, for the opposite transition. A counter rather than a boolean/timestamp so App.jsx's
+// effect can tell "restored again" apart from "still the same restore it already reacted to"
+// using nothing but a plain useEffect dependency check.
+let brokerAuthRestoredCount = 0
 
 const spreadsListeners = new Set()
 const rankingListeners = new Set()
 const triggerListeners = new Set()
 const connectionListeners = new Set()
 const brokerAuthListeners = new Set()
+const brokerAuthRestoredListeners = new Set()
 const positionsListeners = new Set()
 const positionsErrorListeners = new Set()
 
@@ -82,6 +89,7 @@ const subscribeRanking = subscribe(rankingListeners)
 const subscribeTriggers = subscribe(triggerListeners)
 const subscribeConnection = subscribe(connectionListeners)
 const subscribeBrokerAuth = subscribe(brokerAuthListeners)
+const subscribeBrokerAuthRestored = subscribe(brokerAuthRestoredListeners)
 const subscribePositions = subscribe(positionsListeners)
 const subscribePositionsError = subscribe(positionsErrorListeners)
 
@@ -90,6 +98,7 @@ const getRankingSnapshot = () => rankingList
 const getTriggersSnapshot = () => triggerEventsList
 const getConnectionSnapshot = () => connectionState
 const getBrokerAuthSnapshot = () => brokerAuthInvalidReason
+const getBrokerAuthRestoredSnapshot = () => brokerAuthRestoredCount
 const getPositionsSnapshot = () => positionsList
 const getPositionsErrorSnapshot = () => positionsError
 
@@ -253,6 +262,15 @@ function ensureConnection() {
     notify(brokerAuthListeners)
   })
 
+  // Pushed the instant a background auto-login (Dhan TOTP) actually succeeds - see
+  // DhanTotpAutoRenewalHostedService/SignalRBrokerAuthNotifier.NotifyAuthRestoredAsync on the
+  // backend. Only fired for a genuine not-authenticated -> authenticated transition, so this is
+  // rare, not a heartbeat - App.jsx uses it to re-check GET /api/auth/status without polling.
+  connection.on('brokerAuthRestored', () => {
+    brokerAuthRestoredCount += 1
+    notify(brokerAuthRestoredListeners)
+  })
+
   connection.onreconnecting(() => {
     connectionState = 'reconnecting'
     notify(connectionListeners)
@@ -377,6 +395,13 @@ export function useBrokerAuthInvalidated() {
 export function clearBrokerAuthInvalidated() {
   brokerAuthInvalidReason = null
   notify(brokerAuthListeners)
+}
+
+// Bumps by one each time the backend pushes "brokerAuthRestored" (a background auto-login, e.g.
+// Dhan TOTP, just succeeded). App.jsx watches this to re-check auth status the moment it changes,
+// instead of polling - see the class doc comment on brokerAuthRestoredCount above.
+export function useBrokerAuthRestored() {
+  return useSyncExternalStore(subscribeBrokerAuthRestored, getBrokerAuthRestoredSnapshot)
 }
 
 // Live open positions/PNL - see LivePositionsHostedService on the backend. Updates roughly every

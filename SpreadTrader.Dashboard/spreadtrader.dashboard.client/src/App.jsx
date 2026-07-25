@@ -22,7 +22,7 @@ import {
 import { api } from './api'
 import { useAuth, clearSession } from './auth'
 import { getCachedBrokerToken, saveBrokerToken, clearCachedBrokerToken } from './brokerAuth'
-import { useSpreadHubConnectionState, useBrokerAuthInvalidated, clearBrokerAuthInvalidated, stopConnection, pruneSpreads } from './hooks/spreadHub'
+import { useSpreadHubConnectionState, useBrokerAuthInvalidated, clearBrokerAuthInvalidated, useBrokerAuthRestored, stopConnection, pruneSpreads } from './hooks/spreadHub'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import SpreadsPage from './pages/SpreadsPage'
@@ -454,6 +454,18 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
     clearCachedBrokerToken()
     message.warning(`${brokerInfo.platform} session ended (${brokerAuthInvalidReason}) - please log in again.`, 8)
   }, [brokerAuthInvalidReason, brokerInfo.platform])
+
+  // Pushed live (see hooks/spreadHub.js's "brokerAuthRestored" handler) the moment a background
+  // auto-login (Dhan TOTP) actually succeeds - the missing counterpart to brokerAuthInvalidReason
+  // above. loadAuthStatus only ever runs once, at mount; a tab opened while
+  // DhanTotpAutoRenewalHostedService was still mid-retry would otherwise capture
+  // isAuthenticated:false once and never learn it later succeeded, even though the backend was
+  // trading fine by then.
+  const brokerAuthRestoredCount = useBrokerAuthRestored()
+  useEffect(() => {
+    if (brokerAuthRestoredCount === 0) return
+    loadAuthStatus()
+  }, [brokerAuthRestoredCount, loadAuthStatus])
 
   const handleLogin = async () => {
     try {
