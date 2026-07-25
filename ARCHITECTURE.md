@@ -252,7 +252,7 @@ spread definitions are in-memory only and trigger rules are cleared daily anyway
 Dhan additionally requires the deployment's outbound IP to be whitelisted before order placement
 works - data APIs work without it. Same requirement `zerodha-ip-whitelist.txt` documents for Kite.
 
-### Instrument master refresh never blocks a live request
+### Instrument master refresh never blocks a live request, and survives a restart
 
 Both instrument masters cache their scrip dump for 12 hours and reload lazily by default - the
 first caller after that window expires would otherwise pay the download+parse cost inline. That
@@ -261,22 +261,30 @@ type (there's no exchange-scoped endpoint), currently ~26 MB, and several live e
 `EnsureLoadedAsync` directly in their request path (`GET /api/instruments/futures*` - the Add
 Spread pickers, `GET /api/positions`, `POST /api/spreads`).
 
-`InstrumentMasterRefreshHostedService` (broker-agnostic - it depends on `IBrokerInstrumentMaster`
-only, so it protects Kite's smaller per-exchange dump too) calls `EnsureLoadedAsync` on its own
-3-hour timer, comfortably inside the 12-hour cache window, so by the time any real request arrives
-the cache is already fresh and that request's own call is a same-thread, no-I/O no-op. The lazy
-on-demand path in each instrument master is unchanged and remains the safety net for the gap
-between process startup and this loop's first tick.
+**No live request ever pays for the download.** `InstrumentMasterRefreshHostedService`
+(broker-agnostic - depends on `IBrokerInstrumentMaster` only, so it protects Kite's smaller
+per-exchange dump too) calls `EnsureLoadedAsync` once a day at a fixed IST time (default 06:00,
+ahead of the market open - `Engine:InstrumentMasterRefreshTimeIst`, same scheduling idiom
+`DailyMaintenanceHostedService` already uses), comfortably inside the 12-hour cache window, so by
+the time any real request arrives the cache is already fresh and that request's own call is a
+same-thread, no-I/O no-op. This app mostly trades monthly F&amp;O contracts, so once a day is
+enough - there's no need for intraday polling. The lazy on-demand path in each instrument master
+is unchanged and remains the safety net for the gap between process startup and this loop's first
+run.
 
-On Dhan, `DhanInstrumentMasterService` also sends the previous response's `ETag` as
-`If-None-Match` on every refresh - confirmed against the live CDN (CloudFront) to actually honour
-this and answer with `304 Not Modified` when nothing has changed, rather than assumed. A refresh
-where the file is unchanged therefore costs one small request instead of a fresh 26 MB
-download-and-reparse, which is what makes refreshing every 3 hours (rather than once a day) cheap
-enough to be worth doing - lot size and tick size can both change between exchange-driven
-revisions, and order pricing/quantity depend on them being current (see `ParseTickSize`'s doc
-comment), so a long cache lifetime trades real correctness risk for a network-cost saving that
-this ETag check makes unnecessary to trade away in the first place.
+**The download also survives a restart.** `DhanInstrumentMasterService` persists the raw scrip
+master to disk on every successful download (`Storage:DhanScripMasterCachePath`, default
+`App_Data/dhan_scrip_master_cache.csv`) instead of holding it only in process memory. On the very
+first `EnsureLoadedAsync` call after a restart, it warms its in-memory index from that local file
+first (a disk read, effectively instant next to a 26 MB network fetch) so lookups work immediately,
+then still always runs a live download in the same call to bring the data current and refresh the
+file - the disk copy is a fast starting point, never treated as good enough on its own. If that
+live download fails (Dhan unreachable) but there is already data in memory - from the disk warm,
+or an earlier successful cycle - the failure is logged and the existing data is kept rather than
+thrown away, the same "never blank out already-loaded data over a transient failure" rule
+`PositionsCache.ResyncAsync` already applies. Only a genuinely first-ever boot with no disk cache
+and a failed download has nothing to fall back to, and still throws honestly rather than pretend
+there is data when there is none.
 
 ## 4. The Engine pipeline
 

@@ -53,6 +53,12 @@ var pnlAlertsCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:PnlAlertsCsvPath"] ?? "App_Data/pnl-alerts.csv");
 var futuresCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:FuturesCsvPath"] ?? "App_Data/futures_instruments.csv");
+// Dhan only: the raw scrip master exactly as downloaded (not the filtered futures list above),
+// persisted to disk so a process restart can warm its in-memory instrument index from the local
+// file instead of always re-downloading Dhan's ~26 MB dump first - see
+// DhanInstrumentMasterService.EnsureLoadedAsync's doc comment. Unused on Kite.
+var dhanScripMasterCachePath = Path.Combine(builder.Environment.ContentRootPath,
+    builder.Configuration["Storage:DhanScripMasterCachePath"] ?? "App_Data/dhan_scrip_master_cache.csv");
 // The universe builder pulls its symbol list live from the Kite instrument master (every stock
 // currently listed for NFO futures - see InstrumentMasterService.GetAllFuturesUnderlyings) rather
 // than a hand-maintained CSV. How many symbols get built is configurable per-request via
@@ -113,7 +119,7 @@ builder.Services.AddSingleton<ITriggerActivityStore, InMemoryTriggerActivityStor
 // SpreadTrader.Core.Brokers, chosen by the Broker:Platform setting. Everything below this line
 // (engine, controllers, hub) is written against those interfaces and is identical either way.
 // See BrokerRegistration for the full list of what gets swapped.
-builder.Services.AddBrokerIntegration(builder.Configuration, mcxOptions, futuresCsvPath);
+builder.Services.AddBrokerIntegration(builder.Configuration, mcxOptions, futuresCsvPath, dhanScripMasterCachePath);
 
 // Refreshes the instrument master (Dhan's ~26 MB scrip master, or Kite's per-exchange dump) on a
 // background timer well inside its own 12h cache window, so no live request - the Add Spread

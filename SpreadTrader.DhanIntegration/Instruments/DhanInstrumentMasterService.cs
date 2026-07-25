@@ -50,18 +50,11 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
     private readonly DhanOptions _options;
     private readonly ILogger<DhanInstrumentMasterService> _logger;
     private readonly string _futuresCsvPath;
+    private readonly string _scripMasterCachePath;
     private readonly HashSet<string> _exchanges;
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
     private List<BrokerInstrument> _instruments = new();
-
-    /// <summary>The scrip master's ETag from the last successful 200 response, sent back as
-    /// If-None-Match on the next refresh. Dhan's CDN (CloudFront) returns one on every response -
-    /// confirmed empirically, not assumed - so a refresh where nothing has changed costs one small
-    /// request and a 304 instead of re-downloading and re-parsing ~26 MB. Null until the first
-    /// successful load, and left untouched by a 304 (still valid) or a failed request (nothing to
-    /// replace it with).</summary>
-    private string? _etag;
 
     /// <summary>Both of Dhan's symbol spellings for each contract point at the same instrument, so
     /// a lookup by either resolves. Dhan's own positions/orders responses report the trading
@@ -73,22 +66,62 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
 
     /// <param name="exchanges">Canonical exchange codes to retain - ["NFO"] normally, ["NFO","MCX"]
     /// when the commodity add-on is enabled. See McxOptions.ResolveExchanges.</param>
+    /// <param name="scripMasterCachePath">Where the raw scrip master (exactly as downloaded, not
+    /// the filtered futures list futuresCsvPath holds) is persisted to disk - see
+    /// EnsureLoadedAsync's doc comment for why this exists alongside the in-memory cache rather
+    /// than instead of it.</param>
     public DhanInstrumentMasterService(
         HttpClient httpClient,
         IOptions<DhanOptions> options,
         ILogger<DhanInstrumentMasterService> logger,
         string futuresCsvPath,
-        IReadOnlyList<string>? exchanges = null)
+        IReadOnlyList<string>? exchanges = null,
+        string? scripMasterCachePath = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _logger = logger;
         _futuresCsvPath = futuresCsvPath;
+        _scripMasterCachePath = scripMasterCachePath ?? Path.Combine(
+            Path.GetDirectoryName(futuresCsvPath) ?? ".", "dhan_scrip_master_cache.csv");
         _exchanges = new HashSet<string>(
             exchanges is { Count: > 0 } ? exchanges : new[] { "NFO" },
             StringComparer.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Loads (or refreshes) the futures universe. The in-memory index (_instruments/_bySymbol)
+    /// stays the ONLY thing Find/GetAllFutures/etc. read - that has to stay true, since those are
+    /// called on hot paths (order placement, every position row) that cannot afford a disk read
+    /// or a network call per lookup. What changed is what FEEDS that index and where the
+    /// downloaded data lives between refreshes:
+    ///
+    ///  1. THE RAW SCRIP MASTER IS PERSISTED TO DISK on every successful download (see
+    ///     PersistToDiskAsync), not just held in process memory. A process restart - which this
+    ///     app's deployments (Production/pradeep-1/pradeep-2) go through often - used to mean
+    ///     every restart re-downloaded the full ~26 MB from Dhan before anything could resolve a
+    ///     symbol. Now the first EnsureLoadedAsync call on a fresh instance warms the in-memory
+    ///     index from the LOCAL file first (a local disk read, effectively instant compared to a
+    ///     network round trip), so lookups work immediately even before the live download below
+    ///     completes, and it STAYS there - reloaded from that same file on every future restart -
+    ///     until the next successful download replaces it.
+    ///  2. A LIVE DOWNLOAD STILL ALWAYS RUNS after the disk warm, in the same call - the disk file
+    ///     is a fast starting point, never treated as good enough on its own. Only once that live
+    ///     download fails outright (network down, Dhan unreachable) does this fall back to
+    ///     whatever is already in memory (from the disk warm, or a still-a-bit-stale earlier
+    ///     cycle) rather than leaving the index empty - the same "never blank out already-loaded
+    ///     data over a transient failure" rule this codebase already applies elsewhere
+    ///     (PositionsCache's ResyncAsync, DhanApiClient's error handling). If there is truly
+    ///     nothing to fall back to (first boot ever, no disk cache, and the network call fails),
+    ///     this still throws, exactly as it always has - there is no data to serve either way, so
+    ///     pretending otherwise would be worse than an honest failure.
+    ///  3. WHEN THIS ACTUALLY RUNS is driven by InstrumentMasterRefreshHostedService, once a day
+    ///     at a fixed IST time (default 06:00, ahead of the market open) rather than a short
+    ///     polling interval - this app mostly trades monthly F&amp;O contracts, which don't need
+    ///     intraday-fresh listings, so a straightforward once-a-day download is enough. The 12h
+    ///     CacheLifetime below is only a guard against a redundant reload if something calls this
+    ///     moments after the daily job already did.
+    /// </summary>
     public async Task EnsureLoadedAsync(CancellationToken cancellationToken)
     {
         if (IsFresh()) return;
@@ -98,60 +131,131 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         {
             if (IsFresh()) return;
 
-            using var request = new HttpRequestMessage(HttpMethod.Get, _options.ScripMasterUrl);
-            // Sent only once we already have data to fall back on - the very first load always
-            // pulls the full file, which is correct: there is nothing yet to conditionally keep.
-            if (_etag is not null && _instruments.Count > 0)
-                request.Headers.TryAddWithoutValidation("If-None-Match", _etag);
-
-            _logger.LogInformation("Checking Dhan scrip master at {Url}...", _options.ScripMasterUrl);
-
-            using var response = await _httpClient.SendAsync(
-                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-
-            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
-            {
-                // Nothing has changed since the ETag we sent - Dhan confirmed it without us
-                // paying to re-download or re-parse ~26 MB. Just extend freshness; _instruments/
-                // _bySymbol are already correct and are left untouched.
-                _loadedAt = DateTimeOffset.UtcNow;
-                _logger.LogInformation(
-                    "Dhan scrip master unchanged (304) - keeping {Count} previously loaded futures.",
-                    _instruments.Count);
-                return;
-            }
-
-            response.EnsureSuccessStatusCode();
-
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var parsed = ParseCsv(stream);
-
-            _instruments = parsed.Select(p => p.Instrument).ToList();
-            _bySymbol = BuildSymbolIndex(parsed);
-            _loadedAt = DateTimeOffset.UtcNow;
-            _etag = response.Headers.ETag?.Tag;
-
-            _logger.LogInformation(
-                "Instrument master ready: {Count} futures across [{Exchanges}] (options/equities and other exchanges discarded during parse)",
-                _instruments.Count, string.Join(", ", _exchanges));
-
             if (_instruments.Count == 0)
+                TryWarmFromDiskCache();
+
+            try
             {
-                _logger.LogWarning(
-                    "Dhan scrip master parsed to zero futures contracts - check that Dhan:ScripMasterUrl points at the compact security id list " +
-                    "(https://images.dhan.co/api-data/api-scrip-master.csv) and that its column headers are recognised.");
+                await RefreshFromDhanAsync(cancellationToken);
             }
-            else if (_instruments.All(i => i.TickSize == 0))
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogWarning(
-                    "No tick sizes were found in the Dhan scrip master, so order pricing will fall back to a 0.05 default tick, " +
-                    "which is wrong for any contract that doesn't use it. Expected a SEM_TICK_SIZE column in {Url}.",
-                    _options.ScripMasterUrl);
+                if (_instruments.Count == 0) throw; // nothing to fall back to - an honest failure
+
+                _logger.LogWarning(ex,
+                    "Live Dhan scrip master check failed - continuing with the {Count} futures already loaded " +
+                    "({Source}) until the next refresh attempt.",
+                    _instruments.Count, _loadedAt == DateTimeOffset.MinValue ? "from the local disk cache" : "from an earlier successful load");
             }
         }
         finally
         {
             _loadLock.Release();
+        }
+    }
+
+    /// <summary>Best-effort warm start from the local disk cache - parses whatever was saved by
+    /// the last successful PersistToDiskAsync call (this process or an earlier one) using the
+    /// exact same ParseCsv the live path uses, since it is the identical raw Dhan format. Any
+    /// failure (file missing on a fresh deployment, corrupt/partial file) is swallowed: this is
+    /// purely a head start before the live check that always follows, never the only source of
+    /// truth, so there is nothing to escalate here.</summary>
+    private void TryWarmFromDiskCache()
+    {
+        if (!File.Exists(_scripMasterCachePath)) return;
+
+        try
+        {
+            using var fileStream = File.OpenRead(_scripMasterCachePath);
+            var parsed = ParseCsv(fileStream);
+            if (parsed.Count == 0) return; // nothing usable - let the live check populate it instead
+
+            _instruments = parsed.Select(p => p.Instrument).ToList();
+            _bySymbol = BuildSymbolIndex(parsed);
+
+            var age = DateTimeOffset.UtcNow - File.GetLastWriteTimeUtc(_scripMasterCachePath);
+            _logger.LogInformation(
+                "Warmed instrument master from local disk cache ({Count} futures, {Path}, downloaded {AgeHours:F1}h ago) - verifying against Dhan now.",
+                _instruments.Count, _scripMasterCachePath, age.TotalHours);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read the local scrip master cache at {Path} - falling back to a live download.", _scripMasterCachePath);
+        }
+    }
+
+    /// <summary>The live download-and-parse step, plus persisting a successful download to disk
+    /// (PersistToDiskAsync) so the next process restart gets the fast-warm-start benefit too.
+    /// Always a full download - no conditional GET, since this only runs once a day (see
+    /// EnsureLoadedAsync's doc comment), which makes the bandwidth/CPU cost of always fetching the
+    /// whole file not worth the extra moving part of tracking an ETag.</summary>
+    private async Task RefreshFromDhanAsync(CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Downloading Dhan scrip master from {Url}...", _options.ScripMasterUrl);
+
+        using var response = await _httpClient.GetAsync(
+            _options.ScripMasterUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        // Buffered (rather than parsed straight off the network stream) because the same bytes
+        // now need to go to two places - the parser and the disk cache - and 26 MB is a trivial,
+        // one-time-per-day amount of memory for what runs as a background operation (see
+        // InstrumentMasterRefreshHostedService), not something on a live request's critical path.
+        var rawCsv = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+
+        using var memoryStream = new MemoryStream(rawCsv, writable: false);
+        var parsed = ParseCsv(memoryStream);
+
+        _instruments = parsed.Select(p => p.Instrument).ToList();
+        _bySymbol = BuildSymbolIndex(parsed);
+        _loadedAt = DateTimeOffset.UtcNow;
+
+        _logger.LogInformation(
+            "Instrument master ready: {Count} futures across [{Exchanges}] (options/equities and other exchanges discarded during parse)",
+            _instruments.Count, string.Join(", ", _exchanges));
+
+        if (_instruments.Count == 0)
+        {
+            _logger.LogWarning(
+                "Dhan scrip master parsed to zero futures contracts - check that Dhan:ScripMasterUrl points at the compact security id list " +
+                "(https://images.dhan.co/api-data/api-scrip-master.csv) and that its column headers are recognised.");
+        }
+        else if (_instruments.All(i => i.TickSize == 0))
+        {
+            _logger.LogWarning(
+                "No tick sizes were found in the Dhan scrip master, so order pricing will fall back to a 0.05 default tick, " +
+                "which is wrong for any contract that doesn't use it. Expected a SEM_TICK_SIZE column in {Url}.",
+                _options.ScripMasterUrl);
+        }
+
+        // Only after a successful parse - a corrupt or half-written cache file would be worse
+        // than no cache file at all (TryWarmFromDiskCache would silently produce zero instruments
+        // and fall through, costing a wasted disk read, but a PARTIAL file that parses into a
+        // wrong/incomplete universe would not announce itself the same way).
+        await PersistToDiskAsync(rawCsv, cancellationToken);
+    }
+
+    /// <summary>Atomically replaces the local scrip master cache file - same temp-file-then-move
+    /// pattern SaveFuturesToCsvAsync already uses, so a process killed mid-write never leaves a
+    /// half-written file for the next TryWarmFromDiskCache to trip over. Failures are logged, not
+    /// thrown: the in-memory index this call is trying to back up already updated successfully, so
+    /// a disk write failure costs only the next restart's fast-warm-start benefit, not correctness
+    /// right now.</summary>
+    private async Task PersistToDiskAsync(byte[] rawCsv, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(_scripMasterCachePath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            var tempPath = _scripMasterCachePath + ".tmp";
+            await File.WriteAllBytesAsync(tempPath, rawCsv, cancellationToken);
+            File.Move(tempPath, _scripMasterCachePath, overwrite: true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not persist the scrip master cache to {Path} - future restarts will re-download from Dhan.", _scripMasterCachePath);
         }
     }
 

@@ -131,6 +131,14 @@ public sealed class EngineOptions
     /// then. Set false to run it every day.</summary>
     public bool DailyMaintenanceWeekdaysOnly { get; set; } = true;
 
+    /// <summary>IST clock time ("HH:mm") InstrumentMasterRefreshHostedService re-downloads the
+    /// broker's instrument/scrip master. Default 06:00 - same slot as daily maintenance, well
+    /// before the 09:15 open, so the day's trading starts against the current month's contract
+    /// list rather than whatever was cached at the last restart. Runs every day, including
+    /// weekends - there's no trading-state reason to skip them here, and it means Monday's open
+    /// isn't the first time the week's data gets refreshed.</summary>
+    public string InstrumentMasterRefreshTimeIst { get; set; } = "06:00";
+
     /// <summary>Daily job wipes ALL entry trigger rules (ITriggerRuleStore.RemoveAll).</summary>
     public bool DailyMaintenanceClearTriggers { get; set; } = true;
 

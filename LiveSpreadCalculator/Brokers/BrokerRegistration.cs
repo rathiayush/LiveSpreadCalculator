@@ -45,7 +45,8 @@ public static class BrokerRegistration
         this IServiceCollection services,
         IConfiguration configuration,
         McxOptions mcxOptions,
-        string futuresCsvPath)
+        string futuresCsvPath,
+        string? dhanScripMasterCachePath = null)
     {
         var brokerOptions = configuration.GetSection(BrokerOptions.SectionName).Get<BrokerOptions>() ?? new BrokerOptions();
         services.Configure<BrokerOptions>(configuration.GetSection(BrokerOptions.SectionName));
@@ -59,7 +60,7 @@ public static class BrokerRegistration
 
         return brokerOptions.Platform switch
         {
-            BrokerPlatform.Dhan => services.AddDhan(configuration, mcxOptions, futuresCsvPath),
+            BrokerPlatform.Dhan => services.AddDhan(configuration, mcxOptions, futuresCsvPath, dhanScripMasterCachePath),
             BrokerPlatform.Kite => services.AddKite(configuration, mcxOptions, futuresCsvPath),
             _ => throw new InvalidOperationException(
                 $"Unknown Broker:Platform '{brokerOptions.Platform}'. Supported values are 'Kite' and 'Dhan'."),
@@ -144,7 +145,8 @@ public static class BrokerRegistration
         this IServiceCollection services,
         IConfiguration configuration,
         McxOptions mcxOptions,
-        string futuresCsvPath)
+        string futuresCsvPath,
+        string? scripMasterCachePath)
     {
         services.Configure<DhanOptions>(configuration.GetSection(DhanOptions.SectionName));
         var dhanOptions = configuration.GetSection(DhanOptions.SectionName).Get<DhanOptions>() ?? new DhanOptions();
@@ -191,7 +193,8 @@ public static class BrokerRegistration
             sp.GetRequiredService<IOptions<DhanOptions>>(),
             sp.GetRequiredService<ILogger<DhanInstrumentMasterService>>(),
             futuresCsvPath,
-            mcxOptions.ResolveExchanges()));
+            mcxOptions.ResolveExchanges(),
+            scripMasterCachePath));
         services.AddSingleton<IBrokerInstrumentMaster>(sp => sp.GetRequiredService<DhanInstrumentMasterService>());
 
         services.AddSingleton(sp => new DhanOrderGateway(
