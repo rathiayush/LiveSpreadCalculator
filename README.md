@@ -286,12 +286,13 @@ The dashboard build is static files - serve them from any static host or web ser
 cd LiveSpreadCalculator
 docker build -t spreadtrader-api -f Dockerfile ..
 docker run -p 8080:8080 \
+  --restart unless-stopped \
   -e Kite__ApiKey=your_api_key \
   -e Kite__ApiSecret=your_api_secret \
   -e Dashboard__BaseUrl=https://your-dashboard-domain \
   spreadtrader-api
 ```
-The Dockerfile builds `LiveSpreadCalculator` and its project references (`SpreadTrader.Core`, `SpreadTrader.KiteIntegration`, `SpreadTrader.DhanIntegration`, `SpreadTrader.Engine`) into one image. It exposes a `GET /healthz` endpoint and has a `HEALTHCHECK` wired to it. Never bake `ApiKey`/`ApiSecret` into the image - pass them as environment variables (or your platform's secrets manager) at run time, using ASP.NET Core's `Section__Key` env var convention.
+The Dockerfile builds `LiveSpreadCalculator` and its project references (`SpreadTrader.Core`, `SpreadTrader.KiteIntegration`, `SpreadTrader.DhanIntegration`, `SpreadTrader.Engine`) into one image. It exposes a `GET /healthz` endpoint and has a `HEALTHCHECK` wired to it. Never bake `ApiKey`/`ApiSecret` into the image - pass them as environment variables (or your platform's secrets manager) at run time, using ASP.NET Core's `Section__Key` env var convention. `--restart unless-stopped` matters beyond ordinary crash recovery: the dashboard's "Switch broker platform" action (see "Choosing a broker" below) deliberately exits the process to apply a platform change, and relies on something outside it bringing the container back - without a restart policy it would just stay down after that.
 
 ### Docker Compose (Api + dashboard together)
 
@@ -305,6 +306,7 @@ Runs two containers - `api` (the backend, port 8080) and `web` (nginx serving th
 - **Run the Api as a single instance.** The tick ingestion/trigger engine must be a singleton - both brokers cap concurrent feed connections per account (Kite at 3 per API key; Dhan disconnects with code 805 over the limit), and running two instances would double-evaluate triggers and could double-fire orders. Don't set replica count > 1 for this service.
 - The **dashboard** (nginx/static) has no such constraint and can scale out normally if you ever need to.
 - If you outgrow one process later, the Engine only depends on the abstractions in `SpreadTrader.Core` (`ITickStore`, `ISpreadPublisher`, `ITriggerEventSink`, `IOrderGateway`) - swap the SignalR-backed implementations for a message-queue-backed one and it can move to its own container without touching the Engine itself.
+- **Enable "Always On"** (Azure App Service) or an equivalent restart-on-exit policy on whatever runs the Api. Beyond ordinary crash recovery, the dashboard's broker-platform switch (see "Choosing a broker" above) deliberately exits the process to restart with the new platform wired up - without something bringing a stopped process back, that switch would need a manual restart to actually take effect.
 
 ## Limitations to keep in mind
 

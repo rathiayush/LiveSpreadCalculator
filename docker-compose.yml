@@ -3,6 +3,11 @@ services:
     build:
       context: .
       dockerfile: LiveSpreadCalculator/Dockerfile
+    # Needed for the dashboard's "Switch broker platform" action (see BrokerPlatformController) -
+    # it exits the process on purpose to restart with the new platform wired up, and relies on
+    # something outside the process bringing it back. Without this, Compose's default policy ("no")
+    # would leave the container stopped instead.
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
