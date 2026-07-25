@@ -48,6 +48,17 @@ public interface IBrokerAuthService
     /// comes from configuration instead of leaving a button that can only ever fail.</summary>
     bool SupportsInteractiveLogin { get; }
 
+    /// <summary>What the dashboard should tell the operator while <c>isAuthenticated</c> is false
+    /// and <see cref="SupportsInteractiveLogin"/> is also false - i.e. there is no login button to
+    /// click, so simply saying "not logged in" leaves no indication of what to actually do. This
+    /// differs by HOW the token is meant to arrive, which the dashboard has no way to know on its
+    /// own: a static token needs a human to paste one in; Dhan's TOTP mode is expected to
+    /// authenticate itself within seconds with no action needed, and "not logged in" persisting
+    /// past that means something is actually wrong. Surfaced via GET /api/auth/broker. Ignored
+    /// (never shown) when SupportsInteractiveLogin is true, since the login button's own action is
+    /// self-explanatory there.</summary>
+    string NotAuthenticatedGuidance { get; }
+
     /// <summary>Builds the URL the browser should be sent to in order to log in. Async because
     /// Dhan requires a server-to-server consent call first to obtain the id the login URL is keyed
     /// by; Kite's is a pure string format and completes synchronously.</summary>

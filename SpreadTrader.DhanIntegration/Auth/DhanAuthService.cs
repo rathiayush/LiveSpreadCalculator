@@ -69,6 +69,23 @@ public sealed class DhanAuthService : IBrokerAuthService
 
     public bool SupportsInteractiveLogin => _options.HasConsentCredentials;
 
+    /// <summary>Only shown when SupportsInteractiveLogin is false, i.e. no consent credentials are
+    /// configured - so this only has to distinguish Static from Totp, not account for consent
+    /// being layered on top (that case gets the login button instead, see SupportsInteractiveLogin).
+    /// </summary>
+    public string NotAuthenticatedGuidance => _options.UseTotpAuth
+        ? "TOTP auto-login is on - the server should mint its own access token within a few seconds "
+          + "of starting up, with nothing for you to do. If this message is still here after that, "
+          + "something is actually failing: check the server logs for \"Dhan TOTP login failed\" or "
+          + "\"Dhan TOTP auto-login failed\" - the usual causes are a wrong Dhan:Pin, a TotpSecret "
+          + "copied incorrectly (use the manual-entry text from Dhan's Setup TOTP page, not the QR "
+          + "code), or Dhan:ClientId left blank. As a temporary override you can still paste a token "
+          + "generated in the Dhan web portal below; it won't be overwritten until the auto-login "
+          + "loop's next scheduled renewal or the next time this token is rejected."
+        : "Dhan doesn't use a browser login here - generate an access token in the Dhan web portal "
+          + "(Profile → DhanHQ Trading APIs) and paste it below. It's verified against Dhan "
+          + "before being accepted, and takes effect immediately without a restart.";
+
     public async Task<string> BuildLoginUrlAsync(CancellationToken cancellationToken)
     {
         if (!_options.HasConsentCredentials)

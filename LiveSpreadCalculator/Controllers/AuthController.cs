@@ -90,6 +90,7 @@ public sealed class AuthController : ControllerBase
         platform = _brokerAuth.PlatformName,
         supportsInteractiveLogin = _brokerAuth.SupportsInteractiveLogin,
         isAuthenticated = _session.IsAuthenticated,
+        notAuthenticatedGuidance = _brokerAuth.NotAuthenticatedGuidance,
     });
 
     /// <summary>Returns the broker login URL the frontend should redirect the browser to. Register
