@@ -1,3 +1,4 @@
+using LiveSpreadCalculator.Brokers.Switching;
 using LiveSpreadCalculator.Realtime;
 using Microsoft.Extensions.Options;
 using SpreadTrader.Core.Abstractions;
@@ -18,19 +19,25 @@ using SpreadTrader.KiteIntegration.Ticker;
 namespace LiveSpreadCalculator.Brokers;
 
 /// <summary>
-/// The one place the <c>Broker:Platform</c> flag takes effect. Exactly one broker's implementations
-/// are registered against the seven interfaces in SpreadTrader.Core.Brokers, and nothing downstream
-/// - not the engine, not a controller, not a store - can tell which one was chosen.
+/// Wires up BOTH Kite's and Dhan's implementations of the seven interfaces in
+/// SpreadTrader.Core.Brokers, always - not exactly one, chosen at startup, the way this used to
+/// work. Every interface is bound to a "Switching*" wrapper (see the Switching folder) that reads
+/// BrokerSwitchState.Current on every call and forwards to whichever platform's concrete
+/// instance is presently active. That is what lets BrokerPlatformController switch platforms with
+/// a plain in-process call - BrokerSwitchState.SwitchTo - instead of restarting the process.
 ///
-/// That is the whole point of the arrangement: adding or switching a platform is a change to this
-/// file plus a self-contained integration project, never a change to trading logic. SpreadTrader.Engine
-/// does not even reference a broker project (check its .csproj), so a compile failure is the
-/// backstop against broker-specific code leaking back into the engine.
+/// Consequence worth knowing: since both platforms are always constructed, both platforms' config
+/// sections need to be at least well-formed enough not to throw eagerly (none of these constructors
+/// validate credentials - see each auth service's own "not configured" exceptions, thrown lazily
+/// at first use, same as before). A deployment that only ever intends to use one platform can leave
+/// the other's credentials blank; that platform will simply fail to authenticate if ever switched
+/// to, exactly like an unconfigured platform already fails today - it just doesn't stop the OTHER
+/// platform's services from constructing and running normally.
 ///
-/// The choice is made once, at startup, rather than per-call. There is deliberately no runtime
-/// switch: a half-Kite/half-Dhan state would be a genuinely dangerous thing to have in a process
-/// that places real orders, and per-call branching would put a platform check in the hot tick path
-/// for no benefit.
+/// SpreadTrader.Engine still never references either broker project directly - it only depends on
+/// the interfaces, now satisfied by the Switching* wrappers instead of a single concrete
+/// implementation. That boundary is what makes PositionsCache/TickIngestionHostedService/etc.
+/// completely unaware that a switch can even happen.
 /// </summary>
 public static class BrokerRegistration
 {
@@ -46,7 +53,8 @@ public static class BrokerRegistration
         IConfiguration configuration,
         McxOptions mcxOptions,
         string futuresCsvPath,
-        string? dhanScripMasterCachePath = null)
+        string? dhanScripMasterCachePath,
+        string brokerPlatformOverridePath)
     {
         var brokerOptions = configuration.GetSection(BrokerOptions.SectionName).Get<BrokerOptions>() ?? new BrokerOptions();
         services.Configure<BrokerOptions>(configuration.GetSection(BrokerOptions.SectionName));
@@ -58,13 +66,32 @@ public static class BrokerRegistration
         // handlers, which is why it is registered here rather than inside either branch.
         services.AddSingleton<IBrokerAuthNotifier, SignalRBrokerAuthNotifier>();
 
-        return brokerOptions.Platform switch
-        {
-            BrokerPlatform.Dhan => services.AddDhan(configuration, mcxOptions, futuresCsvPath, dhanScripMasterCachePath),
-            BrokerPlatform.Kite => services.AddKite(configuration, mcxOptions, futuresCsvPath),
-            _ => throw new InvalidOperationException(
-                $"Unknown Broker:Platform '{brokerOptions.Platform}'. Supported values are 'Kite' and 'Dhan'."),
-        };
+        services.AddKite(configuration, mcxOptions, futuresCsvPath);
+        services.AddDhan(configuration, mcxOptions, futuresCsvPath, dhanScripMasterCachePath);
+
+        // A broker switch made from the dashboard (see BrokerPlatformController) writes its choice
+        // to this file, so it survives a later literal restart too - see
+        // BrokerPlatformOverrideStore's doc comment. Takes precedence over Broker:Platform when
+        // present; falls back to it (defaulting to Kite) otherwise, so an existing deployment that
+        // has never used the switch behaves exactly as before.
+        var initialPlatform = BrokerPlatformOverrideStore.TryRead(brokerPlatformOverridePath) ?? brokerOptions.Platform;
+        services.AddSingleton(sp => new BrokerSwitchState(
+            initialPlatform,
+            sp.GetRequiredService<ITickStore>(),
+            sp.GetRequiredService<ISpreadDefinitionStore>(),
+            brokerPlatformOverridePath,
+            sp.GetRequiredService<ILogger<BrokerSwitchState>>()));
+        services.AddSingleton<IBrokerSwitchNotifier>(sp => sp.GetRequiredService<BrokerSwitchState>());
+
+        services.AddSingleton<IBrokerSession, SwitchingBrokerSession>();
+        services.AddSingleton<IBrokerAuthService, SwitchingBrokerAuthService>();
+        services.AddSingleton<IBrokerInstrumentMaster, SwitchingInstrumentMaster>();
+        services.AddSingleton<IMarketDataFeed, SwitchingMarketDataFeed>();
+        services.AddSingleton<IOrderGateway, SwitchingOrderGateway>();
+        services.AddSingleton<IMarginService, SwitchingMarginService>();
+        services.AddSingleton<IPositionsService, SwitchingPositionsService>();
+
+        return services;
     }
 
     // ---- Zerodha Kite ---------------------------------------------------------------------------
@@ -78,10 +105,14 @@ public static class BrokerRegistration
         services.Configure<KiteOptions>(configuration.GetSection(KiteOptions.SectionName));
 
         services.AddSingleton<KiteSession>();
-        services.AddSingleton<IBrokerSession>(sp => sp.GetRequiredService<KiteSession>());
 
-        // Kite documents roughly 3-5 order placements per second; 3 leaves headroom.
-        services.AddSingleton(new RateLimiter(maxOperationsPerSecond: 3));
+        // Kite documents roughly 3-5 order placements per second; 3 leaves headroom. A plain local
+        // variable, not a DI registration - Dhan's OrderGateway needs its OWN RateLimiter instance
+        // with a completely different rate, and both are now always constructed together, so
+        // registering either one as the bare `RateLimiter` type would make GetRequiredService<RateLimiter>()
+        // ambiguous between them (the container just returns whichever was registered last, silently
+        // giving one gateway the other's rate limit).
+        var kiteRateLimiter = new RateLimiter(maxOperationsPerSecond: 3);
 
         services.AddSingleton(sp => new InstrumentMasterService(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(InstrumentMasterHttpClient),
@@ -90,14 +121,12 @@ public static class BrokerRegistration
             futuresCsvPath,
             // ["NFO"] when the MCX add-on is off (unchanged behaviour), ["NFO","MCX"] when on.
             mcxOptions.ResolveExchanges()));
-        services.AddSingleton<IBrokerInstrumentMaster>(sp => sp.GetRequiredService<InstrumentMasterService>());
 
         services.AddSingleton(sp => new KiteAuthService(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KiteAuthService)),
             sp.GetRequiredService<IOptions<KiteOptions>>(),
             sp.GetRequiredService<KiteSession>(),
             sp.GetRequiredService<ILogger<KiteAuthService>>()));
-        services.AddSingleton<IBrokerAuthService>(sp => sp.GetRequiredService<KiteAuthService>());
 
         // Detects Kite's TokenException (access token invalid/expired) at every call site that hits
         // Kite's REST API, clears the session immediately, and pushes IBrokerAuthNotifier so
@@ -109,10 +138,9 @@ public static class BrokerRegistration
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KiteOrderGateway)),
             sp.GetRequiredService<IOptions<KiteOptions>>(),
             sp.GetRequiredService<KiteSession>(),
-            sp.GetRequiredService<RateLimiter>(),
+            kiteRateLimiter,
             sp.GetRequiredService<KiteAuthFailureHandler>(),
             sp.GetRequiredService<ILogger<KiteOrderGateway>>()));
-        services.AddSingleton<IOrderGateway>(sp => sp.GetRequiredService<KiteOrderGateway>());
 
         services.AddSingleton(sp => new KiteMarginService(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KiteMarginService)),
@@ -120,7 +148,6 @@ public static class BrokerRegistration
             sp.GetRequiredService<KiteSession>(),
             sp.GetRequiredService<KiteAuthFailureHandler>(),
             sp.GetRequiredService<ILogger<KiteMarginService>>()));
-        services.AddSingleton<IMarginService>(sp => sp.GetRequiredService<KiteMarginService>());
 
         services.AddSingleton(sp => new KitePositionsService(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KitePositionsService)),
@@ -131,10 +158,8 @@ public static class BrokerRegistration
             sp.GetRequiredService<ITickStore>(),
             sp.GetRequiredService<ILogger<KitePositionsService>>(),
             mcxOptions));
-        services.AddSingleton<IPositionsService>(sp => sp.GetRequiredService<KitePositionsService>());
 
         services.AddSingleton<KiteTickerClient>();
-        services.AddSingleton<IMarketDataFeed>(sp => sp.GetRequiredService<KiteTickerClient>());
 
         return services;
     }
@@ -152,9 +177,10 @@ public static class BrokerRegistration
         var dhanOptions = configuration.GetSection(DhanOptions.SectionName).Get<DhanOptions>() ?? new DhanOptions();
 
         services.AddSingleton<DhanSession>();
-        services.AddSingleton<IBrokerSession>(sp => sp.GetRequiredService<DhanSession>());
 
-        services.AddSingleton(new RateLimiter(maxOperationsPerSecond: dhanOptions.OrdersPerSecond));
+        // See kiteRateLimiter's comment in AddKite above for why this is a local variable, not a
+        // DI registration.
+        var dhanRateLimiter = new RateLimiter(maxOperationsPerSecond: dhanOptions.OrdersPerSecond);
 
         // Lets the positions service teach the feed client which segment a securityId lives in, so
         // an open position that isn't a future in the (futures-only) instrument master can still be
@@ -179,12 +205,12 @@ public static class BrokerRegistration
             sp.GetRequiredService<IOptions<DhanOptions>>(),
             sp.GetRequiredService<DhanSession>(),
             sp.GetRequiredService<ILogger<DhanAuthService>>()));
-        services.AddSingleton<IBrokerAuthService>(sp => sp.GetRequiredService<DhanAuthService>());
 
         // Only when Dhan:AuthMode is "Totp": mints and renews the session's access token with no
-        // browser and no manual paste, ever - see the class doc comment for its full schedule. In
-        // the default "Static" mode this is never registered, and behaviour is unchanged from
-        // before this existed (DhanSession seeds itself from Dhan:AccessToken at construction).
+        // browser and no manual paste, ever - see the class doc comment for its full schedule. This
+        // now runs regardless of whether Dhan is the CURRENTLY ACTIVE platform - deliberately, so a
+        // deployment that keeps Dhan configured as a switch target has it already authenticated the
+        // moment it's switched to, instead of paying a fresh-login delay at switch time.
         if (dhanOptions.UseTotpAuth)
             services.AddHostedService<DhanTotpAutoRenewalHostedService>();
 
@@ -195,32 +221,27 @@ public static class BrokerRegistration
             futuresCsvPath,
             mcxOptions.ResolveExchanges(),
             scripMasterCachePath));
-        services.AddSingleton<IBrokerInstrumentMaster>(sp => sp.GetRequiredService<DhanInstrumentMasterService>());
 
         services.AddSingleton(sp => new DhanOrderGateway(
             sp.GetRequiredService<DhanApiClient>(),
-            sp.GetRequiredService<IBrokerInstrumentMaster>(),
-            sp.GetRequiredService<RateLimiter>(),
+            sp.GetRequiredService<DhanInstrumentMasterService>(),
+            dhanRateLimiter,
             sp.GetRequiredService<ILogger<DhanOrderGateway>>()));
-        services.AddSingleton<IOrderGateway>(sp => sp.GetRequiredService<DhanOrderGateway>());
 
         services.AddSingleton(sp => new DhanMarginService(
             sp.GetRequiredService<DhanApiClient>(),
-            sp.GetRequiredService<IBrokerInstrumentMaster>(),
+            sp.GetRequiredService<DhanInstrumentMasterService>(),
             sp.GetRequiredService<ILogger<DhanMarginService>>()));
-        services.AddSingleton<IMarginService>(sp => sp.GetRequiredService<DhanMarginService>());
 
         services.AddSingleton(sp => new DhanPositionsService(
             sp.GetRequiredService<DhanApiClient>(),
-            sp.GetRequiredService<IBrokerInstrumentMaster>(),
+            sp.GetRequiredService<DhanInstrumentMasterService>(),
             sp.GetRequiredService<ITickStore>(),
             sp.GetRequiredService<DhanSegmentRegistry>(),
             sp.GetRequiredService<ILogger<DhanPositionsService>>(),
             mcxOptions));
-        services.AddSingleton<IPositionsService>(sp => sp.GetRequiredService<DhanPositionsService>());
 
         services.AddSingleton<DhanMarketFeedClient>();
-        services.AddSingleton<IMarketDataFeed>(sp => sp.GetRequiredService<DhanMarketFeedClient>());
 
         return services;
     }

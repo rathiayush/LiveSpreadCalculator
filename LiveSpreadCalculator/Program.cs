@@ -60,21 +60,12 @@ var futuresCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 var dhanScripMasterCachePath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:DhanScripMasterCachePath"] ?? "App_Data/dhan_scrip_master_cache.csv");
 
-// A broker switch made from the dashboard (see BrokerPlatformController) writes its choice here
-// instead of editing appsettings.json - persisted so it survives the restart applying it requires.
-// Read BEFORE AddBrokerIntegration below (which is the only place Broker:Platform actually gets
-// consumed) and layered on top of it as an in-memory config source, so a value written here beats
-// both appsettings.json and the Broker__Platform environment variable - see
-// BrokerPlatformOverrideStore's doc comment.
+// A broker switch made from the dashboard (see BrokerPlatformController/BrokerSwitchState) writes
+// its choice here - read inside AddBrokerIntegration to seed BrokerSwitchState's initial value, so
+// a later literal restart also comes up on whichever platform was last switched to, even though
+// the switch itself no longer needs a restart to take effect.
 var brokerPlatformOverridePath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:BrokerPlatformOverridePath"] ?? "App_Data/broker-platform-override.txt");
-if (BrokerPlatformOverrideStore.TryRead(brokerPlatformOverridePath) is { } brokerPlatformOverride)
-{
-    builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
-    {
-        [$"{BrokerOptions.SectionName}:Platform"] = brokerPlatformOverride.ToString(),
-    });
-}
 // The universe builder pulls its symbol list live from the Kite instrument master (every stock
 // currently listed for NFO futures - see InstrumentMasterService.GetAllFuturesUnderlyings) rather
 // than a hand-maintained CSV. How many symbols get built is configurable per-request via
@@ -131,11 +122,12 @@ builder.Services.AddSingleton<ISpreadHistoryStore>(sp =>
 builder.Services.AddSingleton<ITriggerActivityStore, InMemoryTriggerActivityStore>();
 
 // ---- Broker integration ---------------------------------------------------------------------
-// Registers exactly one platform's implementations - Kite or Dhan - behind the interfaces in
-// SpreadTrader.Core.Brokers, chosen by the Broker:Platform setting. Everything below this line
-// (engine, controllers, hub) is written against those interfaces and is identical either way.
-// See BrokerRegistration for the full list of what gets swapped.
-builder.Services.AddBrokerIntegration(builder.Configuration, mcxOptions, futuresCsvPath, dhanScripMasterCachePath);
+// Registers BOTH Kite's and Dhan's implementations of the interfaces in SpreadTrader.Core.Brokers,
+// always - Broker:Platform only picks which one is active at startup, and the dashboard can switch
+// which one is active afterwards with no restart (see BrokerSwitchState). Everything below this
+// line (engine, controllers, hub) is written against those interfaces and is identical either way.
+// See BrokerRegistration for the full wiring.
+builder.Services.AddBrokerIntegration(builder.Configuration, mcxOptions, futuresCsvPath, dhanScripMasterCachePath, brokerPlatformOverridePath);
 
 // Refreshes the instrument master (Dhan's ~26 MB scrip master, or Kite's per-exchange dump) on a
 // background timer well inside its own 12h cache window, so no live request - the Add Spread
