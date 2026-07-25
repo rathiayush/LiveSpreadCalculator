@@ -455,6 +455,18 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
     message.warning(`${brokerInfo.platform} session ended (${brokerAuthInvalidReason}) - please log in again.`, 8)
   }, [brokerAuthInvalidReason, brokerInfo.platform])
 
+  // loadAuthStatus above only ever runs once, at mount. There's no push the other way for
+  // "became authenticated" (only brokerAuthInvalidReason, for the opposite transition) - so a tab
+  // opened while a background auto-login (Dhan TOTP) is still retrying captures isAuthenticated:
+  // false once and never learns it later succeeded, even though the backend is trading fine by
+  // then. Poll while not authenticated to pick that up; stop once it flips true so this never
+  // fires once logged in.
+  useEffect(() => {
+    if (authStatus?.isAuthenticated) return
+    const id = setInterval(loadAuthStatus, 15_000)
+    return () => clearInterval(id)
+  }, [authStatus?.isAuthenticated, loadAuthStatus])
+
   const handleLogin = async () => {
     try {
       const { url } = await api.getLoginUrl()
