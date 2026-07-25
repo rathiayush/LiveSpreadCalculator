@@ -226,6 +226,11 @@ builder.Services.AddSingleton(sp => new UniverseBuilderService(
     mcxUniverseCsvPath));
 builder.Services.AddSingleton<BulkTriggerTemplateService>();
 
+// Builds the universe automatically at startup and after every broker-platform switch, so the
+// operator never has to click "Build universe" by hand just to get back to a streaming state -
+// see AutoUniverseBuilderHostedService's doc comment.
+builder.Services.AddHostedService<AutoUniverseBuilderHostedService>();
+
 // ---- Authentication (JWT) -------------------------------------------------------------------
 // Locks the entire API + SignalR hub behind a Bearer token. Only users listed in
 // App_Data/users.csv can obtain a token (POST /api/auth/token); the external world can't consume
