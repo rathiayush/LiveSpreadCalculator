@@ -91,22 +91,29 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
 
 ## Choosing a broker
 
-`Broker:Platform` decides which broker the whole app talks to - `"Kite"` (default) or `"Dhan"`.
-Only that platform's config section is read; everything else in the app is identical either way.
-Override it per-deployment with the `Broker__Platform` environment variable.
+`Broker:Platform` decides which broker the app STARTS on - `"Kite"` (default) or `"Dhan"`. Override
+it per-deployment with the `Broker__Platform` environment variable. Both platforms' services are
+always constructed and running, regardless of this setting - it only picks which one is active the
+moment the process boots (see "Switching from the dashboard" below for changing it afterwards).
+Practical consequence: if you intend to ever switch to a platform, that platform's config section
+should be filled in too (or a static/TOTP Dhan token authenticated, or a Kite login completed) -
+otherwise switching to it works, but it shows up "not authenticated" until you do, exactly like an
+unconfigured platform already behaves today.
 
 **Switching from the dashboard.** Admin -> Broker Platform lets you switch between Kite and Dhan
-without editing config or redeploying. Picking a platform there writes the choice to
+instantly, with no restart and no downtime - both platforms' order gateways, market data feeds,
+instrument masters, positions services and sessions exist side by side for the whole life of the
+process (see `BrokerRegistration`); switching just flips which one every request is routed to (see
+`BrokerSwitchState`). A platform that was already authenticated before the switch (e.g. Dhan on
+TOTP mode, which keeps renewing its own token in the background regardless of whether Dhan is
+currently active) is instantly usable - no re-login needed. The choice is also written to
 `Storage:BrokerPlatformOverridePath` (a one-line file, `App_Data/broker-platform-override.txt` by
-default) - read at startup ahead of `Broker:Platform`/`Broker__Platform`, so it wins over both once
-set - and then asks the running process to stop so it comes back up wired to the new platform (see
-`BrokerPlatformController`). Whether it actually comes back up on its own depends on the host: Azure
-App Service ("Always On") and Docker with a restart policy both bring a stopped process straight
-back; a bare `dotnet` process with nothing supervising it will just stay down until started again
-manually. Either way the override file is written *before* the process is asked to stop, so the
-choice is never lost - the next start, however it happens, boots on the newly chosen platform. Like
-any platform switch, this drops every in-memory tick/spread and needs a universe rebuild afterwards
-(see below).
+default), purely so a LATER, unrelated process restart (a redeploy, a crash) also comes back up on
+whichever platform was last switched to, rather than reverting to `Broker:Platform`. Like any
+platform switch, this clears every live tick and spread definition (trigger rules and PNL alerts
+are untouched - they're saved to disk and keyed by a broker-neutral id, see below) and needs a
+universe rebuild afterwards, since Kite and Dhan use different instrument ids for the same
+contracts.
 
 **Running on Dhan.** No browser login is required either way - pick between a token you paste in
 yourself, or one the app generates for itself forever:
@@ -292,7 +299,7 @@ docker run -p 8080:8080 \
   -e Dashboard__BaseUrl=https://your-dashboard-domain \
   spreadtrader-api
 ```
-The Dockerfile builds `LiveSpreadCalculator` and its project references (`SpreadTrader.Core`, `SpreadTrader.KiteIntegration`, `SpreadTrader.DhanIntegration`, `SpreadTrader.Engine`) into one image. It exposes a `GET /healthz` endpoint and has a `HEALTHCHECK` wired to it. Never bake `ApiKey`/`ApiSecret` into the image - pass them as environment variables (or your platform's secrets manager) at run time, using ASP.NET Core's `Section__Key` env var convention. `--restart unless-stopped` matters beyond ordinary crash recovery: the dashboard's "Switch broker platform" action (see "Choosing a broker" below) deliberately exits the process to apply a platform change, and relies on something outside it bringing the container back - without a restart policy it would just stay down after that.
+The Dockerfile builds `LiveSpreadCalculator` and its project references (`SpreadTrader.Core`, `SpreadTrader.KiteIntegration`, `SpreadTrader.DhanIntegration`, `SpreadTrader.Engine`) into one image. It exposes a `GET /healthz` endpoint and has a `HEALTHCHECK` wired to it. Never bake `ApiKey`/`ApiSecret` into the image - pass them as environment variables (or your platform's secrets manager) at run time, using ASP.NET Core's `Section__Key` env var convention. `--restart unless-stopped` is ordinary crash recovery for a process meant to run unattended for weeks/months - not needed for the broker-platform switch, which takes effect in-process with no restart at all (see "Choosing a broker" below).
 
 ### Docker Compose (Api + dashboard together)
 
@@ -306,7 +313,6 @@ Runs two containers - `api` (the backend, port 8080) and `web` (nginx serving th
 - **Run the Api as a single instance.** The tick ingestion/trigger engine must be a singleton - both brokers cap concurrent feed connections per account (Kite at 3 per API key; Dhan disconnects with code 805 over the limit), and running two instances would double-evaluate triggers and could double-fire orders. Don't set replica count > 1 for this service.
 - The **dashboard** (nginx/static) has no such constraint and can scale out normally if you ever need to.
 - If you outgrow one process later, the Engine only depends on the abstractions in `SpreadTrader.Core` (`ITickStore`, `ISpreadPublisher`, `ITriggerEventSink`, `IOrderGateway`) - swap the SignalR-backed implementations for a message-queue-backed one and it can move to its own container without touching the Engine itself.
-- **Enable "Always On"** (Azure App Service) or an equivalent restart-on-exit policy on whatever runs the Api. Beyond ordinary crash recovery, the dashboard's broker-platform switch (see "Choosing a broker" above) deliberately exits the process to restart with the new platform wired up - without something bringing a stopped process back, that switch would need a manual restart to actually take effect.
 
 ## Limitations to keep in mind
 

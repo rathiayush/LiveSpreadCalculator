@@ -3,13 +3,14 @@ using SpreadTrader.Core.Brokers;
 namespace LiveSpreadCalculator.Brokers;
 
 /// <summary>
-/// Persists an operator's choice of Broker:Platform made from the dashboard (see
-/// BrokerPlatformController) to a small text file, so it survives the process restart that
-/// applying it requires - <see cref="BrokerRegistration"/> only ever reads the platform once, at
-/// startup. Read back in Program.cs, before configuration is handed to AddBrokerIntegration, and
-/// layered on top of Broker:Platform / Broker__Platform as an in-memory config source, so a value
-/// written here takes precedence over both appsettings.json and the environment variable - it IS
-/// the live, editable version of that same setting, not a separate concept.
+/// Persists an operator's choice of broker platform made from the dashboard (see
+/// BrokerSwitchState/BrokerPlatformController) to a small text file. The switch itself takes
+/// effect immediately, in-process, with no restart involved - this file exists purely so a LATER,
+/// unrelated process restart (a redeploy, a crash, a reboot) also comes back up on whichever
+/// platform was last switched to, instead of reverting to whatever Broker:Platform/
+/// Broker__Platform says in static config. Read once at startup (BrokerRegistration) to seed
+/// BrokerSwitchState's initial value; written every time SwitchTo actually changes the active
+/// platform.
 ///
 /// A plain text file (just "Kite" or "Dhan") rather than JSON: there is exactly one value to
 /// store, and BrokerPlatform already round-trips through Enum.Parse cleanly.

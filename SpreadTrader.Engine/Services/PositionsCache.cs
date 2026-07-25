@@ -67,6 +67,7 @@ public sealed class PositionsCache : BackgroundService
     private readonly IMarketDataFeed _tickerClient;
     private readonly ITickStore _tickStore;
     private readonly IBrokerInstrumentMaster _instrumentMaster;
+    private readonly IBrokerSwitchNotifier? _brokerSwitchNotifier;
     private readonly ILogger<PositionsCache> _logger;
 
     private readonly object _lock = new();
@@ -77,7 +78,9 @@ public sealed class PositionsCache : BackgroundService
     // main loop blocks on the semaphore, so between order events it consumes nothing at all -
     // no timer, no wake-ups, no API calls. The flag is what coalesces a burst of alerts into one
     // release: while it is already 1, further alerts are no-ops that ride along with the fetch
-    // the first alert armed.
+    // the first alert armed. A broker platform switch (see IBrokerSwitchNotifier) is signalled
+    // through this exact same path - as far as this cache is concerned, "the active platform just
+    // changed" and "an order just changed" both mean the same thing: re-fetch now.
     private readonly SemaphoreSlim _resyncSignal = new(0, 1);
     private int _orderUpdatePending;
 
@@ -86,13 +89,15 @@ public sealed class PositionsCache : BackgroundService
         IMarketDataFeed tickerClient,
         ITickStore tickStore,
         IBrokerInstrumentMaster instrumentMaster,
-        ILogger<PositionsCache> logger)
+        ILogger<PositionsCache> logger,
+        IBrokerSwitchNotifier? brokerSwitchNotifier = null)
     {
         _positionsService = positionsService;
         _tickerClient = tickerClient;
         _tickStore = tickStore;
         _instrumentMaster = instrumentMaster;
         _logger = logger;
+        _brokerSwitchNotifier = brokerSwitchNotifier;
     }
 
     /// <summary>Every currently-anchored position, each with LastPrice/Pnl/ExitPrice/ExitPnl
@@ -186,6 +191,7 @@ public sealed class PositionsCache : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _tickerClient.OrderUpdateReceived += OnOrderUpdate;
+        if (_brokerSwitchNotifier is not null) _brokerSwitchNotifier.Changed += OnBrokerSwitched;
         try
         {
             // STARTUP: retry until the first snapshot lands. Costs no API calls while logged out
@@ -231,6 +237,7 @@ public sealed class PositionsCache : BackgroundService
         finally
         {
             _tickerClient.OrderUpdateReceived -= OnOrderUpdate;
+            if (_brokerSwitchNotifier is not null) _brokerSwitchNotifier.Changed -= OnBrokerSwitched;
         }
     }
 
@@ -244,6 +251,20 @@ public sealed class PositionsCache : BackgroundService
             try { _resyncSignal.Release(); }
             catch (SemaphoreFullException) { /* already armed - coalesced */ }
         }
+    }
+
+    /// <summary>The anchors just went stale in a way ResyncAsync's normal failure handling must
+    /// NOT paper over: they belong to a different broker account entirely, not merely an older
+    /// snapshot from the same one. ResyncAsync keeps the previous anchors on a failed fetch
+    /// deliberately (a stale-but-recent same-broker snapshot beats blanking the page), but that
+    /// reasoning inverts across a platform switch - if the newly-active platform isn't
+    /// authenticated yet, a failed resync must leave this EMPTY, never showing the outgoing
+    /// platform's positions under the new one's name. Clearing synchronously here, before arming
+    /// the resync via the exact same path an order update uses, guarantees that.</summary>
+    private void OnBrokerSwitched(BrokerPlatform _)
+    {
+        lock (_lock) { _anchors = new Dictionary<string, PositionAnchor>(); }
+        OnOrderUpdate();
     }
 
     private static TimeSpan Min(TimeSpan a, TimeSpan b) => a < b ? a : b;
