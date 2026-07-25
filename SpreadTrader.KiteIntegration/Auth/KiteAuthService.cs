@@ -42,6 +42,12 @@ public sealed class KiteAuthService : IBrokerAuthService
     /// dashboard there is no login flow at all.</summary>
     public bool SupportsInteractiveLogin => true;
 
+    /// <summary>Never actually shown - SupportsInteractiveLogin is always true on Kite, so the
+    /// dashboard always renders the login button instead of this text. Implemented anyway so every
+    /// IBrokerAuthService gives a real answer rather than an empty string.</summary>
+    public string NotAuthenticatedGuidance =>
+        "Click Login to Zerodha Kite and complete the login/2FA flow. Kite tokens expire daily around 6 AM IST, so this is needed once each trading day.";
+
     public Task<string> BuildLoginUrlAsync(CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(_options.ApiKey))

@@ -333,7 +333,7 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
   const [authStatus, setAuthStatus] = useState(null)
   // Which broker this backend is wired to - see GET /api/auth/broker. Seeded with a neutral label
   // so the header never names the wrong platform in the moment before the real value lands.
-  const [brokerInfo, setBrokerInfo] = useState({ platform: 'Broker', supportsInteractiveLogin: true })
+  const [brokerInfo, setBrokerInfo] = useState({ platform: 'Broker', supportsInteractiveLogin: true, notAuthenticatedGuidance: '' })
   // Manual access-token entry - only reachable on a platform with no browser login flow, see
   // handleSubmitToken and AuthController.SetBrokerToken.
   const [tokenModalOpen, setTokenModalOpen] = useState(false)
@@ -369,6 +369,7 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
       .then((info) => setBrokerInfo({
         platform: info.platform || 'Broker',
         supportsInteractiveLogin: info.supportsInteractiveLogin !== false,
+        notAuthenticatedGuidance: info.notAuthenticatedGuidance || '',
       }))
       .catch((err) => console.error('Failed to load broker info:', err))
   }, [])
@@ -565,11 +566,9 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
         onCancel={() => { setTokenModalOpen(false); setTokenValue('') }}
         destroyOnClose
       >
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 12 }}>
-          {brokerInfo.platform} doesn&apos;t use a browser login here - generate an access token in
-          the {brokerInfo.platform} web portal (Profile &rarr; DhanHQ Trading APIs) and paste it
-          below. It&apos;s verified against {brokerInfo.platform} before being accepted, and takes
-          effect immediately without a restart.
+        <Typography.Paragraph type="secondary" style={{ marginBottom: 12, whiteSpace: 'pre-line' }}>
+          {brokerInfo.notAuthenticatedGuidance ||
+            `${brokerInfo.platform} doesn't use a browser login here - generate an access token in the ${brokerInfo.platform} web portal and paste it below. It's verified against ${brokerInfo.platform} before being accepted, and takes effect immediately without a restart.`}
         </Typography.Paragraph>
         <Input.Password
           value={tokenValue}
