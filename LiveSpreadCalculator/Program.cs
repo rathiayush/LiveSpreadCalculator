@@ -115,6 +115,12 @@ builder.Services.AddSingleton<ITriggerActivityStore, InMemoryTriggerActivityStor
 // See BrokerRegistration for the full list of what gets swapped.
 builder.Services.AddBrokerIntegration(builder.Configuration, mcxOptions, futuresCsvPath);
 
+// Refreshes the instrument master (Dhan's ~26 MB scrip master, or Kite's per-exchange dump) on a
+// background timer well inside its own 12h cache window, so no live request - the Add Spread
+// pickers, GET /api/positions, POST /api/spreads - is ever the one that pays for a stale-cache
+// reload. See InstrumentMasterRefreshHostedService's doc comment for the full reasoning.
+builder.Services.AddHostedService<InstrumentMasterRefreshHostedService>();
+
 // Shared MARKET -> protected-LIMIT conversion (brokers reject raw MARKET orders for F&O - see
 // MarketProtectionService's doc comment). Used by both OrderDispatchHostedService (triggered
 // baskets, registered below) and PositionsController (manual square-off).

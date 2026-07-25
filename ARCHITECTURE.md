@@ -252,6 +252,32 @@ spread definitions are in-memory only and trigger rules are cleared daily anyway
 Dhan additionally requires the deployment's outbound IP to be whitelisted before order placement
 works - data APIs work without it. Same requirement `zerodha-ip-whitelist.txt` documents for Kite.
 
+### Instrument master refresh never blocks a live request
+
+Both instrument masters cache their scrip dump for 12 hours and reload lazily by default - the
+first caller after that window expires would otherwise pay the download+parse cost inline. That
+matters most on Dhan: its scrip master is one flat file covering every exchange and instrument
+type (there's no exchange-scoped endpoint), currently ~26 MB, and several live endpoints call
+`EnsureLoadedAsync` directly in their request path (`GET /api/instruments/futures*` - the Add
+Spread pickers, `GET /api/positions`, `POST /api/spreads`).
+
+`InstrumentMasterRefreshHostedService` (broker-agnostic - it depends on `IBrokerInstrumentMaster`
+only, so it protects Kite's smaller per-exchange dump too) calls `EnsureLoadedAsync` on its own
+3-hour timer, comfortably inside the 12-hour cache window, so by the time any real request arrives
+the cache is already fresh and that request's own call is a same-thread, no-I/O no-op. The lazy
+on-demand path in each instrument master is unchanged and remains the safety net for the gap
+between process startup and this loop's first tick.
+
+On Dhan, `DhanInstrumentMasterService` also sends the previous response's `ETag` as
+`If-None-Match` on every refresh - confirmed against the live CDN (CloudFront) to actually honour
+this and answer with `304 Not Modified` when nothing has changed, rather than assumed. A refresh
+where the file is unchanged therefore costs one small request instead of a fresh 26 MB
+download-and-reparse, which is what makes refreshing every 3 hours (rather than once a day) cheap
+enough to be worth doing - lot size and tick size can both change between exchange-driven
+revisions, and order pricing/quantity depend on them being current (see `ParseTickSize`'s doc
+comment), so a long cache lifetime trades real correctness risk for a network-cost saving that
+this ETag check makes unnecessary to trade away in the first place.
+
 ## 4. The Engine pipeline
 
 Four `BackgroundService`s, registered as singletons, running for the life of the process:
