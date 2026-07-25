@@ -269,14 +269,18 @@ returned with the token, so the dashboard's restore cache doesn't hardcode Kite'
 
 `POST /api/settings/broker-platform` (the dashboard's Admin -> Broker Platform page) switches
 instantly, in-process - no restart, no `Broker:Platform` edit needed (see §3.1's `BrokerSwitchState`
-description). Then **rebuild the universe once** (`POST /api/universe/build`). The two platforms use
-different tradingsymbols (`RELIANCE26JULFUT` vs `RELIANCE-Jul2026-FUT`) and different instrument
-ids, so spread definitions resolved against one cannot be reused against the other - the switch
-itself already clears them (see §3.1), this step is what repopulates them on the new platform. Cheap
-either way because spread definitions are in-memory only and trigger rules are cleared daily
-regardless (§7) - they're also unaffected by the switch itself, since `TriggerRule.SpreadId` is a
-broker-neutral string (e.g. `"RELIANCE-JUL-AUG"`), not a raw instrument id, so a rebuilt spread with
-the same id reattaches whatever rules were already configured against it.
+description). The universe then rebuilds itself automatically - `AutoUniverseBuilderHostedService`
+subscribes to the same `IBrokerSwitchNotifier.Changed` event `BrokerSwitchState` raises, and calls
+`UniverseBuilderService.BuildAsync`/`BuildMcxAsync` in the background (retried with backoff on
+failure) without the operator having to click "Build universe" - this same service also runs the
+very first build at process startup. The two platforms use different tradingsymbols
+(`RELIANCE26JULFUT` vs `RELIANCE-Jul2026-FUT`) and different instrument ids, so spread definitions
+resolved against one cannot be reused against the other - the switch itself already clears them
+(see §3.1), and the automatic rebuild is what repopulates them on the new platform. Cheap either way
+because spread definitions are in-memory only and trigger rules are cleared daily regardless (§7) -
+they're also unaffected by the switch itself, since `TriggerRule.SpreadId` is a broker-neutral
+string (e.g. `"RELIANCE-JUL-AUG"`), not a raw instrument id, so a rebuilt spread with the same id
+reattaches whatever rules were already configured against it.
 
 Dhan additionally requires the deployment's outbound IP to be whitelisted before order placement
 works - data APIs work without it. Same requirement `zerodha-ip-whitelist.txt` documents for Kite.

@@ -150,10 +150,13 @@ Two things to know before trading on Dhan:
 
 - **Whitelist your outbound IP** with Dhan before order placement will work (data APIs work
   without it) - the same requirement `zerodha-ip-whitelist.txt` documents for Zerodha.
-- **Rebuild the universe after switching.** Run `POST /api/universe/build` (or the "Build universe"
-  button) once after changing platform and restarting. Kite and Dhan use different tradingsymbols
-  and different instrument ids, so spreads resolved against one broker's instrument master can't be
-  reused against the other's. Spread definitions are in-memory only, so this costs nothing.
+- **The universe rebuilds itself automatically** - at startup, and again right after every broker
+  switch (see `AutoUniverseBuilderHostedService`) - so there's no manual step needed to get back to
+  a streaming state. Kite and Dhan use different tradingsymbols and different instrument ids, which
+  is exactly why a rebuild is needed at all: spreads resolved against one broker's instrument master
+  can't be reused against the other's, and switching already clears them (see `BrokerSwitchState`).
+  The manual "Build universe" button on the Symbols page still exists too, for picking up a newly
+  listed F&O stock or rolling to a new expiry mid-day without waiting for anything.
 - **The Dhan scrip master refreshes once a day** (06:00 IST by default -
   `Engine:InstrumentMasterRefreshTimeIst`), not on every request - this app mostly trades monthly
   F&O contracts, which don't need intraday-fresh listings. The download is also saved to disk
@@ -232,8 +235,10 @@ Steps 1-3 are the same either way; step 4 branches on which mode you picked.
    way - the log should show `Instrument master ready: 658 futures across [NFO]` and
    `Connected to Dhan market feed`; on TOTP mode it should additionally show
    `Dhan TOTP auto-login succeeded for client ...` within the first couple of seconds.
-6. **Rebuild the universe once**: `POST /api/universe/build`, or the *Build universe* button.
-   This is required after switching platforms - see above.
+6. **Nothing else to do** - the universe builds itself automatically once the instrument master is
+   ready (see "Choosing a broker" above), no click needed. If you want to force an early rebuild
+   (e.g. to pick up a newly-listed stock without waiting), `POST /api/universe/build` or the *Build
+   universe* button still work.
 
 If startup logs `Dhan scrip master ... is missing required columns`, `ScripMasterUrl` is pointing
 at the detailed CSV; set it to the compact one in the table above. If the feed logs a disconnect
