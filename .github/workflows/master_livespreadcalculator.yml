@@ -51,14 +51,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path "${{ env.DOTNET_ROOT }}/myapp/wwwroot" | Out-Null
           Copy-Item -Path "SpreadTrader.Dashboard/spreadtrader.dashboard.client/dist/*" -Destination "${{ env.DOTNET_ROOT }}/myapp/wwwroot" -Recurse -Force
 
-      # users.csv holds live-edited passwords/security stamps (see CsvUserStore's Change Password
-      # feature) - the copy already running on the server is the source of truth once the app has
-      # gone live, so a deploy must never overwrite it with whatever's committed here. Same
-      # behavior deploy.ps1 applies locally; every other App_Data file is left alone and deploys
-      # normally.
-      - name: Strip users*.csv so this deploy doesn't overwrite live server credentials
-        run: Remove-Item -Path "${{ env.DOTNET_ROOT }}/myapp/App_Data/users*.csv" -Force -ErrorAction SilentlyContinue
-
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
