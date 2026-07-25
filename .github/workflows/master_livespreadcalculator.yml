@@ -77,6 +77,11 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_DB9E8784A1D64BAE87F8E9E7EF39B652 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_B69C0E41CC1841D58B26E9E90ECFA02C }}
 
+      # Set explicitly on every deploy rather than relying on it persisting from prior runs -
+      # same as deploy.ps1 does for this Web App.
+      - name: Set ASPNETCORE_ENVIRONMENT
+        run: az webapp config appsettings set --resource-group live-spread --name LiveSpreadCalculator --settings ASPNETCORE_ENVIRONMENT=Production
+
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v3

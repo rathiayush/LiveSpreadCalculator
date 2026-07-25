@@ -77,6 +77,11 @@ jobs:
           tenant-id: ${{ secrets.AZUREAPPSERVICE_TENANTID_688CE7C89FB343128A5BF28EFA63FE37 }}
           subscription-id: ${{ secrets.AZUREAPPSERVICE_SUBSCRIPTIONID_26F81FBFDD2047DDAB2E78105EBD2A3F }}
 
+      # Set explicitly on every deploy rather than relying on it persisting from prior runs -
+      # same as deploy-pradeep-2.ps1 does for this Web App.
+      - name: Set ASPNETCORE_ENVIRONMENT
+        run: az webapp config appsettings set --resource-group live-spread2 --name P2-LiveSpreadCalculator --settings ASPNETCORE_ENVIRONMENT=pradeep-2
+
       - name: Deploy to Azure Web App
         id: deploy-to-webapp
         uses: azure/webapps-deploy@v3
