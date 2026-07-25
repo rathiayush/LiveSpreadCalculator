@@ -18,16 +18,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Program.cs serves the dashboard as static files from LiveSpreadCalculator/wwwroot - dotnet
+      # publish alone never builds it (there's no MSBuild target wired up for that), so this has
+      # to be an explicit step, same as deploy.ps1 does locally.
+      - name: Build dashboard client
+        run: |
+          npm ci
+          npm run build
+        working-directory: SpreadTrader.Dashboard/spreadtrader.dashboard.client
+
       - name: Set up .NET Core
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 'dotnet8.x'
+          dotnet-version: '8.x'
 
       - name: Build with dotnet
         run: dotnet build --configuration Release
 
+      # Publishes the API project specifically, not the whole solution - the class library
+      # projects it references are pulled in automatically as part of that, so nothing else needs
+      # naming here.
       - name: dotnet publish
-        run: dotnet publish -c Release -o "${{env.DOTNET_ROOT}}/myapp"
+        run: dotnet publish LiveSpreadCalculator/LiveSpreadCalculator.csproj -c Release -o "${{ env.DOTNET_ROOT }}/myapp"
+
+      - name: Copy dashboard build into wwwroot
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ env.DOTNET_ROOT }}/myapp/wwwroot" | Out-Null
+          Copy-Item -Path "SpreadTrader.Dashboard/spreadtrader.dashboard.client/dist/*" -Destination "${{ env.DOTNET_ROOT }}/myapp/wwwroot" -Recurse -Force
+
+      # users.csv holds live-edited passwords/security stamps (see CsvUserStore's Change Password
+      # feature) - the copy already running on the server is the source of truth once the app has
+      # gone live, so a deploy must never overwrite it with whatever's committed here. Same
+      # behavior deploy.ps1 applies locally; every other App_Data file is left alone and deploys
+      # normally.
+      - name: Strip users*.csv so this deploy doesn't overwrite live server credentials
+        run: Remove-Item -Path "${{ env.DOTNET_ROOT }}/myapp/App_Data/users*.csv" -Force -ErrorAction SilentlyContinue
 
       - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
@@ -47,7 +77,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: .net-app
-      
+
       - name: Login to Azure
         uses: azure/login@v2
         with:
@@ -62,4 +92,4 @@ jobs:
           app-name: 'P1-LiveSpreadCalculator'
           slot-name: 'Production'
           package: .
-          
+
