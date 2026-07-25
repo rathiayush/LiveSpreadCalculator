@@ -20,4 +20,9 @@ public sealed class SignalRBrokerAuthNotifier : IBrokerAuthNotifier
 
     public Task NotifyAuthInvalidAsync(string reason, CancellationToken cancellationToken) =>
         _hub.Clients.All.SendAsync("brokerAuthInvalidated", new { reason }, cancellationToken);
+
+    /// <summary>The counterpart push for a background auto-login (Dhan TOTP) succeeding - see
+    /// IBrokerAuthNotifier.NotifyAuthRestoredAsync for why this exists.</summary>
+    public Task NotifyAuthRestoredAsync(CancellationToken cancellationToken) =>
+        _hub.Clients.All.SendAsync("brokerAuthRestored", cancellationToken);
 }
