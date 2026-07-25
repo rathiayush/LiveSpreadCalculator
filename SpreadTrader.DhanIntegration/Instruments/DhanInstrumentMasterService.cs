@@ -55,6 +55,14 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
 
     private List<BrokerInstrument> _instruments = new();
 
+    /// <summary>The scrip master's ETag from the last successful 200 response, sent back as
+    /// If-None-Match on the next refresh. Dhan's CDN (CloudFront) returns one on every response -
+    /// confirmed empirically, not assumed - so a refresh where nothing has changed costs one small
+    /// request and a 304 instead of re-downloading and re-parsing ~26 MB. Null until the first
+    /// successful load, and left untouched by a 304 (still valid) or a failed request (nothing to
+    /// replace it with).</summary>
+    private string? _etag;
+
     /// <summary>Both of Dhan's symbol spellings for each contract point at the same instrument, so
     /// a lookup by either resolves. Dhan's own positions/orders responses report the trading
     /// symbol, but which of the two spellings they use is not something to guess at - accepting
@@ -90,10 +98,29 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         {
             if (IsFresh()) return;
 
-            _logger.LogInformation("Downloading Dhan scrip master from {Url}...", _options.ScripMasterUrl);
+            using var request = new HttpRequestMessage(HttpMethod.Get, _options.ScripMasterUrl);
+            // Sent only once we already have data to fall back on - the very first load always
+            // pulls the full file, which is correct: there is nothing yet to conditionally keep.
+            if (_etag is not null && _instruments.Count > 0)
+                request.Headers.TryAddWithoutValidation("If-None-Match", _etag);
 
-            using var response = await _httpClient.GetAsync(
-                _options.ScripMasterUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            _logger.LogInformation("Checking Dhan scrip master at {Url}...", _options.ScripMasterUrl);
+
+            using var response = await _httpClient.SendAsync(
+                request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified)
+            {
+                // Nothing has changed since the ETag we sent - Dhan confirmed it without us
+                // paying to re-download or re-parse ~26 MB. Just extend freshness; _instruments/
+                // _bySymbol are already correct and are left untouched.
+                _loadedAt = DateTimeOffset.UtcNow;
+                _logger.LogInformation(
+                    "Dhan scrip master unchanged (304) - keeping {Count} previously loaded futures.",
+                    _instruments.Count);
+                return;
+            }
+
             response.EnsureSuccessStatusCode();
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -102,6 +129,7 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             _instruments = parsed.Select(p => p.Instrument).ToList();
             _bySymbol = BuildSymbolIndex(parsed);
             _loadedAt = DateTimeOffset.UtcNow;
+            _etag = response.Headers.ETag?.Tag;
 
             _logger.LogInformation(
                 "Instrument master ready: {Count} futures across [{Exchanges}] (options/equities and other exchanges discarded during parse)",
