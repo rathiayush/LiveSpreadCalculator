@@ -62,12 +62,23 @@ export default function BrokerPlatformPage() {
     setNotice(null)
     try {
       const result = await api.switchBrokerPlatform(selected)
-      setCurrentPlatform(result.platform)
-      setSelected(result.platform)
       setNotice(result.message)
+      if (result.switched) {
+        // The BACKEND switch is already done and doesn't need a restart, but the FRONTEND still
+        // does - the spread cache (hooks/spreadHub.js), AppShell's own `spreads`/`brokerInfo`/
+        // `authStatus` state, and the SignalR connection's one-time REST seed are all seeded once
+        // per browser session and have no way to invalidate themselves on a switch. Without a
+        // reload here, the Spreads/Positions pages and the header's broker label would keep
+        // showing the OUTGOING platform's data until the tab was refreshed by hand. A brief delay
+        // just lets the success message actually render before the reload wipes it.
+        setTimeout(() => window.location.reload(), 800)
+      } else {
+        setCurrentPlatform(result.platform)
+        setSelected(result.platform)
+        setSwitching(false)
+      }
     } catch (err) {
       setError(err.message)
-    } finally {
       setSwitching(false)
     }
   }
