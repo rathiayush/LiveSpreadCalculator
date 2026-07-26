@@ -4,9 +4,9 @@
 name: Build and deploy ASP.Net Core app to Azure Web App - p2-LiveSpreadCalculator
 
 on:
-  push:
-    branches:
-      - master
+  # MANUAL ONLY - deploys are started from the Actions tab ("Run workflow"), never automatically on
+  # a push or merge to master. Deliberate: a merge should not be able to redeploy a live trading
+  # app on its own. Re-add a `push:` trigger here if you ever want that back.
   workflow_dispatch:
 
 jobs:
