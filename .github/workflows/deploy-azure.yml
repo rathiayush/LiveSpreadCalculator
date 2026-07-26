@@ -6,8 +6,9 @@ name: Deploy to Azure
 # Azure resource itself are managed separately (az cli / Portal), not here.
 
 on:
-  push:
-    branches: [main]
+  # MANUAL ONLY - deploys are started from the Actions tab ("Run workflow"), never automatically on
+  # a push or merge. Deliberate: a merge to master should not be able to redeploy a live trading
+  # app on its own. Re-add a `push:` trigger here if you ever want that back.
   workflow_dispatch: {}
 
 env:
