@@ -20,6 +20,36 @@ const AXIS_COLOR = '#9aa4b2'
 const GRID_COLOR = '#ffffff14'
 const BORDER_COLOR = '#ffffff22'
 
+// lightweight-charts has no timezone option: it always renders a UNIX timestamp as UTC. Snapshots
+// are captured during IST market hours (09:29-15:29), so plotting the raw epoch labelled every
+// point 5.5h early - the 09:29 capture drew at 03:59.
+//
+// The library's documented workaround is to feed it timestamps pre-shifted into the target zone, so
+// its UTC rendering lands on IST wall-clock. Every timestamp from `data` onwards is therefore a
+// DISPLAY time (true epoch + 5.5h), including the `time` handed back by crosshair events; read it
+// with UTC getters to recover the IST wall-clock, or subtract IST_OFFSET_SECONDS for the true
+// instant. Shifting rather than relying on the browser's own zone is what makes the axis read IST
+// for a viewer sitting anywhere in the world.
+const IST_OFFSET_SECONDS = 5.5 * 60 * 60
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const pad2 = (n) => String(n).padStart(2, '0')
+
+// Formats a shifted display timestamp. UTC getters are correct here precisely because the value was
+// shifted: reading it as UTC yields the IST wall-clock we want to show.
+function formatIst(displayTimeSeconds, { withDate = true, withTime = true } = {}) {
+  const d = new Date(displayTimeSeconds * 1000)
+  const date = `${pad2(d.getUTCDate())} ${MONTHS[d.getUTCMonth()]}`
+  const time = `${pad2(d.getUTCHours())}:${pad2(d.getUTCMinutes())}`
+  if (withDate && withTime) return `${date} ${time}`
+  return withDate ? date : time
+}
+
+// TickMarkType values, inlined rather than imported so the axis keeps formatting correctly even if
+// the library stops exporting the enum as a runtime value: 0 Year, 1 Month, 2 DayOfMonth,
+// 3 Time, 4 TimeWithSeconds. Day-level ticks show the date, intraday ticks show HH:mm.
+const TICK_DATE_TYPES = new Set([0, 1, 2])
+
 // Tracks the viewport width so the modal/chart can size to the device (updates on rotate/resize).
 function useViewportWidth() {
   const [width, setWidth] = useState(typeof window !== 'undefined' ? window.innerWidth : 1024)
@@ -71,10 +101,13 @@ export default function SpreadHistoryModal({ spread, open, onClose }) {
   }, [open, spreadId])
 
   // lightweight-charts wants unix seconds and strictly ascending, de-duplicated time points.
+  // capturedAt carries its own offset (+05:30), so Date parses the correct instant regardless of
+  // where the browser is; the +IST_OFFSET_SECONDS shift is purely so the chart's UTC rendering
+  // prints IST wall-clock. See the note beside IST_OFFSET_SECONDS.
   const data = useMemo(() => {
     const byTime = new Map()
     for (const p of points) {
-      const time = Math.floor(new Date(p.capturedAt).getTime() / 1000)
+      const time = Math.floor(new Date(p.capturedAt).getTime() / 1000) + IST_OFFSET_SECONDS
       byTime.set(time, { time, buy: p.buySpreadValue, sell: p.sellSpreadValue })
     }
     return [...byTime.values()].sort((a, b) => a.time - b.time)
@@ -93,7 +126,16 @@ export default function SpreadHistoryModal({ spread, open, onClose }) {
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: isMobile ? 9 : 11 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false },
+      // Both formatters read the shifted timestamps as IST wall-clock, so the axis ticks and the
+      // crosshair's time label agree with each other and with the HoverReadout below.
+      localization: { timeFormatter: (time) => `${formatIst(time)} IST` },
+      timeScale: {
+        borderColor: BORDER_COLOR,
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: (time, tickMarkType) =>
+          formatIst(time, { withDate: TICK_DATE_TYPES.has(tickMarkType), withTime: !TICK_DATE_TYPES.has(tickMarkType) }),
+      },
       crosshair: { mode: CrosshairMode.Normal },
       // Pass full option objects rather than `true` shorthand - the library's option merge
       // overwrites the whole sub-object when given a boolean, which silently disables every
@@ -190,7 +232,7 @@ export default function SpreadHistoryModal({ spread, open, onClose }) {
           <HoverReadout hover={hover} showBuy={showBuy} showSell={showSell} />
 
           <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-            Scroll or pinch to zoom, drag to pan.
+            Scroll or pinch to zoom, drag to pan. All times are IST.
           </Typography.Text>
         </Space>
       )}
@@ -223,7 +265,7 @@ function HoverReadout({ hover, showBuy, showSell }) {
   }
   return (
     <Space size={16} wrap>
-      <Typography.Text style={{ fontSize: 12 }}>{new Date(hover.time * 1000).toLocaleString()}</Typography.Text>
+      <Typography.Text style={{ fontSize: 12 }}>{formatIst(hover.time)} IST</Typography.Text>
       {showBuy && hover.buy != null && (
         <Typography.Text style={{ fontSize: 12, color: BUY_COLOR }}>Buy: {Number(hover.buy).toFixed(2)}</Typography.Text>
       )}
