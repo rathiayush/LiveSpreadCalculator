@@ -70,10 +70,19 @@ public sealed class DhanAuthService : IBrokerAuthService
     public bool SupportsInteractiveLogin => _options.HasConsentCredentials;
 
     /// <summary>Only shown when SupportsInteractiveLogin is false, i.e. no consent credentials are
-    /// configured - so this only has to distinguish Static from Totp, not account for consent
-    /// being layered on top (that case gets the login button instead, see SupportsInteractiveLogin).
-    /// </summary>
-    public string NotAuthenticatedGuidance => _options.UseTotpAuth
+    /// configured - so this has to distinguish three cases: Consent mode explicitly selected but
+    /// not yet configured, Totp, or Static (the fallback for everything else, including consent
+    /// credentials being layered on top of Static/Totp - that case gets the login button instead,
+    /// see SupportsInteractiveLogin, so it never reaches this property at all).</summary>
+    public string NotAuthenticatedGuidance => _options.UseConsentAuth
+        ? "Dhan:AuthMode is set to \"Consent\" (browser OAuth-style login) but Dhan:AppId / "
+          + "Dhan:AppSecret aren't both set yet, so there's no login button to click. Get them from "
+          + "Dhan Web → Profile → Access DhanHQ APIs → toggle to \"API Key\" → enter an app name and "
+          + "a Redirect URL pointing at this deployment's /api/auth/callback → Generate. Set the "
+          + "resulting API Key as Dhan:AppId and API Secret as Dhan:AppSecret (as environment "
+          + "variables - Dhan__AppId / Dhan__AppSecret - never committed), then reload; the login "
+          + "button appears with no restart needed."
+        : _options.UseTotpAuth
         ? "TOTP auto-login is on - the server should mint its own access token within a few seconds "
           + "of starting up, with nothing for you to do. If this message is still here after that, "
           + "something is actually failing: check the server logs for \"Dhan TOTP login failed\" or "

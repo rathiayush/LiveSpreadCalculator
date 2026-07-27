@@ -45,6 +45,26 @@
       "dotnetRunMessages": true,
       "applicationUrl": "https://localhost:7105;http://localhost:5159"
     },
+    "pradeep-1 (local)": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "pradeep-1",
+        // Overrides appsettings.pradeep-1.json's Dashboard:BaseUrl (the deployed Azure URL) so
+        // CORS allows a LOCAL frontend dev server instead of only the live P1 site - env vars
+        // always win over appsettings.{Environment}.json regardless of environment name. Point
+        // this at wherever the React client is actually running locally (its Vite/dev-server
+        // port), not the deployed Dashboard:BaseUrl above.
+        "Dashboard__BaseUrl": "https://localhost:63061",
+        // ASPNETCORE_ENVIRONMENT isn't literally "Development", so app.Environment.IsDevelopment()
+        // is false and Swagger would otherwise never register (see Program.cs) - this bypasses that
+        // gate for THIS local profile only; the real Azure Web App for pradeep-1 does not set this.
+        "Swagger__ForceEnabled": "true"
+      },
+      "dotnetRunMessages": true,
+      "applicationUrl": "https://localhost:7105;http://localhost:5159"
+    },
     "pradeep-2 (local)": {
       "commandName": "Project",
       "launchBrowser": true,
@@ -56,7 +76,11 @@
         // always win over appsettings.{Environment}.json regardless of environment name. Point
         // this at wherever the React client is actually running locally (its Vite/dev-server
         // port), not the deployed Dashboard:BaseUrl above.
-        "Dashboard__BaseUrl": "https://localhost:63061"
+        "Dashboard__BaseUrl": "https://localhost:63061",
+        // ASPNETCORE_ENVIRONMENT isn't literally "Development", so app.Environment.IsDevelopment()
+        // is false and Swagger would otherwise never register (see Program.cs) - this bypasses that
+        // gate for THIS local profile only; the real Azure Web App for pradeep-2 does not set this.
+        "Swagger__ForceEnabled": "true"
       },
       "dotnetRunMessages": true,
       "applicationUrl": "https://localhost:7105;http://localhost:5159"
