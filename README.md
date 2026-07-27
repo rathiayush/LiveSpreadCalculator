@@ -86,14 +86,34 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
 - **AccessToken**: leave blank. It's obtained by completing the login flow (below) and is held in memory from then on - Kite invalidates it daily around 6 AM regardless of how it was issued.
 - **TickerMode**: leave as `"full"` unless you have a specific reason not to - see "Ask price, not last traded price" above.
 - **Dashboard.BaseUrl**: where the React app is served from. Used for CORS and for redirecting back after Kite login.
-- **Storage paths**: relative to the Api project's content root. `TriggersCsvPath` is where trigger rules are persisted (rewritten on every add/remove/fire/enable/disable). `FuturesCsvPath` is where the futures symbol list gets written when you click "Sync symbols from broker" on the Trigger Config page. `DhanScripMasterCachePath` (Dhan only) is where the raw scrip master is saved after every successful download - it's what lets a restart warm the in-memory instrument index from disk instead of always re-downloading Dhan's ~26 MB dump first; see "Choosing a broker" below. All directories are created automatically if missing.
+- **Storage paths**: relative to the Api project's content root. `TriggersCsvPath` is where trigger rules are persisted (rewritten on every add/remove/fire/enable/disable). `FuturesCsvPath` is where the futures symbol list gets written when you click "Sync symbols from broker" on the Trigger Config page. `DhanScripMasterCachePath` (Dhan only) is where the raw scrip master is saved after every successful download - it's what lets a restart warm the in-memory instrument index from disk instead of always re-downloading Dhan's ~26 MB dump first; see "Choosing a broker" below. `BrokerPlatformOverridePath` is where a broker switch made from the dashboard (Admin -> Broker Platform) is saved, taking precedence over `Broker:Platform`/`Broker__Platform` once written - see "Choosing a broker" below. All directories are created automatically if missing.
 - If you'd rather not put ApiKey/ApiSecret in a file that might end up in source control, override them with environment variables instead (`Kite__ApiKey`, `Kite__ApiSecret`, `Dhan__ClientId`, `Dhan__AccessToken` - see Docker section) or `dotnet user-secrets`. Either way, keep real values out of git - and add `App_Data/` to `.gitignore` too, since the CSV files it holds aren't meant to be committed either.
 
 ## Choosing a broker
 
-`Broker:Platform` decides which broker the whole app talks to - `"Kite"` (default) or `"Dhan"`.
-Only that platform's config section is read; everything else in the app is identical either way.
-Override it per-deployment with the `Broker__Platform` environment variable.
+`Broker:Platform` decides which broker the app STARTS on - `"Kite"` (default) or `"Dhan"`. Override
+it per-deployment with the `Broker__Platform` environment variable. Both platforms' services are
+always constructed and running, regardless of this setting - it only picks which one is active the
+moment the process boots (see "Switching from the dashboard" below for changing it afterwards).
+Practical consequence: if you intend to ever switch to a platform, that platform's config section
+should be filled in too (or a static/TOTP Dhan token authenticated, or a Kite login completed) -
+otherwise switching to it works, but it shows up "not authenticated" until you do, exactly like an
+unconfigured platform already behaves today.
+
+**Switching from the dashboard.** Admin -> Broker Platform lets you switch between Kite and Dhan
+instantly, with no restart and no downtime - both platforms' order gateways, market data feeds,
+instrument masters, positions services and sessions exist side by side for the whole life of the
+process (see `BrokerRegistration`); switching just flips which one every request is routed to (see
+`BrokerSwitchState`). A platform that was already authenticated before the switch (e.g. Dhan on
+TOTP mode, which keeps renewing its own token in the background regardless of whether Dhan is
+currently active) is instantly usable - no re-login needed. The choice is also written to
+`Storage:BrokerPlatformOverridePath` (a one-line file, `App_Data/broker-platform-override.txt` by
+default), purely so a LATER, unrelated process restart (a redeploy, a crash) also comes back up on
+whichever platform was last switched to, rather than reverting to `Broker:Platform`. Like any
+platform switch, this clears every live tick and spread definition (trigger rules and PNL alerts
+are untouched - they're saved to disk and keyed by a broker-neutral id, see below) and needs a
+universe rebuild afterwards, since Kite and Dhan use different instrument ids for the same
+contracts.
 
 **Running on Dhan.** No browser login is required either way - pick between a token you paste in
 yourself, or one the app generates for itself forever:
@@ -130,10 +150,13 @@ Two things to know before trading on Dhan:
 
 - **Whitelist your outbound IP** with Dhan before order placement will work (data APIs work
   without it) - the same requirement `zerodha-ip-whitelist.txt` documents for Zerodha.
-- **Rebuild the universe after switching.** Run `POST /api/universe/build` (or the "Build universe"
-  button) once after changing platform and restarting. Kite and Dhan use different tradingsymbols
-  and different instrument ids, so spreads resolved against one broker's instrument master can't be
-  reused against the other's. Spread definitions are in-memory only, so this costs nothing.
+- **The universe rebuilds itself automatically** - at startup, and again right after every broker
+  switch (see `AutoUniverseBuilderHostedService`) - so there's no manual step needed to get back to
+  a streaming state. Kite and Dhan use different tradingsymbols and different instrument ids, which
+  is exactly why a rebuild is needed at all: spreads resolved against one broker's instrument master
+  can't be reused against the other's, and switching already clears them (see `BrokerSwitchState`).
+  The manual "Build universe" button on the Symbols page still exists too, for picking up a newly
+  listed F&O stock or rolling to a new expiry mid-day without waiting for anything.
 - **The Dhan scrip master refreshes once a day** (06:00 IST by default -
   `Engine:InstrumentMasterRefreshTimeIst`), not on every request - this app mostly trades monthly
   F&O contracts, which don't need intraday-fresh listings. The download is also saved to disk
@@ -212,8 +235,10 @@ Steps 1-3 are the same either way; step 4 branches on which mode you picked.
    way - the log should show `Instrument master ready: 658 futures across [NFO]` and
    `Connected to Dhan market feed`; on TOTP mode it should additionally show
    `Dhan TOTP auto-login succeeded for client ...` within the first couple of seconds.
-6. **Rebuild the universe once**: `POST /api/universe/build`, or the *Build universe* button.
-   This is required after switching platforms - see above.
+6. **Nothing else to do** - the universe builds itself automatically once the instrument master is
+   ready (see "Choosing a broker" above), no click needed. If you want to force an early rebuild
+   (e.g. to pick up a newly-listed stock without waiting), `POST /api/universe/build` or the *Build
+   universe* button still work.
 
 If startup logs `Dhan scrip master ... is missing required columns`, `ScripMasterUrl` is pointing
 at the detailed CSV; set it to the compact one in the table above. If the feed logs a disconnect
@@ -273,12 +298,13 @@ The dashboard build is static files - serve them from any static host or web ser
 cd LiveSpreadCalculator
 docker build -t spreadtrader-api -f Dockerfile ..
 docker run -p 8080:8080 \
+  --restart unless-stopped \
   -e Kite__ApiKey=your_api_key \
   -e Kite__ApiSecret=your_api_secret \
   -e Dashboard__BaseUrl=https://your-dashboard-domain \
   spreadtrader-api
 ```
-The Dockerfile builds `LiveSpreadCalculator` and its project references (`SpreadTrader.Core`, `SpreadTrader.KiteIntegration`, `SpreadTrader.DhanIntegration`, `SpreadTrader.Engine`) into one image. It exposes a `GET /healthz` endpoint and has a `HEALTHCHECK` wired to it. Never bake `ApiKey`/`ApiSecret` into the image - pass them as environment variables (or your platform's secrets manager) at run time, using ASP.NET Core's `Section__Key` env var convention.
+The Dockerfile builds `LiveSpreadCalculator` and its project references (`SpreadTrader.Core`, `SpreadTrader.KiteIntegration`, `SpreadTrader.DhanIntegration`, `SpreadTrader.Engine`) into one image. It exposes a `GET /healthz` endpoint and has a `HEALTHCHECK` wired to it. Never bake `ApiKey`/`ApiSecret` into the image - pass them as environment variables (or your platform's secrets manager) at run time, using ASP.NET Core's `Section__Key` env var convention. `--restart unless-stopped` is ordinary crash recovery for a process meant to run unattended for weeks/months - not needed for the broker-platform switch, which takes effect in-process with no restart at all (see "Choosing a broker" below).
 
 ### Docker Compose (Api + dashboard together)
 

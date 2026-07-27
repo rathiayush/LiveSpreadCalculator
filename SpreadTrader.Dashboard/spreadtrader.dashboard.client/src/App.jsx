@@ -17,11 +17,12 @@ import {
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
+  ApiOutlined,
 } from '@ant-design/icons'
 import { api } from './api'
 import { useAuth, clearSession } from './auth'
 import { getCachedBrokerToken, saveBrokerToken, clearCachedBrokerToken } from './brokerAuth'
-import { useSpreadHubConnectionState, useBrokerAuthInvalidated, clearBrokerAuthInvalidated, stopConnection, pruneSpreads } from './hooks/spreadHub'
+import { useSpreadHubConnectionState, useBrokerAuthInvalidated, clearBrokerAuthInvalidated, useBrokerAuthRestored, stopConnection, pruneSpreads } from './hooks/spreadHub'
 import LoginPage from './pages/LoginPage'
 import DashboardPage from './pages/DashboardPage'
 import SpreadsPage from './pages/SpreadsPage'
@@ -30,6 +31,7 @@ import ConfiguredSpreadsPage from './pages/ConfiguredSpreadsPage'
 import TriggersPage from './pages/TriggersPage'
 import TriggerActivityPage from './pages/TriggerActivityPage'
 import PositionsPage from './pages/PositionsPage'
+import BrokerPlatformPage from './pages/BrokerPlatformPage'
 import ProfileModal from './components/ProfileModal'
 
 const { Header, Content, Sider } = Layout
@@ -68,6 +70,7 @@ const NAV_ITEMS = [
   { key: '/positions', label: 'Positions & PNL', icon: <ScissorOutlined />, subtitle: 'Open positions, live PNL, and manual square-off' },
   { key: '/symbols', label: 'Symbols', icon: <CloudSyncOutlined />, subtitle: 'Sync the F&O symbol list and build the tradeable universe', group: 'admin' },
   { key: '/configured-spreads', label: 'Configured Spreads', icon: <UnorderedListOutlined />, subtitle: 'Every spread definition currently streaming', group: 'admin' },
+  { key: '/broker-platform', label: 'Broker Platform', icon: <ApiOutlined />, subtitle: 'Switch which broker the app trades through, instantly - no restart', group: 'admin' },
 ]
 
 const ADMIN_GROUP_KEY = 'admin-group'
@@ -452,6 +455,18 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
     message.warning(`${brokerInfo.platform} session ended (${brokerAuthInvalidReason}) - please log in again.`, 8)
   }, [brokerAuthInvalidReason, brokerInfo.platform])
 
+  // Pushed live (see hooks/spreadHub.js's "brokerAuthRestored" handler) the moment a background
+  // auto-login (Dhan TOTP) actually succeeds - the missing counterpart to brokerAuthInvalidReason
+  // above. loadAuthStatus only ever runs once, at mount; a tab opened while
+  // DhanTotpAutoRenewalHostedService was still mid-retry would otherwise capture
+  // isAuthenticated:false once and never learn it later succeeded, even though the backend was
+  // trading fine by then.
+  const brokerAuthRestoredCount = useBrokerAuthRestored()
+  useEffect(() => {
+    if (brokerAuthRestoredCount === 0) return
+    loadAuthStatus()
+  }, [brokerAuthRestoredCount, loadAuthStatus])
+
   const handleLogin = async () => {
     try {
       const { url } = await api.getLoginUrl()
@@ -540,6 +555,10 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
             <Route
               path="/positions"
               element={<PositionsPage />}
+            />
+            <Route
+              path="/broker-platform"
+              element={<BrokerPlatformPage />}
             />
           </Routes>
         </Content>

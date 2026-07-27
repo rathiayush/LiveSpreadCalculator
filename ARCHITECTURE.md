@@ -101,11 +101,35 @@ Everything broker-specific sits behind seven interfaces in `SpreadTrader.Core/Br
 | `IMarginService` | Basket margin + available margin | `KiteMarginService` | `DhanMarginService` |
 | `IPositionsService` | Open positions + PNL | `KitePositionsService` | `DhanPositionsService` |
 
-`LiveSpreadCalculator/Brokers/BrokerRegistration.cs` is the only place the flag is read: it
-registers exactly one platform's implementations against those interfaces. The choice is made once
-at startup, never per call - a half-Kite/half-Dhan process would be genuinely dangerous in
-something that places real orders, and per-call branching would put a platform check in the hot
-tick path for nothing.
+`LiveSpreadCalculator/Brokers/BrokerRegistration.cs` constructs BOTH platforms' implementations of
+all seven interfaces, always - `Broker:Platform` only picks which one is active the moment the
+process starts. Each interface is bound to a small "Switching*" wrapper (see
+`LiveSpreadCalculator/Brokers/Switching/`) that reads `BrokerSwitchState.Current` on every call and
+forwards to whichever concrete instance is presently active. `BrokerSwitchState.SwitchTo` is the
+only thing that ever changes it (driven by `POST /api/settings/broker-platform`, i.e. the
+dashboard's Admin -> Broker Platform page), and it does the choreography that keeps this safe:
+
+1. Clears `ITickStore` and every in-memory spread definition - Kite's `instrument_token` and
+   Dhan's `securityId` are two unrelated numbering systems for the same real contract, so a leftover
+   tick or a leg resolved against the outgoing platform must never be read once the universe is
+   rebuilt on the other one.
+2. Flips `Current` and raises `Changed`. `SwitchingMarketDataFeed` reacts by cancelling the
+   outgoing platform's `RunAsync` (closing its socket) and starting the new platform's - exactly one
+   feed is ever actually connected at a time, preserving the "exactly one live socket" invariant
+   this same section used to rely on a startup-only choice to guarantee. `PositionsCache` reacts the
+   same way `OnOrderUpdate` already worked - a switch is signalled through the identical
+   coalesced-resync path, just clearing the stale anchors first so a not-yet-authenticated new
+   platform never shows the outgoing one's positions.
+3. Persists the choice to `Storage:BrokerPlatformOverridePath` purely so a LATER, unrelated process
+   restart also boots on the newly chosen platform.
+
+There is still never a half-Kite/half-Dhan state that a live request can observe - every read of
+`Current` inside one call is a single volatile-ish field read, and the ordering above guarantees
+the previously-active platform's live socket is torn down before the new one's calls start
+resolving. `SpreadTrader.Engine` still never references either broker project directly, or even
+`BrokerSwitchState` itself - it only sees the Switching* wrapper through the same interfaces it
+always has, plus a tiny `IBrokerSwitchNotifier` (implemented by `BrokerSwitchState`) that
+`PositionsCache` subscribes to, so the composition root and Engine stay decoupled.
 
 **The engine keeps its own vocabulary.** Rather than rewriting every service, CSV column and UI
 label to a third neutral vocabulary, the app keeps the Kite-flavoured terms it was built with -
@@ -243,11 +267,20 @@ returned with the token, so the dashboard's restore cache doesn't hardcode Kite'
 
 ### Switching platforms
 
-Set `Broker:Platform` (or `Broker__Platform`), supply that broker's credentials, restart, then
-**rebuild the universe once** (`POST /api/universe/build`). The two platforms use different
-tradingsymbols (`RELIANCE26JULFUT` vs `RELIANCE-Jul2026-FUT`) and different instrument ids, so
-spread definitions resolved against one cannot be reused against the other. This is cheap because
-spread definitions are in-memory only and trigger rules are cleared daily anyway (§7).
+`POST /api/settings/broker-platform` (the dashboard's Admin -> Broker Platform page) switches
+instantly, in-process - no restart, no `Broker:Platform` edit needed (see §3.1's `BrokerSwitchState`
+description). The universe then rebuilds itself automatically - `AutoUniverseBuilderHostedService`
+subscribes to the same `IBrokerSwitchNotifier.Changed` event `BrokerSwitchState` raises, and calls
+`UniverseBuilderService.BuildAsync`/`BuildMcxAsync` in the background (retried with backoff on
+failure) without the operator having to click "Build universe" - this same service also runs the
+very first build at process startup. The two platforms use different tradingsymbols
+(`RELIANCE26JULFUT` vs `RELIANCE-Jul2026-FUT`) and different instrument ids, so spread definitions
+resolved against one cannot be reused against the other - the switch itself already clears them
+(see §3.1), and the automatic rebuild is what repopulates them on the new platform. Cheap either way
+because spread definitions are in-memory only and trigger rules are cleared daily regardless (§7) -
+they're also unaffected by the switch itself, since `TriggerRule.SpreadId` is a broker-neutral
+string (e.g. `"RELIANCE-JUL-AUG"`), not a raw instrument id, so a rebuilt spread with the same id
+reattaches whatever rules were already configured against it.
 
 Dhan additionally requires the deployment's outbound IP to be whitelisted before order placement
 works - data APIs work without it. Same requirement `zerodha-ip-whitelist.txt` documents for Kite.
@@ -451,6 +484,8 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
 | GET | `/api/auth/broker-token` | Returns the current broker token + its platform-computed expiry, for the dashboard's restore cache |
 | POST | `/api/auth/broker-token` | Installs a hand-supplied access token after verifying it against the broker - the recovery path for a platform with no browser login (Dhan on a portal token) |
 | POST | `/api/auth/broker-restore` | Offers a client-cached token back after a restart; verified live against the broker before it's trusted |
+| GET | `/api/settings/broker-platform` | Which platform is actually live right now (`platform`) |
+| POST | `/api/settings/broker-platform` | Switches the live platform immediately, in-process - no restart (see §3.1's `BrokerSwitchState`) |
 | GET | `/api/instruments/futures?underlying=&exchange=` | Futures contracts for one underlying, ordered by expiry |
 | POST | `/api/instruments/futures/fetch-all?exchange=` | Downloads/refreshes the instrument master, filters to futures only, saves to the futures CSV |
 | GET | `/api/instruments/futures/all?exchange=` | Lists cached futures contracts (for the symbol picker) |
@@ -472,8 +507,8 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
 
 ```json
 {
-  "Broker": { "Platform": "Kite" },        // or "Dhan" - see §3.1
-  "Kite": {
+  "Broker": { "Platform": "Kite" },        // or "Dhan" - which one is ACTIVE at startup; see §3.1
+  "Kite": {                                 // always read - both platforms are always constructed
     "ApiKey": "",
     "ApiSecret": "",
     "AccessToken": "",
@@ -481,7 +516,7 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
     "RestBaseUrl": "https://api.kite.trade",
     "TickerMode": "full"
   },
-  "Dhan": {                                 // only read when Broker:Platform is "Dhan"
+  "Dhan": {                                 // always read - fill this in too if you intend to ever switch to Dhan
     "AuthMode": "Static",                   // "Static" (paste a token) or "Totp" (fully automatic)
     "ClientId": "",                         // dhanClientId - required in every mode
     "AccessToken": "",                      // Static mode: from the Dhan web portal

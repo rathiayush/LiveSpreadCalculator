@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SpreadTrader.Core.Abstractions;
 
 namespace SpreadTrader.DhanIntegration.Auth;
 
@@ -49,6 +50,7 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
     private readonly DhanAuthService _authService;
+    private readonly IBrokerAuthNotifier _notifier;
     private readonly ILogger<DhanTotpAutoRenewalHostedService> _logger;
 
     // Same flag+semaphore coalescing shape as PositionsCache.OnOrderUpdate/_resyncSignal: the
@@ -61,11 +63,13 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
         IOptions<DhanOptions> options,
         DhanSession session,
         DhanAuthService authService,
+        IBrokerAuthNotifier notifier,
         ILogger<DhanTotpAutoRenewalHostedService> logger)
     {
         _options = options.Value;
         _session = session;
         _authService = authService;
+        _notifier = notifier;
         _logger = logger;
     }
 
@@ -102,6 +106,13 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
     /// succeeded.</summary>
     private async Task<DateTimeOffset?> RenewUntilSuccessAsync(CancellationToken stoppingToken)
     {
+        // Captured up front, before the call that's about to (re)populate it - this is what tells
+        // a successful result below apart from an ordinary proactive renewal (case 2 in the class
+        // doc comment), where the dashboard already shows "authenticated" and has nothing new to
+        // learn. Only a genuine not-authenticated -> authenticated transition (case 1 or 3) is
+        // worth pushing.
+        var wasAuthenticated = _session.IsAuthenticated;
+
         var backoff = RetryBackoffInitial;
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -111,6 +122,22 @@ public sealed class DhanTotpAutoRenewalHostedService : BackgroundService
                 _logger.LogInformation(
                     "Dhan TOTP auto-login succeeded for client {ClientId}; token valid until {ExpiresUtc:u}.",
                     result.ClientId, result.ExpiresUtc);
+
+                if (!wasAuthenticated)
+                {
+                    // Best-effort, same as DhanAuthFailureHandler's push for the opposite
+                    // transition - a dashboard being briefly disconnected shouldn't turn a
+                    // successful login into an unhandled exception in this loop.
+                    try
+                    {
+                        await _notifier.NotifyAuthRestoredAsync(stoppingToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to push the Dhan auth-restored notification - clients will still pick this up next time they poll GET /api/auth/status.");
+                    }
+                }
+
                 // Fall back to a conservative estimate if Dhan's response ever omits expiryTime,
                 // so a renewal still gets scheduled rather than this loop stalling indefinitely.
                 return result.ExpiresUtc ?? DateTimeOffset.UtcNow.AddHours(23);

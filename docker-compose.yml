@@ -3,6 +3,10 @@ services:
     build:
       context: .
       dockerfile: LiveSpreadCalculator/Dockerfile
+    # Ordinary crash recovery - this is meant to run unattended for weeks/months (see
+    # ARCHITECTURE.md). Compose's default policy ("no") would leave the container stopped after
+    # any crash instead of restarting it.
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:

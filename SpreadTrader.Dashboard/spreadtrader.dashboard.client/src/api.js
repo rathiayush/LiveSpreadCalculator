@@ -159,6 +159,13 @@ export const api = {
   restoreBrokerToken: (accessToken) =>
     authFetch('/api/auth/broker-restore', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ accessToken }) }).then(handle),
 
+  // Which platform is actually live right now - see BrokerPlatformController.Get.
+  getBrokerPlatform: () => authFetch('/api/settings/broker-platform').then(handle),
+  // Switches broker platforms immediately, in-process - no restart. See
+  // BrokerPlatformController.Switch. { platform, switched, message }.
+  switchBrokerPlatform: (platform) =>
+    authFetch('/api/settings/broker-platform', { method: 'POST', headers: jsonHeaders, body: JSON.stringify({ platform }) }).then(handle),
+
   // Changes the signed-in user's own password. On success the backend invalidates every existing
   // token for this user (security-stamp bump), so the caller must clear the local session and send
   // the user back to the login screen - see ProfileModal.jsx. Uses plain fetch instead of authFetch
