@@ -4,6 +4,12 @@ This is the Plesk counterpart to `DEPLOYMENT.md` (Azure). Read the first section
 hosting option — the default Plesk/IIS behaviour will silently stop this app's trading engine, and
 the fix is a deployment decision, not a code setting.
 
+> **This deployment: a Windows VPS running Plesk, with administrator (RDP) access.**
+> That means **section 2 is the path** — register the engine as a Windows Service and let Plesk
+> reverse-proxy to it. Section 3 (tuning the IIS application pool) is a fallback for when you
+> can't register a service, kept for reference; it is strictly weaker and you don't need it.
+> Section 6 is the ordered checklist to work through.
+
 ---
 
 ## 1. The problem: this app is not a normal website
@@ -52,11 +58,40 @@ one long-lived engine process, with the web tier in front of it.
 service with no code changes — both calls are inert when the process isn't started by that service
 manager, so IIS, `dotnet run` and the Docker image are unaffected.
 
-The app serves the built React dashboard from its own `wwwroot` (`UseDefaultFiles` /
-`UseStaticFiles` + the SPA fallback), so Plesk does not need to serve any files itself — it only has
-to proxy. That keeps one deployable unit and avoids CORS entirely.
+### How the dashboard stays reachable
 
-### 2a. Windows (Plesk for Windows / IIS)
+The engine binds to loopback, so the obvious question is how anyone reaches the UI. The answer is
+that **the app serves the dashboard itself** — the built React client is copied into `wwwroot` by
+`deploy.ps1`, and `Program.cs` serves it with `UseDefaultFiles()` / `UseStaticFiles()` plus
+`MapFallbackToFile("index.html")` for client-side routing. One process serves the UI, the REST API
+and the SignalR hub, exactly as it already does in Docker. Plesk becomes a pure reverse proxy:
+
+```
+Browser
+  └─→ https://your-domain.com                 Plesk/IIS on :443 — TLS + public hostname
+        └─→ proxies every path (ARR)
+              └─→ http://127.0.0.1:8080       the Windows Service (Kestrel)
+                    /              → wwwroot/index.html   (React dashboard)
+                    /api/*         → controllers
+                    /hubs/spreads  → SignalR
+                    /healthz*      → probes
+```
+
+So the UI stays at the same public URL it is on today — nothing changes for whoever uses it. Plesk
+serves no files of its own, which keeps one deployable unit and avoids CORS entirely.
+
+Two consequences worth being deliberate about:
+
+- **Binding to `127.0.0.1` is intentional.** The service is not reachable from the internet directly;
+  Plesk is the only way in, so there's one TLS endpoint and one hostname. On the server itself,
+  `curl http://127.0.0.1:8080/healthz` still works for testing.
+- **Nothing starts the app on demand any more.** Under IIS, a request would start it; under a
+  service, if the service is stopped Plesk returns 502 and the page won't load at all. That is the
+  trade being made — it can't be started by traffic, which is precisely why it can't be stopped by
+  the absence of it. `StartupType Automatic` plus the `sc.exe failure` restart actions below are what
+  keep it up.
+
+### 2a. Windows (Plesk for Windows / IIS) — the path for this deployment
 
 Publish anywhere outside the Plesk vhost tree, e.g. `C:\SpreadTrader\app` (the existing
 `deploy.ps1` publish step produces exactly this output):
@@ -176,7 +211,13 @@ being cut every 60 seconds; `proxy_buffering off` keeps live pushes from being h
 
 ## 3. Option B — keep it under IIS, and stop IIS from killing it
 
-Only worth doing if option A isn't available to you.
+**Fallback only.** This is for deployments without administrator access to the server — a shared
+Plesk plan, where you cannot register a service. On a VPS you own, use option A instead: everything
+below is a set of web-host settings that a service simply doesn't have, and that Plesk can reset out
+from under you when a service plan or subscription is reapplied.
+
+It is still worth doing as an interim measure if the site is live on IIS today and the service
+isn't set up yet — the two zeros below remove most of the exposure in about a minute.
 
 None of these settings live in your app's `web.config` — they're application-pool configuration in
 `applicationHost.config`, so they cannot be set from the deployed application. Plesk does expose the
@@ -323,7 +364,37 @@ server itself over loopback (accepting the caveat above).
 
 ---
 
-## 6. Also worth knowing
+## 6. Checklist for this deployment (Windows VPS + Plesk, admin access)
+
+In order. Steps 1-4 are the cutover; 5-7 are what make it trustworthy afterwards.
+
+1. **Publish** outside the Plesk vhost tree — `dotnet publish -c Release -o C:\SpreadTrader\app`
+   (§2a). Keep it off the drive Plesk manages so a panel operation can never touch it.
+2. **Move `App_Data` with it** and confirm the service account can write there — trigger rules, exit
+   triggers, PNL alerts and the universe CSVs are rewritten at runtime (§4). Copy the *live server*
+   copies, not the repo's; they are current state, not config.
+3. **Register the service** with `New-Service` + `sc.exe failure` restart actions, bound to
+   `http://127.0.0.1:8080`, `--environment Production` (§2a). `Start-Service`, then verify with
+   `curl http://127.0.0.1:8080/healthz` on the box.
+4. **Point Plesk at it** — install URL Rewrite + ARR, enable the server-level proxy and WebSockets,
+   drop the `web.config` from §2a into the domain's `httpdocs`. Load the site: the dashboard should
+   come up on your normal public URL, and the top bar should read "Live feed: connected".
+5. **Turn the old IIS site's app pool off** (or leave it stopped) once traffic is going through the
+   proxy — two copies of this app running at once means two engines placing orders. If you keep it
+   around as a rollback, keep it *stopped*, not idle.
+6. **Set `Dashboard:BaseUrl`** to the public HTTPS URL and confirm the broker's redirect URL is
+   registered in its developer console (§7), otherwise login fails at the callback.
+7. **Point an external monitor at `https://<your-domain>/healthz/engine`** and alert on non-200
+   (§5). Then verify the whole thing end to end: stop the service and confirm the monitor fires.
+   An untested alert is not an alert.
+
+A useful drill before trusting it unattended: `Restart-Service SpreadTrader` during market hours and
+watch `/healthz/engine` go 503 and back to 200 on its own. That exercises the restart path, the
+persistence of `App_Data`, and your alerting in one go.
+
+---
+
+## 7. Also worth knowing
 
 - **Trading is live the moment a broker access token exists.** There is no paper-trading mode; see
   the same warning in `DEPLOYMENT.md`. Test with thresholds that cannot realistically fire.
