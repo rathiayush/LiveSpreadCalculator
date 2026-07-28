@@ -177,4 +177,35 @@ public sealed class EngineOptions
     /// the market settles into real liquidity, and this is a way to skip that window rather than
     /// alert on it. Default 09:25, ten minutes after open.</summary>
     public string DailySpreadAlertStartTimeIst { get; set; } = "09:25";
+
+    // ---- Engine health endpoint (see EngineHealthState, GET /healthz/engine) ---------------------
+
+    /// <summary>How stale the last tick may get before GET /healthz/engine reports "degraded" (and
+    /// answers 503 so an uptime monitor alerts). Only applied while ticks are actually expected -
+    /// see HealthCheckMarketHoursOnly. 60s is deliberately loose compared to the ~150ms recalc
+    /// cadence: this is meant to catch "the feed has been dead for a while", not to twitch at a
+    /// thin minute in an illiquid contract.</summary>
+    public int HealthMaxTickAgeSeconds { get; set; } = 60;
+
+    /// <summary>Only judge tick staleness inside the market window below. Leave true - outside
+    /// market hours a silent feed is correct, and alerting on it every single night is how a health
+    /// check gets muted and then ignored on the day it finally means something. Set false only if
+    /// you expect ticks around the clock.</summary>
+    public bool HealthCheckMarketHoursOnly { get; set; } = true;
+
+    /// <summary>Start of the window (IST, "HH:mm") in which ticks are expected. Default 09:15, the
+    /// NSE equity-derivatives open.</summary>
+    public string HealthMarketOpenIst { get; set; } = "09:15";
+
+    /// <summary>End of the window (IST, "HH:mm") in which ticks are expected. Default 15:30, the
+    /// NSE close. If you run the MCX add-on (Mcx:Enabled), widen this to that session's close
+    /// (23:30 / 23:55 depending on the season) or the evening commodity session will look idle to
+    /// the health check even while it's trading normally. A close earlier than the open is read as
+    /// a session running past midnight.</summary>
+    public string HealthMarketCloseIst { get; set; } = "15:30";
+
+    /// <summary>Expect ticks on weekdays only. Default true - the exchange is shut on Saturday and
+    /// Sunday. Exchange holidays are NOT accounted for (there's no holiday calendar in this app),
+    /// so the endpoint will report a stale feed on a mid-week holiday.</summary>
+    public bool HealthWeekdaysOnly { get; set; } = true;
 }

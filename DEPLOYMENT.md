@@ -1,5 +1,11 @@
 # Deploying SpreadTrader to Azure
 
+> Deploying to Plesk instead? See **PLESK_DEPLOYMENT.md** - the engine's background services live
+> inside the web process, so IIS's default 20-minute idle timeout stops the broker feed and order
+> dispatch whenever nobody has the dashboard open. That guide covers running the engine as an
+> OS-managed service behind Plesk, the IIS app-pool settings if you can't, and monitoring
+> `/healthz/engine`.
+
 This guide deploys the app as it's actually built: two containers behind one public endpoint -
 `web` (nginx + the built React app, reverse-proxying `/api` and `/hubs` to the API) and `api`
 (the `LiveSpreadCalculator` project - REST endpoints, SignalR hub, and the background engine that

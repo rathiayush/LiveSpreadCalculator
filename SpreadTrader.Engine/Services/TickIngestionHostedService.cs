@@ -35,6 +35,7 @@ public sealed class TickIngestionHostedService : BackgroundService
     private readonly IMarketDataFeed _tickerClient;
     private readonly ITickStore _tickStore;
     private readonly PositionsCache _positionsCache;
+    private readonly EngineHealthState _health;
     private readonly ILogger<TickIngestionHostedService> _logger;
 
     public TickIngestionHostedService(
@@ -43,6 +44,7 @@ public sealed class TickIngestionHostedService : BackgroundService
         IMarketDataFeed tickerClient,
         ITickStore tickStore,
         PositionsCache positionsCache,
+        EngineHealthState health,
         ILogger<TickIngestionHostedService> logger)
     {
         _spreadStore = spreadStore;
@@ -50,12 +52,17 @@ public sealed class TickIngestionHostedService : BackgroundService
         _tickerClient = tickerClient;
         _tickStore = tickStore;
         _positionsCache = positionsCache;
+        _health = health;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _tickerClient.TickReceived += _tickStore.Update;
+        // Stamps the last-tick time behind GET /healthz/engine. Hooked onto the feed event rather
+        // than built into ITickStore so it sees ticks whichever broker feed is live, and so the
+        // health signal can't be quietly lost by a store swap - see EngineHealthState.
+        _tickerClient.TickReceived += _health.RecordTick;
         try
         {
             await _instrumentMaster.EnsureLoadedAsync(stoppingToken);
@@ -76,15 +83,33 @@ public sealed class TickIngestionHostedService : BackgroundService
                     "Configure spreads via POST /api/spreads and it will subscribe automatically.");
             }
 
+            _health.MarkFeedRunning();
+
             // Runs alongside RunAsync (which blocks for the process lifetime, reconnecting on
             // failure) rather than after it - there is no "after" until shutdown.
             await Task.WhenAll(
                 _tickerClient.RunAsync(tokens, stoppingToken),
                 ReconcileSubscriptionsLoopAsync(stoppingToken));
         }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            throw; // Ordinary shutdown, not a fault - the finally below records it as stopped.
+        }
+        catch (Exception ex)
+        {
+            // RunAsync is documented never to return on a dropped connection, so reaching here means
+            // ingestion has given up entirely and this process will never tick again. Record it
+            // before rethrowing (which stops the host, per BackgroundService's default behaviour)
+            // so that if the host is instead configured to survive it, /healthz/engine still reports
+            // the engine as dead rather than quietly serving HTTP forever.
+            _health.MarkFeedFaulted(ex);
+            throw;
+        }
         finally
         {
+            _health.MarkFeedStopped();
             _tickerClient.TickReceived -= _tickStore.Update;
+            _tickerClient.TickReceived -= _health.RecordTick;
         }
     }
 

@@ -9,6 +9,7 @@ using LiveSpreadCalculator.Realtime;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -19,7 +20,32 @@ using SpreadTrader.Core.Store;
 using SpreadTrader.Engine;
 using SpreadTrader.Engine.Services;
 
-var builder = WebApplication.CreateBuilder(args);
+// ContentRootPath must be pinned to the binary's own folder when running under a service manager:
+// the Windows SCM starts services with the current directory set to C:\Windows\System32, and the
+// host would otherwise resolve every App_Data path (triggers.csv, users.csv, the universe CSVs -
+// all built with Path.Combine(ContentRootPath, ...) below) against that. Under IIS, Docker, or
+// `dotnet run` this is null and the default behaviour is unchanged.
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    ContentRootPath = WindowsServiceHelpers.IsWindowsService() ? AppContext.BaseDirectory : null
+});
+
+// Lets this same build run as a real OS-managed service - a Windows Service (Plesk/IIS boxes) or a
+// systemd unit (Linux) - instead of only as an IIS-hosted site or a container. Both calls are no-ops
+// when the process isn't actually running under that service manager, so `dotnet run`, IIS, and the
+// Docker image are all completely unaffected.
+//
+// This exists because the engine's lifetime must not be tied to HTTP traffic. Every hosted service
+// registered below (tick ingestion, spread calculation, ORDER DISPATCH, the daily 06:00 IST
+// maintenance job) lives inside this one process, so when a web host tears the process down for
+// being idle - IIS application pools do exactly that after 20 minutes with no requests, and also
+// recycle on a rolling ~29h timer by default - the broker feed drops and exit triggers on open
+// positions silently stop firing until somebody happens to open the dashboard again. Running under
+// a service manager instead makes the OS own the process: it starts at boot, restarts on crash, and
+// never stops because nobody browsed to it. See PLESK_DEPLOYMENT.md.
+builder.Host.UseWindowsService();
+builder.Host.UseSystemd();
 
 const string DashboardCorsPolicy = "Dashboard";
 
@@ -145,6 +171,9 @@ builder.Services.AddSingleton<MarketProtectionService>();
 // SpreadsController calls ResolveAndSubscribeAsync on it directly when a spread is added at
 // runtime - see the comment on that method for why.
 builder.Services.AddSingleton<TriggerEventChannel>();
+// Tracks whether the engine (not merely the web host) is alive - written by tick ingestion below,
+// read by GET /healthz/engine. See EngineHealthState for why /healthz alone isn't enough.
+builder.Services.AddSingleton<EngineHealthState>();
 builder.Services.AddSingleton<TickIngestionHostedService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<TickIngestionHostedService>());
 // Shared between SpreadCalculationHostedService (checks it before firing the next shot of a
@@ -420,7 +449,30 @@ app.MapControllers();
 app.MapHub<SpreadHub>("/hubs/spreads");
 // Liveness probe only - no user data, must be reachable without a token by the Docker HEALTHCHECK
 // / cloud probe, so it opts out of the global "authenticated user required" fallback policy.
+//
+// Deliberately says nothing about whether the ENGINE is working: this one answers "is the process
+// up and serving", which is exactly what the container HEALTHCHECK and any restart-on-failure
+// supervisor should act on. Wiring engine staleness into this endpoint would make Docker kill and
+// restart the container every time the broker feed had a bad minute - restarting loses all
+// in-memory state (ticks, positions cache, rankings) and does nothing to fix an upstream feed. Use
+// /healthz/engine below for "is it actually doing its job".
 app.MapGet("/healthz", () => Results.Ok(new { status = "ok" })).AllowAnonymous();
+
+// Readiness/engine probe - the one to point an external uptime monitor at.
+//
+// A dead engine is invisible from the outside: /healthz keeps returning 200, the dashboard still
+// loads and reconnects, and meanwhile no ticks are arriving, so live spreads are frozen and exit
+// triggers on OPEN POSITIONS are not being evaluated. This reports the two facts that distinguish
+// "up" from "working" - is the ingestion loop still running, and how long since the last tick - and
+// answers 503 when the engine is not doing its job, so a monitor alerts without parsing the body.
+//
+// Anonymous for the same reason as /healthz (a monitor has no token), and it exposes only timings,
+// counts, and a feed state - no positions, orders, prices, or user data.
+app.MapGet("/healthz/engine", (EngineHealthState health, IMarketDataFeed feed) =>
+{
+    var report = health.Build(feed.GetSubscribedTokens().Count);
+    return report.IsHealthy ? Results.Ok(report) : Results.Json(report, statusCode: 503);
+}).AllowAnonymous();
 
 // SPA fallback: any GET that isn't an API route, hub, or an existing static file falls through to
 // index.html so client-side routing (react-router-dom) works on a hard refresh/deep link.

@@ -498,7 +498,8 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
 | POST | `/api/triggers` | Create a trigger rule |
 | POST | `/api/triggers/{id}/enable` / `/disable` | Toggle a rule (re-persists to CSV) |
 | DELETE | `/api/triggers/{id}` | Remove a rule |
-| GET | `/healthz` | Liveness probe (used by the Dockerfile `HEALTHCHECK`) |
+| GET | `/healthz` | Liveness probe - "is the process serving HTTP" (used by the Dockerfile `HEALTHCHECK`) |
+| GET | `/healthz/engine` | Engine probe - is ingestion running, how stale is the last tick. 503 when the engine is stalled. See `EngineHealthState`, PLESK_DEPLOYMENT.md §5 |
 | WS | `/hubs/spreads` | SignalR hub - pushes `spreadUpdate`, `rankingUpdate`, `triggerFired`, `brokerAuthInvalidated` |
 
 ## 11. Configuration reference

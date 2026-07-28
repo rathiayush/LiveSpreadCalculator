@@ -24,6 +24,13 @@
     <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.11" />
     <PackageReference Include="EFCore.BulkExtensions" Version="8.1.2" />
+    <!-- Let this same build run as an OS-managed service (Windows Service / systemd unit) rather
+         than only under IIS or in a container, so the engine's background services aren't at the
+         mercy of a web host's idle timeout - see the UseWindowsService/UseSystemd calls in
+         Program.cs and PLESK_DEPLOYMENT.md. Both are inert unless the process really is running
+         under that service manager. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="8.0.1" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Systemd" Version="8.0.1" />
     <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.22.1" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
