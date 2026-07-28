@@ -176,13 +176,27 @@ being cut every 60 seconds; `proxy_buffering off` keeps live pushes from being h
 
 ## 3. Option B — keep it under IIS, and stop IIS from killing it
 
-Only worth doing if option A isn't available to you. It requires IIS Manager or `appcmd` access on
-the server: `idleTimeout`, `startMode` and recycling live in **`applicationHost.config`, not in your
-app's `web.config`**, so they cannot be set from the deployed application. On a shared Plesk plan
-without server-level access, this option is simply not available — use option A.
+Only worth doing if option A isn't available to you.
 
-On the domain's **dedicated** application pool (Plesk → domain → IIS Application Pool → "Dedicated
-application pool for the website"):
+None of these settings live in your app's `web.config` — they're application-pool configuration in
+`applicationHost.config`, so they cannot be set from the deployed application. Plesk does expose the
+most important ones itself, though, under **domain → Dedicated IIS Application Pool → Performance
+Settings** (no server-level access needed):
+
+| Plesk setting | Set to | Why |
+|---|---|---|
+| Idle timeout (minutes) | **`0`** | 0 = never idle out. **Plesk's default here is 5 minutes**, not IIS's usual 20 — five quiet minutes and the engine is gone. |
+| Recycling at regular time intervals (minutes) | **`0`** | Disables the drifting 1740-minute (29 h) restart. |
+| The maximum number of worker processes | **`1`** | See the web-garden warning below. This is normally already 1 — never raise it. |
+
+Two settings that matter are **not** on that page and still need IIS Manager or `appcmd`:
+`startMode` / `preloadEnabled` (without them the pool stays down after a server reboot until the
+first request) and `disallowOverlappingRotation`. Also note Plesk can reset pool settings when a
+service plan or subscription is reapplied, so this configuration is not necessarily permanent — one
+more reason to prefer option A.
+
+Via `appcmd`, on the domain's **dedicated** application pool (Plesk → domain → IIS Application Pool
+→ "Dedicated application pool for the website"):
 
 ```bat
 set AC=%windir%\system32\inetsrv\appcmd
