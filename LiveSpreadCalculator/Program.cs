@@ -9,6 +9,7 @@ using LiveSpreadCalculator.Realtime;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Hosting.Systemd;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Http;
 using Microsoft.Extensions.Options;
@@ -389,6 +390,21 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+// How this process is being hosted is detected, never configured - a Windows Service or systemd unit
+// is something the OS *starts you as*, not a mode the app can choose (the service manager expects a
+// handshake within its startup timeout; claiming the wrong one in config could only ever break
+// startup). Logging what was detected is what makes that observable: if App_Data lands somewhere
+// unexpected or the process dies when the last browser tab closes, this line says immediately
+// whether it's running as a service or still under the web host. Content root is on the same line
+// because every App_Data path is resolved from it - see the WebApplicationOptions at the top.
+app.Logger.LogInformation(
+    "Hosting mode: {HostingMode}. Content root: {ContentRoot}. Environment: {Environment}.",
+    WindowsServiceHelpers.IsWindowsService() ? "Windows Service"
+        : SystemdHelpers.IsSystemdService() ? "systemd unit"
+        : "console / IIS / container",
+    app.Environment.ContentRootPath,
+    app.Environment.EnvironmentName);
 
 // One-time-per-file upgrade of App_Data/users.csv: any legacy plaintext password rows are rewritten
 // as encrypted blobs on startup. No-op once every row is already encrypted, so ordinary restarts
