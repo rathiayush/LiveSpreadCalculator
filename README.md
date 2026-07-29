@@ -321,6 +321,24 @@ POSTGRES_PASSWORD=<a real password>
 
 Optional, with defaults shown in `docker-compose.yml`: `POSTGRES_DB`, `POSTGRES_USER`, `KITE_API_KEY`, `KITE_API_SECRET`, `KITE_ACCESS_TOKEN`, `DASHBOARD_BASE_URL` - see that file for the exact variable names. `db`'s data lives in a named volume (`spreadtrader-db-data`) that survives `docker compose down` but not `docker compose down -v`.
 
+#### Running as a specific instance (Production / pradeep-1 / pradeep-2)
+
+This repo deploys three independent instances of identical code - Production, pradeep-1, pradeep-2 -
+told apart by `ASPNETCORE_ENVIRONMENT` (see `LINUX_VPS_DEPLOYMENT.md`). Locally, `docker compose up`
+defaults to acting as Production; to run it as a different instance, use that instance's example env
+file (`.env.production.example` / `.env.pradeep-1.example` / `.env.pradeep-2.example` - copy to the
+non-`.example` name, gitignored, and fill in real values):
+
+```
+docker compose --env-file .env.pradeep-1 -p spreadtrader-pradeep-1 up --build
+```
+
+The `-p` flag gives that instance's containers/volumes their own Compose project name, so you can
+run more than one instance's stack side by side locally without them colliding - each example env
+file pre-assigns non-overlapping `API_PORT`/`WEB_PORT` values for exactly this reason. Building is
+identical either way - `docker compose build` never reads the `environment:` block at all, so no
+instance-specific config is ever baked into the image; only which container it's started AS differs.
+
 ### Cloud deployment notes
 
 - **Run the Api as a single instance.** The tick ingestion/trigger engine must be a singleton - both brokers cap concurrent feed connections per account (Kite at 3 per API key; Dhan disconnects with code 805 over the limit), and running two instances would double-evaluate triggers and could double-fire orders. Don't set replica count > 1 for this service.

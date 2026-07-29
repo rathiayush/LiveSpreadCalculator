@@ -4,6 +4,14 @@ services:
     # `docker compose push` tags and pushes straight to GHCR - see the deploy-dokploy-*.yml
     # workflows. Local `docker compose up --build` is unaffected (falls back to a local-only tag,
     # never pushed anywhere).
+    #
+    # IMPORTANT: `docker compose build` never reads the environment: block below - build args and
+    # runtime env vars are separate things in Compose. That's why ONE Dockerfile/ONE image serves
+    # all three deployed instances (Production/pradeep-1/pradeep-2 - see LINUX_VPS_DEPLOYMENT.md):
+    # the build is byte-for-byte identical no matter which instance you're building for, and only
+    # the *tag* changes per workflow. Which instance a given container actually behaves as is
+    # decided entirely at container-start time, by ASPNETCORE_ENVIRONMENT below (Dokploy sets this
+    # per Application in production; locally it's whatever ASPNETCORE_ENVIRONMENT resolves to here).
     image: ${API_IMAGE:-spreadtrader-api:local}
     build:
       context: .
@@ -13,12 +21,22 @@ services:
     # any crash instead of restarting it.
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # Parameterized (not just the image) so two instances' compose stacks can run side by side
+      # locally without a port clash - e.g. API_PORT=8090 WEB_PORT=8091 for a second instance. See
+      # .env.pradeep-1.example / .env.pradeep-2.example.
+      - "${API_PORT:-8080}:8080"
     environment:
-      ASPNETCORE_ENVIRONMENT: Production
+      # No hardcoded "Production" here on purpose - see the IMPORTANT note above. Defaults to
+      # Production so a bare `docker compose up` (no .env file) behaves the same as before this was
+      # parameterized; pass ASPNETCORE_ENVIRONMENT=pradeep-1 (directly, or via
+      # `docker compose --env-file .env.pradeep-1 up --build`) to run this stack AS that instance
+      # instead - same appsettings.pradeep-1.json selection Dokploy does in production.
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       ASPNETCORE_URLS: http://+:8080
       # Fill these in (or pass via `docker compose --env-file`, a .env file next to this
-      # compose file, or your platform's secrets manager) - never commit real values.
+      # compose file, or your platform's secrets manager) - never commit real values. Each of the
+      # three deployed instances uses ITS OWN broker account/key - see the three .env.*.example
+      # files - so don't reuse one instance's values for another, even locally.
       Kite__ApiKey: ${KITE_API_KEY:-}
       Kite__ApiSecret: ${KITE_API_SECRET:-}
       Kite__AccessToken: ${KITE_ACCESS_TOKEN:-}
@@ -26,7 +44,9 @@ services:
       # Kite login callback redirects the browser back to the right place and CORS allows it.
       Dashboard__BaseUrl: ${DASHBOARD_BASE_URL:-http://localhost:8081}
       # Overrides the placeholder in appsettings.json with the real db service below. "db" only
-      # resolves on this compose network - see EfSpreadHistoryStore / SpreadHistoryDbContext.
+      # resolves on this compose network - see EfSpreadHistoryStore / SpreadHistoryDbContext. All
+      # three instances can point at this same Postgres - only the writer instance
+      # (Engine:SpreadHistoryWriter=true, currently pradeep-2) actually writes to it.
       Storage__SpreadHistoryConnectionString: "Host=db;Port=5432;Database=${POSTGRES_DB:-spreadtrader_history};Username=${POSTGRES_USER:-spreadtrader};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env - see README}"
     depends_on:
       db:
@@ -38,9 +58,11 @@ services:
       retries: 3
 
   # Backs the hourly spread-history table (see EfSpreadHistoryStore). Only the writer instance
-  # (Engine:SpreadHistoryWriter=true) needs this reachable for writes; reader instances only need
-  # it for GET /api/spreads/{id}/history. A single-instance deployment (this compose file) is
-  # simply always the writer - see appsettings.json's Engine:SpreadHistoryWriter default.
+  # (Engine:SpreadHistoryWriter=true - pradeep-2, per appsettings.pradeep-2.json) needs this
+  # reachable for writes; reader instances (Production, pradeep-1) only need it for
+  # GET /api/spreads/{id}/history. Whether THIS compose stack's api container writes or just reads
+  # depends entirely on which ASPNETCORE_ENVIRONMENT it's running as - see api's environment: block
+  # above - not on anything in this db service.
   db:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -69,7 +91,8 @@ services:
     build:
       context: SpreadTrader.Dashboard/spreadtrader.dashboard.client
     ports:
-      - "8081:80"
+      # Parameterized alongside api's API_PORT above - see the note there.
+      - "${WEB_PORT:-8081}:80"
     depends_on:
       - api
 
