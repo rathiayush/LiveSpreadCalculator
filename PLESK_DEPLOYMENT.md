@@ -58,6 +58,34 @@ one long-lived engine process, with the web tier in front of it.
 service with no code changes — both calls are inert when the process isn't started by that service
 manager, so IIS, `dotnet run` and the Docker image are unaffected.
 
+### There is no "run as a service" setting, by design
+
+One build already covers every case, and it needs no configuration: hosting mode is **detected, not
+configured**. `WindowsServiceHelpers.IsWindowsService()` asks whether this process was started by the
+Windows Service Control Manager, and the same publish output therefore behaves correctly whether the
+SCM starts it, IIS starts it, or you run it from a console.
+
+An `appsettings.json` switch for this would be actively harmful, because it could only ever disagree
+with reality:
+
+- Set it to "Windows Service" but launch the exe by hand, and it blocks waiting for an SCM handshake
+  that never arrives.
+- Set it to "web" but let the SCM start it, and the SCM kills it for never reporting `SERVICE_RUNNING`
+  inside the startup timeout.
+
+A service isn't a mode the application picks; it's how the OS starts the process. What *is*
+configurable is everything around it — the listening address (`--urls`), the environment
+(`--environment Production`, selecting `appsettings.Production.json`), and anything else in config.
+
+To see which mode a running deployment actually picked, check the startup log:
+
+```
+info: Hosting mode: Windows Service. Content root: C:\SpreadTrader\app. Environment: Production.
+```
+
+Content root is on that line deliberately — every `App_Data` path is resolved from it, so this one
+line answers both "is it really running as a service" and "where is it reading trigger rules from".
+
 ### How the dashboard stays reachable
 
 The engine binds to loopback, so the obvious question is how anyone reaches the UI. The answer is
