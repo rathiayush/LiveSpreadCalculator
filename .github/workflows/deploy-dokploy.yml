@@ -1,0 +1,119 @@
+name: Deploy to Dokploy (VPS)
+
+# The GitHub Actions counterpart of deploy-azure.yml, for the Linux VPS + Dokploy + Postgres +
+# Traefik architecture (see LINUX_VPS_DEPLOYMENT.md) instead of Azure App Service. Builds the api
+# and web images, pushes them to GHCR (GitHub Container Registry - no extra registry account
+# needed, auth is the repo's own GITHUB_TOKEN), then asks Dokploy to redeploy each application
+# from the new image.
+#
+# One-time setup this depends on - see LINUX_VPS_DEPLOYMENT.md:
+#   - A Dokploy "Application" created for api and one for web, each configured to deploy from a
+#     GHCR image (ghcr.io/<owner>/<repo>/api and .../web) rather than from a git source.
+#   - Repo secrets: DOKPLOY_URL, DOKPLOY_API_TOKEN, DOKPLOY_API_APPLICATION_ID,
+#     DOKPLOY_WEB_APPLICATION_ID (see the "Trigger Dokploy" steps below - VERIFY the exact API
+#     shape against your own Dokploy instance's Swagger UI before relying on this, see the warning
+#     comment there).
+#   - Postgres and the app's other secrets (Kite keys, Storage__SpreadHistoryConnectionString,
+#     JWT key, etc.) are configured as environment variables on the Dokploy applications
+#     themselves, NOT here - this workflow only ever changes which image tag is running, same
+#     division of responsibility as deploy-azure.yml.
+
+on:
+  # MANUAL ONLY, deliberately - same reasoning as deploy-azure.yml: a merge to master should not
+  # be able to redeploy a live trading app on its own. Add a `push:` trigger here yourself if you
+  # decide you want that instead.
+  workflow_dispatch: {}
+
+env:
+  REGISTRY: ghcr.io
+  API_IMAGE: ghcr.io/${{ github.repository }}/api
+  WEB_IMAGE: ghcr.io/${{ github.repository }}/web
+
+permissions:
+  contents: read
+  packages: write # required to push to GHCR
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fast fail on a compile error before spending time on the full multi-stage Docker build -
+      # the Dockerfile's own `dotnet publish` step would eventually catch the same thing, just
+      # slower. This is NOT a substitute for the "Run tests" step below.
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build & sanity check
+        run: dotnet build LiveSpreadCalculator.sln -c Release
+
+      # No test project exists in this repo yet (see ARCHITECTURE.md) - this step is a deliberate
+      # placeholder, not a no-op pretending to be a real gate. Replace the echo with
+      # `dotnet test` once a test project exists.
+      - name: Run tests
+        run: echo "No test project exists yet - nothing to run. See ARCHITECTURE.md."
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags both :latest (what the Dokploy applications should be configured to pull) and
+      # :<sha> (an immutable, traceable copy of every deploy - same reasoning as
+      # deploy-azure.yml's per-commit tagging - useful for rollback: repoint the Dokploy app at a
+      # specific :<sha> tag instead of :latest if a deploy needs to be reverted).
+      - name: Build and push api image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: LiveSpreadCalculator/Dockerfile
+          push: true
+          tags: |
+            ${{ env.API_IMAGE }}:latest
+            ${{ env.API_IMAGE }}:${{ github.sha }}
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: SpreadTrader.Dashboard/spreadtrader.dashboard.client
+          push: true
+          tags: |
+            ${{ env.WEB_IMAGE }}:latest
+            ${{ env.WEB_IMAGE }}:${{ github.sha }}
+
+      # ============================================================================================
+      # UNVERIFIED - confirm against YOUR Dokploy instance before trusting this in production.
+      #
+      # This targets Dokploy's REST API (POST /api/application.deploy, an `x-api-key` header, and an
+      # `applicationId` in the body) based on Dokploy's documented API shape at the time this was
+      # written. Dokploy's API has changed across versions, and there is no way to verify the exact
+      # path/payload/header name against a live instance from here. Before relying on this:
+      #   1. Open https://<your-dokploy-domain>/swagger (or wherever your instance publishes its
+      #      OpenAPI docs) and confirm the deploy endpoint's path, method, header name, and body
+      #      shape match what's used below.
+      #   2. Get each application's ID from its Dokploy dashboard URL (or the applications list
+      #      endpoint) and set DOKPLOY_API_APPLICATION_ID / DOKPLOY_WEB_APPLICATION_ID as repo
+      #      secrets accordingly.
+      #   3. Generate an API token in Dokploy under Settings -> Profile (or similar, depending on
+      #      version) and set it as DOKPLOY_API_TOKEN.
+      #   4. Run this workflow once by hand and check the Dokploy dashboard actually redeployed
+      #      before trusting it unattended.
+      # ============================================================================================
+      - name: Trigger Dokploy deploy (api)
+        run: |
+          curl -fsS -X POST "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"applicationId\": \"${{ secrets.DOKPLOY_API_APPLICATION_ID }}\"}"
+
+      - name: Trigger Dokploy deploy (web)
+        run: |
+          curl -fsS -X POST "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"applicationId\": \"${{ secrets.DOKPLOY_WEB_APPLICATION_ID }}\"}"
