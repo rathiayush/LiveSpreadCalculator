@@ -81,13 +81,14 @@ var mcxUniverseCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 var usersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:UsersCsvPath"] ?? "App_Data/users.csv");
 
-// Hourly spread history lives in a real SQL Server / LocalDB database (unlike the CSV stores above),
-// so the "Live Spread" popup can chart datetime-vs-spread and a leg's rows can be flushed on expiry -
-// see SqlSpreadHistoryStore / SpreadHistoryCaptureHostedService. Default targets LocalDB; override
-// Storage:SpreadHistoryConnectionString (or Storage__SpreadHistoryConnectionString env var) with a
-// real SQL Server connection string on Linux/Docker, where LocalDB isn't available.
+// Hourly spread history lives in a real PostgreSQL database (unlike the CSV stores above), so the
+// "Live Spread" popup can chart datetime-vs-spread and a leg's rows can be flushed on expiry - see
+// EfSpreadHistoryStore / SpreadHistoryCaptureHostedService. Default targets a Postgres instance on
+// localhost with the conventional default superuser (matches `docker compose up db` locally);
+// override Storage:SpreadHistoryConnectionString (or Storage__SpreadHistoryConnectionString env var)
+// for every real deployment - see docker-compose.yml for the container wiring.
 var spreadHistoryConnectionString = builder.Configuration["Storage:SpreadHistoryConnectionString"]
-    ?? @"Server=(localdb)\MSSQLLocalDB;Database=SpreadTraderHistory;Trusted_Connection=True;TrustServerCertificate=True;";
+    ?? "Host=localhost;Database=spreadtrader_history;Username=postgres;Password=postgres";
 // Exactly one deployed instance (pradeep-2) is the WRITER of the shared history DB: only it captures
 // snapshots, creates the schema, and runs purges. Every other instance leaves Engine:SpreadHistoryWriter
 // false and only READS the history (to serve the chart), so multiple instances on one database never
@@ -105,13 +106,13 @@ builder.Services.AddSingleton<IPnlAlertStore>(sp =>
 builder.Services.AddSingleton<ISpreadDefinitionStore, InMemorySpreadDefinitionStore>();
 builder.Services.AddSingleton<ISpreadSnapshotCache, InMemorySpreadSnapshotCache>();
 builder.Services.AddSingleton<ISpreadRankingStore, InMemorySpreadRankingStore>();
-// Durable hourly spread history (EF Core over SQL Server / LocalDB) - see EfSpreadHistoryStore.
+// Durable hourly spread history (EF Core over PostgreSQL / Npgsql) - see EfSpreadHistoryStore.
 // A pooled DbContext factory is used because the store (and the capture hosted service that drives
 // it) are singletons, and a DbContext must not be shared across threads - the store creates a
 // short-lived context per operation instead. Schema is created on startup below
 // (app.Services...InitializeAsync): the database if missing, then the table if missing.
 builder.Services.AddDbContextFactory<SpreadHistoryDbContext>(options =>
-    options.UseSqlServer(spreadHistoryConnectionString));
+    options.UseNpgsql(spreadHistoryConnectionString));
 builder.Services.AddSingleton<ISpreadHistoryStore>(sp =>
     new EfSpreadHistoryStore(
         sp.GetRequiredService<IDbContextFactory<SpreadHistoryDbContext>>(),

@@ -20,11 +20,43 @@ services:
       # Must match wherever the web container / reverse proxy is publicly reachable, so the
       # Kite login callback redirects the browser back to the right place and CORS allows it.
       Dashboard__BaseUrl: ${DASHBOARD_BASE_URL:-http://localhost:8081}
+      # Overrides the placeholder in appsettings.json with the real db service below. "db" only
+      # resolves on this compose network - see EfSpreadHistoryStore / SpreadHistoryDbContext.
+      Storage__SpreadHistoryConnectionString: "Host=db;Port=5432;Database=${POSTGRES_DB:-spreadtrader_history};Username=${POSTGRES_USER:-spreadtrader};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env - see README}"
+    depends_on:
+      db:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 30s
       timeout: 3s
       retries: 3
+
+  # Backs the hourly spread-history table (see EfSpreadHistoryStore). Only the writer instance
+  # (Engine:SpreadHistoryWriter=true) needs this reachable for writes; reader instances only need
+  # it for GET /api/spreads/{id}/history. A single-instance deployment (this compose file) is
+  # simply always the writer - see appsettings.json's Engine:SpreadHistoryWriter default.
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-spreadtrader_history}
+      POSTGRES_USER: ${POSTGRES_USER:-spreadtrader}
+      # No default on purpose - a real password must come from your .env file / platform secrets,
+      # never be committed here. `docker compose up` fails fast with a clear message if it's unset,
+      # rather than silently starting Postgres with a guessable password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env - see README}
+    volumes:
+      # Named volume, NOT a bind mount - survives `docker compose down` (but not `down -v`), so
+      # captured spread history survives a redeploy. This is Postgres' own data directory only;
+      # the CSV state (App_Data - trigger rules, users, universe) is separate and needs its own
+      # persistence - see LINUX_VPS_DEPLOYMENT.md.
+      - spreadtrader-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-spreadtrader} -d ${POSTGRES_DB:-spreadtrader_history}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   web:
     build:
@@ -33,3 +65,6 @@ services:
       - "8081:80"
     depends_on:
       - api
+
+volumes:
+  spreadtrader-db-data:
