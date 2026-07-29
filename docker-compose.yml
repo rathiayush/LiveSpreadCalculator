@@ -1,5 +1,10 @@
 services:
   api:
+    # Overridden by CI (API_IMAGE=ghcr.io/<owner>/<repo>/api) so `docker compose build` +
+    # `docker compose push` tags and pushes straight to GHCR - see the deploy-dokploy-*.yml
+    # workflows. Local `docker compose up --build` is unaffected (falls back to a local-only tag,
+    # never pushed anywhere).
+    image: ${API_IMAGE:-spreadtrader-api:local}
     build:
       context: .
       dockerfile: LiveSpreadCalculator/Dockerfile
@@ -59,6 +64,8 @@ services:
       retries: 5
 
   web:
+    # Same CI-override pattern as api's image: above (WEB_IMAGE=ghcr.io/<owner>/<repo>/web).
+    image: ${WEB_IMAGE:-spreadtrader-web:local}
     build:
       context: SpreadTrader.Dashboard/spreadtrader.dashboard.client
     ports:
