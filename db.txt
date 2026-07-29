@@ -1,0 +1,4 @@
+Server name:  103.191.208.18\MSSQLSERVER2019      (or 103.191.208.18,<port> if you know it)
+Authentication: SQL Server Authentication
+Login:    mahakaltrader
+Password: SpreadCal@123

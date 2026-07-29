@@ -1,0 +1,214 @@
+# Deploy the PRODUCTION instance to Plesk (Windows/IIS) over FTP.
+#
+# The Plesk counterpart of master_livespreadcalculator.yml (same instance, Azure target), and the
+# CI counterpart of deploy-plesk.ps1 (same instance, run locally). See
+# plesk_p1-livespreadcalculator.yml's header for why the Plesk steps differ from the Azure
+# workflow's (app_offline.htm restarts, web.config environment injection).
+#
+# ASPNETCORE_ENVIRONMENT is "Production", which is ASP.NET Core's DEFAULT - so unlike the pradeep-*
+# workflows the web.config injection below is belt-and-braces rather than load-bearing. Done
+# explicitly anyway so the deployed web.config states the environment plainly instead of leaving it
+# implied.
+#
+# DOCROOT - musing-booth is an ADDITIONAL domain on the same subscription as strange-cray (both
+# appear together under one Websites & Domains list, so they share one system user and one home
+# directory). In Plesk, only the PRIMARY domain owns /httpdocs; every additional domain gets its own
+# folder named after itself. So this must NOT be /httpdocs - that is strange-cray's, i.e.
+# pradeep-1's, and pointing here deploys Production straight on top of it.
+#
+# Confirm the exact path any time: in Websites & Domains, click the folder icon next to
+# musing-booth - File Manager opens at that domain's docroot and the breadcrumb shows the path.
+
+name: Deploy to Plesk - Production
+
+on:
+  # MANUAL ONLY, same policy as the Azure workflows: a merge must never be able to redeploy a live
+  # trading app on its own.
+  workflow_dispatch:
+    inputs:
+      seed_users_csv:
+        description: 'Upload App_Data/users*.csv too (FIRST deploy to a fresh host only - otherwise it OVERWRITES live passwords)'
+        required: true
+        type: boolean
+        default: false
+
+env:
+  ENVIRONMENT_NAME: Production
+  FTP_HOST: 103.191.208.18
+  FTP_USER: strange-c_katfn7gx3p
+  FTP_PASSWORD: SpreadCal@123
+  # musing-booth's OWN docroot - NOT /httpdocs (that belongs to strange-cray / pradeep-1), and note
+  # the domain folder IS the docroot: there is no httpdocs nested inside it (that path 550s).
+  REMOTE_ROOT: /musing-booth.103-191-208-18.plesk.page
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Mask FTP password
+        shell: pwsh
+        run: |
+          # Plain env: literals are NOT masked automatically - only real repo secrets are - so
+          # register it explicitly before any step can echo it.
+          Write-Host "::add-mask::${{ env.FTP_PASSWORD }}"
+          Write-Host "Deploying '${{ env.ENVIRONMENT_NAME }}' to ${{ env.FTP_HOST }}${{ env.REMOTE_ROOT }} as ${{ env.FTP_USER }}"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Program.cs serves the dashboard as static files from wwwroot - dotnet publish alone never
+      # builds it (no MSBuild target wired up for that), so this is an explicit step, same as the
+      # Azure workflows and the .ps1 scripts.
+      - name: Build dashboard client
+        run: |
+          npm ci
+          npm run build
+        working-directory: SpreadTrader.Dashboard/spreadtrader.dashboard.client
+
+      - name: Set up .NET Core
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - name: dotnet publish
+        run: dotnet publish LiveSpreadCalculator/LiveSpreadCalculator.csproj -c Release -o "${{ github.workspace }}/publish"
+
+      - name: Copy dashboard build into wwwroot
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}/publish/wwwroot" | Out-Null
+          Copy-Item -Path "SpreadTrader.Dashboard/spreadtrader.dashboard.client/dist/*" -Destination "${{ github.workspace }}/publish/wwwroot" -Recurse -Force
+
+      - name: Inject ASPNETCORE_ENVIRONMENT into web.config
+        shell: pwsh
+        run: |
+          $path = "${{ github.workspace }}/publish/web.config"
+          if (-not (Test-Path $path)) {
+            Write-Warning "No web.config in publish output - skipping."
+            exit 0
+          }
+          [xml]$xml = Get-Content $path
+          $aspNetCore = $xml.SelectSingleNode("//aspNetCore")
+          if (-not $aspNetCore) { Write-Warning "web.config has no <aspNetCore> element - skipping."; exit 0 }
+          $envVars = $aspNetCore.SelectSingleNode("environmentVariables")
+          if (-not $envVars) {
+            $envVars = $xml.CreateElement("environmentVariables")
+            [void]$aspNetCore.AppendChild($envVars)
+          }
+          $existing = $envVars.SelectSingleNode("environmentVariable[@name='ASPNETCORE_ENVIRONMENT']")
+          if ($existing) {
+            $existing.SetAttribute("value", '${{ env.ENVIRONMENT_NAME }}')
+          } else {
+            $node = $xml.CreateElement("environmentVariable")
+            $node.SetAttribute("name", "ASPNETCORE_ENVIRONMENT")
+            $node.SetAttribute("value", '${{ env.ENVIRONMENT_NAME }}')
+            [void]$envVars.AppendChild($node)
+          }
+          $xml.Save($path)
+          Write-Host "web.config: ASPNETCORE_ENVIRONMENT=${{ env.ENVIRONMENT_NAME }}"
+
+      # PRODUCTION CREDENTIALS. Passwords are editable on the live server (Profile > Change password
+      # writes an encrypted value straight into the server's users csv). Shipping the repo's copy on
+      # every deploy would silently reset them - so it's stripped unless you explicitly ask to seed
+      # a fresh host.
+      - name: Strip users*.csv unless seeding
+        if: ${{ !inputs.seed_users_csv }}
+        shell: pwsh
+        run: |
+          Remove-Item "${{ github.workspace }}/publish/App_Data/users*.csv" -Force -ErrorAction SilentlyContinue
+          Write-Host "users*.csv stripped - live server credentials will not be overwritten."
+
+      - name: Warn when seeding users*.csv
+        if: ${{ inputs.seed_users_csv }}
+        run: echo "::warning::seed_users_csv=true - this deploy WILL overwrite PRODUCTION's users file and reset any password changed on the server."
+
+      # Single PowerShell step for the whole FTP transaction so app_offline.htm is guaranteed to be
+      # cleaned up (or deliberately left behind on failure) by the same script that created it.
+      - name: Upload to Plesk over FTP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $publishDir = "${{ github.workspace }}\publish"
+          $remoteRoot = '${{ env.REMOTE_ROOT }}'
+          $ftpHost    = '${{ env.FTP_HOST }}'
+          $cred       = New-Object System.Net.NetworkCredential('${{ env.FTP_USER }}', '${{ env.FTP_PASSWORD }}')
+
+          function Invoke-Ftp {
+            param([string]$RemotePath, [string]$Method, [byte[]]$Body)
+            $req = [System.Net.FtpWebRequest]::Create("ftp://$ftpHost$RemotePath")
+            $req.Credentials = $cred
+            $req.Method = $Method
+            $req.UsePassive = $true
+            $req.UseBinary = $true
+            $req.KeepAlive = $false
+            if ($Body) {
+              $req.ContentLength = $Body.Length
+              $s = $req.GetRequestStream(); $s.Write($Body, 0, $Body.Length); $s.Close()
+            }
+            $resp = $req.GetResponse(); $resp.Close()
+          }
+
+          function New-FtpDir {
+            param([string]$RemotePath)
+            # Almost always "550 already exists" after the first run - swallowed deliberately, since
+            # a real problem (bad credentials/host/permission) surfaces on the next file upload.
+            try { Invoke-Ftp -RemotePath $RemotePath -Method ([System.Net.WebRequestMethods+Ftp]::MakeDirectory) } catch { }
+          }
+
+          function Send-FtpFile {
+            param([string]$LocalFile, [string]$RemotePath)
+            Invoke-Ftp -RemotePath $RemotePath -Method ([System.Net.WebRequestMethods+Ftp]::UploadFile) -Body ([System.IO.File]::ReadAllBytes($LocalFile))
+          }
+
+          # --- take offline so IIS unloads the app and releases its DLL locks ---
+          Write-Host "Taking app offline..."
+          $offline = "$env:RUNNER_TEMP\app_offline.htm"
+          '<!DOCTYPE html><html><head><title>Deploying</title></head><body style="font-family:sans-serif;padding:40px"><h2>Deployment in progress</h2><p>This instance is being updated and will be back shortly.</p></body></html>' | Out-File -FilePath $offline -Encoding utf8
+          Send-FtpFile -LocalFile $offline -RemotePath "$remoteRoot/app_offline.htm"
+          Start-Sleep -Seconds 3
+
+          # --- directories first (FTP has no mkdir -p), parents before children ---
+          New-FtpDir -RemotePath $remoteRoot
+          Get-ChildItem -Path $publishDir -Recurse -Directory | Sort-Object FullName | ForEach-Object {
+            $rel = $_.FullName.Substring($publishDir.Length) -replace '\\', '/'
+            New-FtpDir -RemotePath "$remoteRoot$rel"
+          }
+
+          # --- files ---
+          $files = Get-ChildItem -Path $publishDir -Recurse -File
+          $failed = @()
+          $i = 0
+          foreach ($f in $files) {
+            $rel = $f.FullName.Substring($publishDir.Length) -replace '\\', '/'
+            try { Send-FtpFile -LocalFile $f.FullName -RemotePath "$remoteRoot$rel" }
+            catch { $failed += "$rel -> $($_.Exception.Message)" }
+            $i++
+            if ($i % 50 -eq 0) { Write-Host "  ...$i/$($files.Count)" }
+          }
+          Write-Host "$i file(s) processed, $($failed.Count) failed."
+
+          if ($failed.Count -gt 0) {
+            # Deliberately leave app_offline.htm in place: a half-deployed trading app must not
+            # start serving. Fix and re-run.
+            Write-Host "::error::$($failed.Count) file(s) failed to upload. App left OFFLINE on purpose."
+            $failed | Select-Object -First 15 | ForEach-Object { Write-Host "::error::$_" }
+            exit 1
+          }
+
+          # --- back online ---
+          Write-Host "Bringing app back online..."
+          try { Invoke-Ftp -RemotePath "$remoteRoot/app_offline.htm" -Method ([System.Net.WebRequestMethods+Ftp]::DeleteFile) }
+          catch { Write-Host "::warning::Could not delete app_offline.htm - the site will stay offline until it is removed manually. $($_.Exception.Message)" }
+
+      - name: Post-deploy reminders
+        if: success()
+        run: |
+          echo "::notice::Deployed '${{ env.ENVIRONMENT_NAME }}' to ${{ env.FTP_HOST }}${{ env.REMOTE_ROOT }}"
+          echo "::notice::First deploy only - confirm the ASP.NET Core 8 Hosting Bundle is installed on the server (without it IIS returns 500.19/502.5), register <public-url>/api/auth/callback in the Kite/Dhan console, and point Dashboard__BaseUrl at this host instead of the old Azure URL."
