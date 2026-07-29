@@ -306,12 +306,20 @@ docker run -p 8080:8080 \
 ```
 The Dockerfile builds `LiveSpreadCalculator` and its project references (`SpreadTrader.Core`, `SpreadTrader.KiteIntegration`, `SpreadTrader.DhanIntegration`, `SpreadTrader.Engine`) into one image. It exposes a `GET /healthz` endpoint and has a `HEALTHCHECK` wired to it. Never bake `ApiKey`/`ApiSecret` into the image - pass them as environment variables (or your platform's secrets manager) at run time, using ASP.NET Core's `Section__Key` env var convention. `--restart unless-stopped` is ordinary crash recovery for a process meant to run unattended for weeks/months - not needed for the broker-platform switch, which takes effect in-process with no restart at all (see "Choosing a broker" below).
 
-### Docker Compose (Api + dashboard together)
+### Docker Compose (Api + dashboard + database together)
 
 ```
 docker compose up --build
 ```
-Runs two containers - `api` (the backend, port 8080) and `web` (nginx serving the built React app on port 8081, reverse-proxying `/api` and `/hubs` to `api`). Set `KITE_API_KEY`, `KITE_API_SECRET`, and `DASHBOARD_BASE_URL` in your shell or a `.env` file next to `docker-compose.yml` before running - see that file for the exact variable names.
+Runs three containers - `api` (the backend, port 8080), `web` (nginx serving the built React app on port 8081, reverse-proxying `/api` and `/hubs` to `api`), and `db` (PostgreSQL, backing the hourly spread-history table - see `EfSpreadHistoryStore`). `db` has no host port mapping; only `api` reaches it, over the compose network as `db`.
+
+Required in your shell or a `.env` file next to `docker-compose.yml` (compose refuses to start without it, rather than silently using a guessable password):
+
+```
+POSTGRES_PASSWORD=<a real password>
+```
+
+Optional, with defaults shown in `docker-compose.yml`: `POSTGRES_DB`, `POSTGRES_USER`, `KITE_API_KEY`, `KITE_API_SECRET`, `KITE_ACCESS_TOKEN`, `DASHBOARD_BASE_URL` - see that file for the exact variable names. `db`'s data lives in a named volume (`spreadtrader-db-data`) that survives `docker compose down` but not `docker compose down -v`.
 
 ### Cloud deployment notes
 
