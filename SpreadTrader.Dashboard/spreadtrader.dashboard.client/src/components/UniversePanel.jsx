@@ -12,6 +12,11 @@ import { api } from '../api'
 // the entire exchange's F&O universe, not a limit in this code).
 export default function UniversePanel({ onSpreadsChanged }) {
   const [maxSymbols, setMaxSymbols] = useState(null)
+  // 0 = normal nearest-two-expiries build (e.g. Jul/Aug). 1 = skip to the next pair (Aug/Sep),
+  // 2 = the pair after that, etc. - handy right around expiry to preview/trade the next spread
+  // cycle before the current front month actually rolls off. Resets to 0 (not persisted) so a
+  // one-off "next month" build doesn't silently keep applying to every later rebuild.
+  const [expiryOffset, setExpiryOffset] = useState(0)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
@@ -26,7 +31,7 @@ export default function UniversePanel({ onSpreadsChanged }) {
     setError(null)
     setResult(null)
     try {
-      const res = await api.buildUniverse(maxSymbols || undefined)
+      const res = await api.buildUniverse(maxSymbols || undefined, expiryOffset || undefined)
       setResult(res)
       onSpreadsChanged()
     } catch (err) {
@@ -70,10 +75,24 @@ export default function UniversePanel({ onSpreadsChanged }) {
             addonBefore="Limit to first"
             addonAfter="symbols"
           />
+          <InputNumber
+            min={0}
+            value={expiryOffset}
+            onChange={(v) => setExpiryOffset(v ?? 0)}
+            addonBefore="Expiry pair"
+            addonAfter={expiryOffset > 0 ? `+${expiryOffset} (next cycle)` : 'nearest (default)'}
+            style={{ width: 220 }}
+          />
           <Button type="primary" icon={<ThunderboltOutlined />} onClick={build} loading={busy}>
             Build universe from broker
           </Button>
         </Space>
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          Expiry pair 0 builds the usual near/far month spread (e.g. Jul-Aug). Set it to 1 to skip
+          ahead to the next pair (Aug-Sep) instead - handy near expiry to preview or trade the
+          upcoming cycle before the front month rolls off. Resets to 0 after you navigate away, so
+          it won't silently affect your next normal rebuild.
+        </Typography.Text>
         {error && <Alert type="error" message={error} showIcon />}
         {result && (
           <Alert

@@ -27,13 +27,20 @@ public sealed class UniverseController : ControllerBase
     /// instead of the full exchange list - omit it (or pass 0) to build everything Kite
     /// currently lists futures for (roughly 200-220 stocks as of mid-2026 - that's the entire
     /// exchange's F&amp;O universe, not a limit in this code).</summary>
+    /// <param name="expiryOffset">0 (default/omit) builds the normal near/far pair - the two
+    /// soonest currently-listed expiries. 1 skips to the NEXT pair instead (e.g. Aug/Sep instead
+    /// of Jul/Aug) - useful right around a month's expiry to look at the upcoming spread cycle
+    /// before the front month actually rolls off. Symbols without enough listed contracts for the
+    /// requested offset are skipped and reported in the response's Skipped list.</param>
     [HttpPost("build")]
-    public async Task<ActionResult<UniverseBuildResult>> Build([FromQuery] int? maxSymbols, CancellationToken cancellationToken)
+    public async Task<ActionResult<UniverseBuildResult>> Build([FromQuery] int? maxSymbols, CancellationToken cancellationToken, [FromQuery] int expiryOffset = 0)
     {
         if (maxSymbols is < 0)
             return BadRequest("maxSymbols must be a positive number, or omitted to build every futures-listed symbol on the exchange.");
+        if (expiryOffset < 0)
+            return BadRequest("expiryOffset must be zero or a positive number.");
 
-        var result = await _builder.BuildAsync(maxSymbols, cancellationToken);
+        var result = await _builder.BuildAsync(maxSymbols, cancellationToken, expiryOffset);
         return Ok(result);
     }
 
