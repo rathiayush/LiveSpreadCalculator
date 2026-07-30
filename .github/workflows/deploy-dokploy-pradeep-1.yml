@@ -1,0 +1,80 @@
+name: Deploy to Dokploy - pradeep-1
+
+# One of three independent per-instance deploy workflows - see deploy-dokploy-production.yml for
+# the full explanation of why there are three near-identical copies of this workflow instead of
+# one parameterized one, and why each is ONE image/ONE Dokploy application (api serves the React
+# dashboard itself - no separate "web" build here). Only the names, image tags, and secret names
+# differ between the three copies.
+#
+# One-time setup this depends on - see LINUX_VPS_DEPLOYMENT.md:
+#   - A Dokploy "Application" for this instance, configured to deploy from
+#     ghcr.io/<owner>/<repo>/api:pradeep-1.
+#   - Repo secrets: DOKPLOY_URL, DOKPLOY_API_TOKEN (shared across all three instances - same
+#     Dokploy dashboard), DOKPLOY_PRADEEP1_APP_ID.
+#   - This instance's real secrets (its own Kite/Dhan keys, Storage__SpreadHistoryConnectionString,
+#     Dashboard__BaseUrl, etc.) are set as environment variables on the Dokploy application ITSELF,
+#     never here - this workflow only ever changes which image tag is running.
+
+on:
+  # MANUAL ONLY - see deploy-dokploy-production.yml for why.
+  workflow_dispatch: {}
+
+env:
+  API_IMAGE: ghcr.io/${{ github.repository }}/api:pradeep-1
+  API_IMAGE_SHA: ghcr.io/${{ github.repository }}/api:pradeep-1-${{ github.sha }}
+  # Postgres needs SOME value to interpolate docker-compose.yml's db service during `compose
+  # build` - not a real secret, never used at runtime (this workflow never starts db).
+  POSTGRES_PASSWORD: unused-build-time-placeholder
+
+permissions:
+  contents: read
+  packages: write # required to push to GHCR
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build & sanity check
+        run: dotnet build LiveSpreadCalculator.sln -c Release
+
+      # No test project exists in this repo yet (see ARCHITECTURE.md) - deliberate placeholder,
+      # not a no-op pretending to be a real gate.
+      - name: Run tests
+        run: echo "No test project exists yet - nothing to run. See ARCHITECTURE.md."
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image (docker compose)
+        run: docker compose build api
+
+      - name: Tag immutable per-commit copy
+        run: docker tag "$API_IMAGE" "$API_IMAGE_SHA"
+
+      - name: Push image
+        run: |
+          docker compose push api
+          docker push "$API_IMAGE_SHA"
+
+      # UNVERIFIED - confirm against YOUR Dokploy instance before trusting this. See
+      # LINUX_VPS_DEPLOYMENT.md §5 for the verification steps.
+      - name: Trigger Dokploy deploy
+        run: |
+          curl -fsS -X POST "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"applicationId\": \"${{ secrets.DOKPLOY_PRADEEP1_APP_ID }}\"}"

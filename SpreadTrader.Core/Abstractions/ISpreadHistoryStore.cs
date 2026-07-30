@@ -7,7 +7,7 @@ namespace SpreadTrader.Core.Abstractions;
 /// (in-memory, latest-value-only, lost on restart), this is a real database so the "Live Spread"
 /// popup can plot a datetime-vs-spread history and so a leg's rows can be flushed when it expires.
 ///
-/// Implemented by SqlSpreadHistoryStore (SQL Server / LocalDB). All methods are async since they hit
+/// Implemented by EfSpreadHistoryStore (PostgreSQL / Npgsql). All methods are async since they hit
 /// the database; the capture path uses AddBatchAsync (a single bulk insert per hourly cycle) rather
 /// than a row-at-a-time insert.
 /// </summary>

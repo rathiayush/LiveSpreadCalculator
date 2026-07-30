@@ -306,17 +306,43 @@ docker run -p 8080:8080 \
 ```
 The Dockerfile builds `LiveSpreadCalculator` and its project references (`SpreadTrader.Core`, `SpreadTrader.KiteIntegration`, `SpreadTrader.DhanIntegration`, `SpreadTrader.Engine`) into one image. It exposes a `GET /healthz` endpoint and has a `HEALTHCHECK` wired to it. Never bake `ApiKey`/`ApiSecret` into the image - pass them as environment variables (or your platform's secrets manager) at run time, using ASP.NET Core's `Section__Key` env var convention. `--restart unless-stopped` is ordinary crash recovery for a process meant to run unattended for weeks/months - not needed for the broker-platform switch, which takes effect in-process with no restart at all (see "Choosing a broker" below).
 
-### Docker Compose (Api + dashboard together)
+### Docker Compose (Api + dashboard + database together)
 
 ```
 docker compose up --build
 ```
-Runs two containers - `api` (the backend, port 8080) and `web` (nginx serving the built React app on port 8081, reverse-proxying `/api` and `/hubs` to `api`). Set `KITE_API_KEY`, `KITE_API_SECRET`, and `DASHBOARD_BASE_URL` in your shell or a `.env` file next to `docker-compose.yml` before running - see that file for the exact variable names.
+Runs two containers - `api` (the backend AND the built React dashboard, both served from the same origin/port - see `LiveSpreadCalculator/Dockerfile`'s comments on why there's no separate nginx/static container here) on port 8080, and `db` (PostgreSQL, backing the hourly spread-history table - see `EfSpreadHistoryStore`). `db` has no host port mapping; only `api` reaches it, over the compose network as `db`. Open `http://localhost:8080` for the dashboard.
+
+Required in your shell or a `.env` file next to `docker-compose.yml` (compose refuses to start without it, rather than silently using a guessable password):
+
+```
+POSTGRES_PASSWORD=<a real password>
+```
+
+Optional, with defaults shown in `docker-compose.yml`: `POSTGRES_DB`, `POSTGRES_USER`, `Kite__ApiKey`, `Kite__ApiSecret`, `Kite__AccessToken`, `Dhan__ClientId` (+ the rest of `Dhan__*`), `Dashboard__BaseUrl`, `Jwt__Key`, `Security__PasswordKey`, `Telegram__BotToken`, `Telegram__ChatId` - see that file for the full list. These are deliberately named to match the exact ASP.NET Core config key they set (`Section__Key`), so the same names work unmodified whether you're setting them in a local `.env` file, exporting them in your shell, or pasting them into a platform like Dokploy's environment editor - see `LINUX_VPS_DEPLOYMENT.md` §5. `db`'s data lives in a named volume (`spreadtrader-db-data`) that survives `docker compose down` but not `docker compose down -v`.
+
+#### Running as a specific instance (Production / pradeep-1 / pradeep-2)
+
+This repo deploys three independent instances of identical code - Production, pradeep-1, pradeep-2 -
+told apart by `ASPNETCORE_ENVIRONMENT` (see `LINUX_VPS_DEPLOYMENT.md`). Locally, `docker compose up`
+defaults to acting as Production; to run it as a different instance, use that instance's example env
+file (`.env.production.example` / `.env.pradeep-1.example` / `.env.pradeep-2.example` - copy to the
+non-`.example` name, gitignored, and fill in real values):
+
+```
+docker compose --env-file .env.pradeep-1 -p spreadtrader-pradeep-1 up --build
+```
+
+The `-p` flag gives that instance's containers/volumes their own Compose project name, so you can
+run more than one instance's stack side by side locally without them colliding - each example env
+file pre-assigns a non-overlapping `API_PORT` for exactly this reason. Building is identical either
+way - `docker compose build` never reads the `environment:` block at all, so no instance-specific
+config is ever baked into the image; only which container it's started AS differs.
 
 ### Cloud deployment notes
 
 - **Run the Api as a single instance.** The tick ingestion/trigger engine must be a singleton - both brokers cap concurrent feed connections per account (Kite at 3 per API key; Dhan disconnects with code 805 over the limit), and running two instances would double-evaluate triggers and could double-fire orders. Don't set replica count > 1 for this service.
-- The **dashboard** (nginx/static) has no such constraint and can scale out normally if you ever need to.
+- If you'd rather split the UI into its own scalable container instead of the single-container setup above (e.g. the Azure sidecar model in `DEPLOYMENT.md`), `SpreadTrader.Dashboard/spreadtrader.dashboard.client/Dockerfile` builds it as a standalone nginx/static image with no such singleton constraint - it's just not wired into `docker-compose.yml` by default.
 - If you outgrow one process later, the Engine only depends on the abstractions in `SpreadTrader.Core` (`ITickStore`, `ISpreadPublisher`, `ITriggerEventSink`, `IOrderGateway`) - swap the SignalR-backed implementations for a message-queue-backed one and it can move to its own container without touching the Engine itself.
 
 ## Limitations to keep in mind

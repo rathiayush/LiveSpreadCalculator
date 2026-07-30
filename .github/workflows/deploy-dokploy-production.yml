@@ -1,0 +1,112 @@
+name: Deploy to Dokploy - Production
+
+# One of three independent per-instance deploy workflows (see also deploy-dokploy-pradeep-1.yml,
+# deploy-dokploy-pradeep-2.yml) - same "each instance has its own fully independent deploy" shape
+# as the existing master_livespreadcalculator.yml / master_p1-livespreadcalculator.yml /
+# master_p2-livespreadcalculator.yml (Azure) and deploy.ps1 / deploy-pradeep-1.ps1 /
+# deploy-pradeep-2.ps1 (also Azure) already use. All three instances run identical code - see
+# deploy-pradeep-1.ps1's header comment - and are told apart purely by ASPNETCORE_ENVIRONMENT
+# (selects appsettings.Production.json / .pradeep-1.json / .pradeep-2.json) plus each instance's
+# own env vars in Dokploy (own broker API key, own App_Data volume, own domain). This workflow
+# still builds and pushes its OWN image tag (api:production, not a shared :latest) rather than
+# reusing whatever another instance's pipeline last pushed, specifically so redeploying Production
+# can never be silently affected by a pradeep-1/pradeep-2 build - see LINUX_VPS_DEPLOYMENT.md.
+#
+# ONE image, ONE Dokploy application per instance - not two. api serves the React dashboard itself
+# (baked into its own wwwroot by LiveSpreadCalculator/Dockerfile, served by Program.cs's
+# UseStaticFiles/MapFallbackToFile), so there is no separate "web" image or application to build,
+# push, or deploy here - see docker-compose.yml's comment on the api service for the full
+# reasoning. If you want a split API/UI topology instead, that's what
+# SpreadTrader.Dashboard/spreadtrader.dashboard.client/Dockerfile is for (used by DEPLOYMENT.md's
+# Azure sidecar setup) - not wired into this workflow.
+#
+# Builds via `docker compose build`/`push` against docker-compose.yml (the API_IMAGE env var
+# overrides that file's image: field - see the comment there) rather than a Dockerfile build
+# action directly, so the compose file stays the single source of truth for build context/
+# Dockerfile path used by both local dev (`docker compose up --build`) and CI.
+#
+# One-time setup this depends on - see LINUX_VPS_DEPLOYMENT.md:
+#   - A Dokploy "Application" for this instance, configured to deploy from
+#     ghcr.io/<owner>/<repo>/api:production.
+#   - Repo secrets: DOKPLOY_URL, DOKPLOY_API_TOKEN (shared across all three instances - same
+#     Dokploy dashboard), DOKPLOY_PRODUCTION_APP_ID.
+#   - This instance's real secrets (Kite/Dhan keys, Storage__SpreadHistoryConnectionString,
+#     Dashboard__BaseUrl, etc.) are set as environment variables on the Dokploy application
+#     ITSELF, never here - this workflow only ever changes which image tag is running.
+
+on:
+  # MANUAL ONLY - deploys are started from the Actions tab ("Run workflow"), never automatically on
+  # a push or merge. Deliberate: a merge to master should not be able to redeploy a live trading
+  # app on its own - same choice already made for every other deploy workflow in this repo
+  # (deploy-azure.yml, master_livespreadcalculator.yml). Re-add a `push:` trigger here if you ever
+  # want that back.
+  workflow_dispatch: {}
+
+env:
+  API_IMAGE: ghcr.io/${{ github.repository }}/api:production
+  # A separate, immutable copy of this build for rollback - point the Dokploy application at this
+  # tag instead of :production to revert to exactly this commit's image.
+  API_IMAGE_SHA: ghcr.io/${{ github.repository }}/api:production-${{ github.sha }}
+  # Postgres needs SOME value to interpolate docker-compose.yml's db service during `compose
+  # build` (api doesn't depend on db's real value to build - only db itself would, and this
+  # workflow never starts db) - not a real secret, never used at runtime.
+  POSTGRES_PASSWORD: unused-build-time-placeholder
+
+permissions:
+  contents: read
+  packages: write # required to push to GHCR
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fast fail on a compile error before spending time on the full multi-stage Docker build.
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Build & sanity check
+        run: dotnet build LiveSpreadCalculator.sln -c Release
+
+      # No test project exists in this repo yet (see ARCHITECTURE.md) - this step is a deliberate
+      # placeholder, not a no-op pretending to be a real gate. Replace the echo with
+      # `dotnet test` once a test project exists.
+      - name: Run tests
+        run: echo "No test project exists yet - nothing to run. See ARCHITECTURE.md."
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image (docker compose)
+        run: docker compose build api
+
+      - name: Tag immutable per-commit copy
+        run: docker tag "$API_IMAGE" "$API_IMAGE_SHA"
+
+      - name: Push image
+        run: |
+          docker compose push api
+          docker push "$API_IMAGE_SHA"
+
+      # ============================================================================================
+      # UNVERIFIED - confirm against YOUR Dokploy instance before trusting this in production. See
+      # LINUX_VPS_DEPLOYMENT.md §5 for the verification steps (Swagger docs, application ID, API
+      # token, a manual test run) - not repeated here to avoid the three workflows drifting out of
+      # sync with each other.
+      # ============================================================================================
+      - name: Trigger Dokploy deploy
+        run: |
+          curl -fsS -X POST "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"applicationId\": \"${{ secrets.DOKPLOY_PRODUCTION_APP_ID }}\"}"

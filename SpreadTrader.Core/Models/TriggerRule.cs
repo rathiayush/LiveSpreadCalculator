@@ -89,6 +89,16 @@ public sealed class TriggerRule
     /// MaxFireCount > 0.</summary>
     public int FireCount { get; set; }
 
+    /// <summary>Consecutive fires in a row where nothing filled at all (fully rejected/blocked -
+    /// see OrderDispatchHostedService.RestoreRuleIfNothingFilled). Reset to 0 the instant any fire
+    /// actually fills something. Once this reaches EngineOptions.MaxUnfilledDispatchAttempts, the
+    /// rule is auto-disarmed (IsArmed/Enabled both set false) instead of being handed its shot
+    /// back again, so a condition that can never fill (chronic insufficient margin, a frozen/
+    /// delisted instrument, a persistently rejected order) stops retrying instead of doing so
+    /// forever - a human has to look at it and re-enable it (see TriggerRuleControllerBase.Enable,
+    /// which also resets this back to 0).</summary>
+    public int UnfilledAttempts { get; set; }
+
     public bool Enabled { get; set; } = true;
 
     // Mutable runtime state - not thread-safe on its own, only touched under the store's lock.
