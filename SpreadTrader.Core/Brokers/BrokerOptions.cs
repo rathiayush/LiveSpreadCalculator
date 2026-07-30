@@ -13,23 +13,34 @@ public enum BrokerPlatform
 
     /// <summary>DhanHQ API v2.</summary>
     Dhan = 1,
+
+    /// <summary>Kotak Neo Trade API. NOT offered in the dashboard's broker-switch UI
+    /// (BrokerPlatformPage.jsx) by design - switch to it only via the backend, e.g.
+    /// POST /api/settings/broker-platform or the Broker__Platform environment variable. Also has no
+    /// MCX support - see SpreadTrader.KotakIntegration.KotakSymbology's doc comment.</summary>
+    Kotak = 2,
 }
 
 /// <summary>
-/// The one switch that decides which broker implementation gets wired into the DI container at
-/// startup (see BrokerRegistration in the Api project). Set it in appsettings.json:
+/// The STARTUP DEFAULT for which broker platform is live, read once at boot to seed
+/// BrokerSwitchState's initial value (see BrokerRegistration.AddBrokerIntegration in the Api
+/// project). Set it in appsettings.json:
 ///
 ///   "Broker": { "Platform": "Dhan" }
 ///
-/// or via the <c>Broker__Platform</c> environment variable in Docker/Azure. Changing it requires
-/// a restart - the choice is made once while the container is being built, deliberately, so there
-/// is never a half-Kite/half-Dhan state at runtime and no per-call branching in the hot tick path.
+/// or via the <c>Broker__Platform</c> environment variable in Docker/Azure. This is NOT the only
+/// way the live platform changes: every platform's full stack is always constructed regardless of
+/// this value (see BrokerRegistration's own doc comment), and BrokerSwitchState.SwitchTo lets the
+/// live platform change in-process, with no restart, via POST /api/settings/broker-platform - this
+/// setting only decides which one a fresh boot starts on before any such switch happens, and is
+/// itself overridden by whatever a prior runtime switch persisted to disk (see
+/// BrokerPlatformOverrideStore).
 ///
-/// IMPORTANT - the two platforms use different instrument identifiers and different tradingsymbol
+/// IMPORTANT - every platform uses different instrument identifiers and different tradingsymbol
 /// formats (Kite: "RELIANCE26JULFUT" + instrument_token; Dhan: "RELIANCE-Jul2026-FUT" + securityId).
 /// Spread definitions are in-memory only and the universe is rebuilt on demand, so switching
-/// platforms means rebuilding the universe (POST /api/universe/build) once after the restart -
-/// see DhanInstrumentMasterService's doc comment.
+/// platforms means rebuilding the universe (POST /api/universe/build) once after the switch - see
+/// DhanInstrumentMasterService's doc comment.
 /// </summary>
 public sealed class BrokerOptions
 {

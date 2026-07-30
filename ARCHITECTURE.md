@@ -27,7 +27,7 @@ exception: they're written to a CSV file so your configuration survives a restar
 
 ```mermaid
 flowchart LR
-    subgraph Broker["Broker API (Kite or Dhan - see §3.1)"]
+    subgraph Broker["Broker API (Kite, Dhan, or Kotak - see §3.1)"]
         WS[("WebSocket feed\nIMarketDataFeed")]
         REST[("REST API\nIOrderGateway / IMarginService")]
     end
@@ -81,27 +81,33 @@ simplification taken for lack of time - see §8 (Singleton constraint).
 | `LiveSpreadCalculator` | ASP.NET Core Web Api | Hosts everything: wires the entire DI graph (`Program.cs`), exposes REST controllers, hosts the SignalR hub, and is the one process you actually run for the backend. |
 | `SpreadTrader.Dashboard/spreadtrader.dashboard.client` | React (Vite) SPA | The UI - see §9. |
 
-## 3.1 The broker abstraction (Kite / Dhan)
+## 3.1 The broker abstraction (Kite / Dhan / Kotak)
 
 The platform the engine trades through is chosen by **one configuration flag**:
 
 ```json
-"Broker": { "Platform": "Kite" }   // or "Dhan"
+"Broker": { "Platform": "Kite" }   // or "Dhan", or "Kotak"
 ```
 
 Everything broker-specific sits behind seven interfaces in `SpreadTrader.Core/Brokers/`:
 
-| Interface | Responsibility | Kite | Dhan |
-|---|---|---|---|
-| `IBrokerSession` | Holds the live access token + account id | `KiteSession` | `DhanSession` |
-| `IBrokerAuthService` | Login URL, callback exchange, token verification, token expiry | `KiteAuthService` | `DhanAuthService` |
-| `IBrokerInstrumentMaster` | Symbol → numeric token resolution, futures enumeration | `InstrumentMasterService` | `DhanInstrumentMasterService` |
-| `IMarketDataFeed` | The live tick socket + order-update signal | `KiteTickerClient` | `DhanMarketFeedClient` |
-| `IOrderGateway` | Order placement/cancellation with fill verification | `KiteOrderGateway` | `DhanOrderGateway` |
-| `IMarginService` | Basket margin + available margin | `KiteMarginService` | `DhanMarginService` |
-| `IPositionsService` | Open positions + PNL | `KitePositionsService` | `DhanPositionsService` |
+| Interface | Responsibility | Kite | Dhan | Kotak Neo |
+|---|---|---|---|---|
+| `IBrokerSession` | Holds the live access token + account id | `KiteSession` | `DhanSession` | `KotakSession` |
+| `IBrokerAuthService` | Login URL, callback exchange, token verification, token expiry | `KiteAuthService` | `DhanAuthService` | `KotakAuthService` |
+| `IBrokerInstrumentMaster` | Symbol → numeric token resolution, futures enumeration | `InstrumentMasterService` | `DhanInstrumentMasterService` | `KotakInstrumentMasterService` |
+| `IMarketDataFeed` | The live tick socket + order-update signal | `KiteTickerClient` | `DhanMarketFeedClient` | `KotakMarketFeedClient` |
+| `IOrderGateway` | Order placement/cancellation with fill verification | `KiteOrderGateway` | `DhanOrderGateway` | `KotakOrderGateway` |
+| `IMarginService` | Basket margin + available margin | `KiteMarginService` | `DhanMarginService` | `KotakMarginService` |
+| `IPositionsService` | Open positions + PNL | `KitePositionsService` | `DhanPositionsService` | `KotakPositionsService` |
 
-`LiveSpreadCalculator/Brokers/BrokerRegistration.cs` constructs BOTH platforms' implementations of
+**Kotak is backend-only** - deliberately absent from the dashboard's Admin → Broker Platform page
+(`BrokerPlatformPage.jsx`'s `PLATFORMS` list only offers Kite/Dhan). Switch to it with
+`POST /api/settings/broker-platform {"Platform":"Kotak"}` or the `Broker__Platform=Kotak`
+environment variable - see "Kotak Neo: a third platform, backend-only" below for what's different
+about it and, importantly, how much of it is verified.
+
+`LiveSpreadCalculator/Brokers/BrokerRegistration.cs` constructs EVERY platform's implementation of
 all seven interfaces, always - `Broker:Platform` only picks which one is active the moment the
 process starts. Each interface is bound to a small "Switching*" wrapper (see
 `LiveSpreadCalculator/Brokers/Switching/`) that reads `BrokerSwitchState.Current` on every call and
@@ -109,10 +115,10 @@ forwards to whichever concrete instance is presently active. `BrokerSwitchState.
 only thing that ever changes it (driven by `POST /api/settings/broker-platform`, i.e. the
 dashboard's Admin -> Broker Platform page), and it does the choreography that keeps this safe:
 
-1. Clears `ITickStore` and every in-memory spread definition - Kite's `instrument_token` and
-   Dhan's `securityId` are two unrelated numbering systems for the same real contract, so a leftover
-   tick or a leg resolved against the outgoing platform must never be read once the universe is
-   rebuilt on the other one.
+1. Clears `ITickStore` and every in-memory spread definition - Kite's `instrument_token`, Dhan's
+   `securityId` and Kotak's scrip token are three unrelated numbering systems for the same real
+   contract, so a leftover tick or a leg resolved against the outgoing platform must never be read
+   once the universe is rebuilt on the other one.
 2. Flips `Current` and raises `Changed`. `SwitchingMarketDataFeed` reacts by cancelling the
    outgoing platform's `RunAsync` (closing its socket) and starting the new platform's - exactly one
    feed is ever actually connected at a time, preserving the "exactly one live socket" invariant
@@ -123,21 +129,27 @@ dashboard's Admin -> Broker Platform page), and it does the choreography that ke
 3. Persists the choice to `Storage:BrokerPlatformOverridePath` purely so a LATER, unrelated process
    restart also boots on the newly chosen platform.
 
-There is still never a half-Kite/half-Dhan state that a live request can observe - every read of
+There is still never a mixed-platform state that a live request can observe - every read of
 `Current` inside one call is a single volatile-ish field read, and the ordering above guarantees
 the previously-active platform's live socket is torn down before the new one's calls start
-resolving. `SpreadTrader.Engine` still never references either broker project directly, or even
+resolving. `SpreadTrader.Engine` still never references any broker project directly, or even
 `BrokerSwitchState` itself - it only sees the Switching* wrapper through the same interfaces it
 always has, plus a tiny `IBrokerSwitchNotifier` (implemented by `BrokerSwitchState`) that
 `PositionsCache` subscribes to, so the composition root and Engine stay decoupled.
 
 **The engine keeps its own vocabulary.** Rather than rewriting every service, CSV column and UI
-label to a third neutral vocabulary, the app keeps the Kite-flavoured terms it was built with -
-exchanges `NFO`/`MCX`, products `NRML`/`MIS`, order statuses `COMPLETE`/`REJECTED`/`OPEN` - and the
-Dhan adapter translates at its own boundary via `DhanSymbology`. So `NRML` becomes Dhan's `MARGIN`,
-`NSE_FNO` becomes `NFO`, `TRADED` becomes `COMPLETE`, and `FUTSTK`/`FUTIDX`/`FUTCOM` all normalize
-to `FUT`. That table is the single reviewable place where a wrong mapping would send a real order
-to the wrong product or contract.
+label to a neutral vocabulary, the app keeps the Kite-flavoured terms it was built with -
+exchanges `NFO`/`MCX`, products `NRML`/`MIS`, order statuses `COMPLETE`/`REJECTED`/`OPEN` - and each
+other adapter translates at its own boundary (`DhanSymbology`, `KotakSymbology`). So `NRML` becomes
+Dhan's `MARGIN`, `NSE_FNO` becomes `NFO`, `TRADED` becomes `COMPLETE`, `FUTSTK`/`FUTIDX`/`FUTCOM`
+all normalize to `FUT` on Dhan; Kotak's own enum spellings mostly already coincide with the
+canonical ones (DAY/IOC validity, SL/SL-M order type), so `KotakSymbology` is a shorter table. Each
+is the single reviewable place where a wrong mapping would send a real order to the wrong product
+or contract.
+
+**Kotak has no MCX mapping at all** - `KotakSymbology.ToKotakSegment` has no entry for `"MCX"` and
+`KotakInstrumentMasterService`/`KotakPositionsService` both filter it out explicitly. See the next
+section for why.
 
 ### What actually differs between the two platforms
 
@@ -264,6 +276,47 @@ Four consequences shaped the code:
 
 Token expiry is computed server-side per platform (`IBrokerAuthService.GetTokenExpiryUtc`) and
 returned with the token, so the dashboard's restore cache doesn't hardcode Kite's daily cutoff.
+
+### Kotak Neo: a third platform, backend-only
+
+Kotak's login is structurally closest to Dhan's TOTP mode - fully automatic, no browser, no daily
+human action - but is its own two-step handshake rather than Dhan's single call:
+
+1. **totp_login**: mobile number + UCC + a fresh RFC 6238 code from `Kotak:TotpSecret` → a
+   short-lived "view token" that authenticates only the next call.
+2. **totp_validate**: the account MPIN, authenticated by that view token → the real session (an
+   "edit token" + "edit sid" pair) that every trading call needs as `Auth`/`Sid` headers.
+
+`KotakSessionAutoRenewalHostedService` drives this the same three ways
+`DhanTotpAutoRenewalHostedService` drives Dhan's TOTP renewal (startup, proactively before expiry,
+reactively on `KotakSession.SessionInvalidated`) - see that section above for the shape, which
+carries over almost unchanged. Unlike Dhan, Kotak has no static-token fallback at all, so this
+hosted service always runs; there is no `AuthMode` to gate it.
+
+**Read this before trusting Kotak in anything real.** This integration was built by
+reverse-engineering the public `Kotak-Neo/Kotak-neo-api-v2` Python SDK's source - endpoint paths,
+header names, form-field codes - with no live Kotak Neo account to test any of it against (see
+`KotakOptions`' class doc comment for the full caveat, repeated on `KotakApiClient`,
+`KotakOrderGateway`, `KotakInstrumentMasterService` and `KotakMarketFeedClient`). Concretely:
+
+- **Base URLs are a single configurable guess** (`KotakOptions.RestBaseUrl`/`WsUrl`) rather than
+  Kotak's several documented per-category hostnames, since which endpoint category resolves to
+  which host wasn't confirmed.
+- **Order placement** sends only the eight field codes confirmed from the SDK (`es`/`pc`/`pr`/`pt`/
+  `qt`/`rt`/`ts`/`tt`) - fine for the plain protected-LIMIT orders this app actually sends, but
+  AMO/disclosed-quantity/trigger-price fields needed for SL/SL-M/AMO orders are not wired in.
+- **Response field names** (order id, status, filled quantity, margin figures, scrip-master
+  columns) are all best-effort candidate lists, not confirmed shapes - see each class's own
+  `ReadXxx` helpers.
+- **No MCX.** Kotak Neo's documented exchange-segment list (`NSE`/`BSE`/`NFO`/`BFO`/`CDS`/`BCD`) has
+  no MCX entry at all - `KotakSymbology` has no mapping for it, and
+  `KotakInstrumentMasterService`/`KotakPositionsService` filter MCX out explicitly rather than
+  guess at a segment code. An instance running the MCX add-on cannot be switched to Kotak and keep
+  its commodity spreads.
+
+None of this stops the app from building or running Kite/Dhan exactly as before - Kotak's stack
+only activates once something actually switches `BrokerSwitchState.Current` to it, which nothing
+does by default. Tighten the above once real Kotak Neo API access is available to test against.
 
 ### Switching platforms
 
@@ -507,7 +560,7 @@ All endpoints are under the Api project; Swagger UI is available at `/swagger` i
 
 ```json
 {
-  "Broker": { "Platform": "Kite" },        // or "Dhan" - which one is ACTIVE at startup; see §3.1
+  "Broker": { "Platform": "Kite" },        // or "Dhan"/"Kotak" - which one is ACTIVE at startup; see §3.1
   "Kite": {                                 // always read - both platforms are always constructed
     "ApiKey": "",
     "ApiSecret": "",
