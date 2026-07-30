@@ -134,7 +134,11 @@ public sealed class KotakApiClient
         string context,
         CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(method, $"{_options.RestBaseUrl.TrimEnd('/')}/{path.TrimStart('/')}");
+        // The session's own BaseUrl (returned by the totp_validate login response - see
+        // KotakSession.BaseUrl's doc comment) wins whenever we have one; KotakOptions.RestBaseUrl
+        // is only the pre-login fallback/guess.
+        var baseUrl = _session.BaseUrl ?? _options.RestBaseUrl;
+        using var request = new HttpRequestMessage(method, $"{baseUrl.TrimEnd('/')}/{path.TrimStart('/')}");
         foreach (var (name, value) in headers)
             request.Headers.TryAddWithoutValidation(name, value);
         request.Headers.TryAddWithoutValidation("Accept", "application/json");

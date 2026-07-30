@@ -17,17 +17,17 @@ namespace SpreadTrader.KotakIntegration;
 /// KotakAuthService) and KotakSessionAutoRenewalHostedService drives this exactly like Dhan's TOTP
 /// auto-renewal drives Dhan's single-step login, just with the extra validate call.
 ///
-/// IMPORTANT - BASE URLS ARE BEST-EFFORT. Kotak Neo's REST API is documented to span several
-/// different hostnames per environment (a session/login host, a trading-API gateway host, a
-/// scrip-master host, ...), reverse-engineered here from the public Kotak-Neo/Kotak-neo-api-v2
-/// Python SDK's source rather than from live-tested access (this deployment has no Kotak Neo
-/// account yet - see KotakOptions' constructor comment). <see cref="RestBaseUrl"/> is deliberately
-/// a SINGLE configurable base used for every endpoint category (session, orders, positions,
-/// margin, scrip master) rather than guessing at which of Kotak's several hostnames fronts which
-/// category - override it once real Kotak Neo API access is available and the true routing is
-/// confirmed. Every literal path below (login/1.0/tradeApiLogin, quick/order/rule/ms/place, ...)
-/// comes directly from that SDK's PROD_URL table, so those should be correct even if the base host
-/// needs adjusting.
+/// BASE URLS: <see cref="RestBaseUrl"/> is only the PRE-LOGIN guess, used for the very first
+/// totp_login/totp_validate call. Kotak's own trade-api-guide confirms the totp_validate response
+/// itself returns the real host to use for every call after that ("Save your TRADING_TOKEN,
+/// TRADING_SID, and BASE_URL for all subsequent API calls") - see KotakSession.BaseUrl, which
+/// KotakApiClient prefers over this configured value once a session exists. So a wrong guess here
+/// only matters for reaching the login endpoint itself; everything after login self-corrects.
+/// Still worth getting right (a wrong login host just fails outright rather than self-correcting),
+/// and it was reverse-engineered from the public Kotak-Neo/Kotak-neo-api-v2 Python SDK's source
+/// rather than confirmed against live access - see this project's git history / PR description for
+/// what remains unverified. Every literal path below (login/1.0/tradeApiLogin,
+/// quick/order/rule/ms/place, ...) comes directly from that SDK's PROD_URL table.
 /// </summary>
 public sealed class KotakOptions
 {
