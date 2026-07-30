@@ -28,10 +28,11 @@
         "ASPNETCORE_ENVIRONMENT": "Development"
       }
     },
-    "Local (SQL)": {
-      // Local dev against a LOCAL SQL Server / LocalDB (see appsettings.Local.json) instead of the
-      // shared Azure SQL - no firewall/network dependency. This instance is the writer locally, so
-      // it creates the SpreadHistory table and captures into the local DB.
+    "Local (Postgres)": {
+      // Local dev against a LOCAL PostgreSQL instance (see appsettings.Local.json - matches
+      // `docker compose up db`) instead of the shared/deployed Postgres - no network dependency.
+      // This instance is the writer locally, so it creates the SpreadHistory table and captures
+      // into the local DB.
       "commandName": "Project",
       "launchBrowser": true,
       "launchUrl": "swagger",
