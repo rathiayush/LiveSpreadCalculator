@@ -129,6 +129,36 @@ public sealed class CsvUserStore
         return ChangePasswordResult.Success();
     }
 
+    /// <summary>Creates App_Data/users.csv with a single admin row if - and only if - the file
+    /// doesn't exist yet. There is no self-registration in this app (see AuthController - login is
+    /// the only unauthenticated endpoint), so on a brand-new deployment with an empty/fresh
+    /// App_Data volume there is no way to obtain the first account at all without this. Called once
+    /// at startup, before MigrateToEncrypted() (see Program.cs), so the plaintext row this writes is
+    /// immediately encrypted under whatever Security:PasswordKey this instance is actually running
+    /// with - never left sitting in plaintext even for one restart.
+    ///
+    /// Deliberately does nothing once the file exists, even if it's later emptied down to just a
+    /// header - "the file is present" is the only signal checked, so this can never silently reset
+    /// or duplicate a real deployment's users after the first boot.</summary>
+    public void BootstrapAdminIfMissing(string email, string password)
+    {
+        if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
+            return;
+
+        lock (_writeLock)
+        {
+            if (File.Exists(_csvPath))
+                return;
+
+            if (TryWriteAllLines(new[] { "email,password", $"{email.Trim()},{password}" }))
+                _logger.LogInformation(
+                    "Bootstrapped the first admin account ({Email}) into {Path} - no users.csv existed yet.",
+                    email, _csvPath);
+            else
+                _logger.LogError("Failed to bootstrap the first admin account into {Path}.", _csvPath);
+        }
+    }
+
     /// <summary>One-time-per-file upgrade: rewrite any legacy plaintext password rows as encrypted
     /// blobs. Called once at startup (see Program.cs). If every row is already encrypted this is a
     /// no-op and does NOT rewrite the file, so stamps (and therefore live sessions) stay stable
