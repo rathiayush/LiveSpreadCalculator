@@ -373,6 +373,17 @@ var bootstrapAdminPassword = builder.Configuration["Bootstrap:AdminPassword"];
 if (!string.IsNullOrWhiteSpace(bootstrapAdminEmail) && !string.IsNullOrWhiteSpace(bootstrapAdminPassword))
     app.Services.GetRequiredService<CsvUserStore>().BootstrapAdminIfMissing(bootstrapAdminEmail, bootstrapAdminPassword);
 
+// Adds one more login on top of whatever's already in users.csv, without touching any existing
+// row - for a deployment where users.csv already exists (so BootstrapAdminIfMissing above is a
+// no-op) but there's no other reachable way to add a login: no self-registration endpoint (see
+// AuthController), and the hosting platform's own file-upload API has proven unreliable here.
+// Safe to leave configured indefinitely - see CsvUserStore.AddUserIfMissing, which no-ops once
+// this email is present regardless of whether its password has since changed.
+var addUserEmail = builder.Configuration["Bootstrap:AddUserEmail"];
+var addUserPassword = builder.Configuration["Bootstrap:AddUserPassword"];
+if (!string.IsNullOrWhiteSpace(addUserEmail) && !string.IsNullOrWhiteSpace(addUserPassword))
+    app.Services.GetRequiredService<CsvUserStore>().AddUserIfMissing(addUserEmail, addUserPassword);
+
 // One-time-per-file upgrade of App_Data/users.csv: any legacy plaintext password rows are rewritten
 // as encrypted blobs on startup. No-op once every row is already encrypted, so ordinary restarts
 // don't touch the file (and don't disturb live sessions). See CsvUserStore.MigrateToEncrypted.
