@@ -12,19 +12,27 @@ name: Deploy to Dokploy - Production
 # reusing whatever another instance's pipeline last pushed, specifically so redeploying Production
 # can never be silently affected by a pradeep-1/pradeep-2 build - see LINUX_VPS_DEPLOYMENT.md.
 #
-# Builds via `docker compose build`/`push` against docker-compose.yml (API_IMAGE/WEB_IMAGE env vars
-# override that file's image: fields - see the comments there) rather than a per-Dockerfile build
-# action, so the compose file stays the single source of truth for build context/Dockerfile paths
-# used by both local dev (`docker compose up --build`) and CI.
+# ONE image, ONE Dokploy application per instance - not two. api serves the React dashboard itself
+# (baked into its own wwwroot by LiveSpreadCalculator/Dockerfile, served by Program.cs's
+# UseStaticFiles/MapFallbackToFile), so there is no separate "web" image or application to build,
+# push, or deploy here - see docker-compose.yml's comment on the api service for the full
+# reasoning. If you want a split API/UI topology instead, that's what
+# SpreadTrader.Dashboard/spreadtrader.dashboard.client/Dockerfile is for (used by DEPLOYMENT.md's
+# Azure sidecar setup) - not wired into this workflow.
+#
+# Builds via `docker compose build`/`push` against docker-compose.yml (the API_IMAGE env var
+# overrides that file's image: field - see the comment there) rather than a Dockerfile build
+# action directly, so the compose file stays the single source of truth for build context/
+# Dockerfile path used by both local dev (`docker compose up --build`) and CI.
 #
 # One-time setup this depends on - see LINUX_VPS_DEPLOYMENT.md:
-#   - A Dokploy "Application" for this instance's api and one for its web, each configured to
-#     deploy from ghcr.io/<owner>/<repo>/api:production / .../web:production.
+#   - A Dokploy "Application" for this instance, configured to deploy from
+#     ghcr.io/<owner>/<repo>/api:production.
 #   - Repo secrets: DOKPLOY_URL, DOKPLOY_API_TOKEN (shared across all three instances - same
-#     Dokploy dashboard), DOKPLOY_PRODUCTION_API_APP_ID, DOKPLOY_PRODUCTION_WEB_APP_ID.
+#     Dokploy dashboard), DOKPLOY_PRODUCTION_APP_ID.
 #   - This instance's real secrets (Kite/Dhan keys, Storage__SpreadHistoryConnectionString,
-#     Dashboard__BaseUrl, etc.) are set as environment variables on the Dokploy applications
-#     THEMSELVES, never here - this workflow only ever changes which image tag is running.
+#     Dashboard__BaseUrl, etc.) are set as environment variables on the Dokploy application
+#     ITSELF, never here - this workflow only ever changes which image tag is running.
 
 on:
   # MANUAL ONLY - deploys are started from the Actions tab ("Run workflow"), never automatically on
@@ -36,13 +44,11 @@ on:
 
 env:
   API_IMAGE: ghcr.io/${{ github.repository }}/api:production
-  WEB_IMAGE: ghcr.io/${{ github.repository }}/web:production
   # A separate, immutable copy of this build for rollback - point the Dokploy application at this
   # tag instead of :production to revert to exactly this commit's image.
   API_IMAGE_SHA: ghcr.io/${{ github.repository }}/api:production-${{ github.sha }}
-  WEB_IMAGE_SHA: ghcr.io/${{ github.repository }}/web:production-${{ github.sha }}
   # Postgres needs SOME value to interpolate docker-compose.yml's db service during `compose
-  # build` (api/web don't depend on db's real value to build - only db itself would, and this
+  # build` (api doesn't depend on db's real value to build - only db itself would, and this
   # workflow never starts db) - not a real secret, never used at runtime.
   POSTGRES_PASSWORD: unused-build-time-placeholder
 
@@ -81,36 +87,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build images (docker compose)
-        run: docker compose build api web
+      - name: Build image (docker compose)
+        run: docker compose build api
 
-      - name: Tag immutable per-commit copies
-        run: |
-          docker tag "$API_IMAGE" "$API_IMAGE_SHA"
-          docker tag "$WEB_IMAGE" "$WEB_IMAGE_SHA"
+      - name: Tag immutable per-commit copy
+        run: docker tag "$API_IMAGE" "$API_IMAGE_SHA"
 
-      - name: Push images
+      - name: Push image
         run: |
-          docker compose push api web
+          docker compose push api
           docker push "$API_IMAGE_SHA"
-          docker push "$WEB_IMAGE_SHA"
 
       # ============================================================================================
       # UNVERIFIED - confirm against YOUR Dokploy instance before trusting this in production. See
-      # LINUX_VPS_DEPLOYMENT.md §5 for the verification steps (Swagger docs, application IDs, API
+      # LINUX_VPS_DEPLOYMENT.md §5 for the verification steps (Swagger docs, application ID, API
       # token, a manual test run) - not repeated here to avoid the three workflows drifting out of
       # sync with each other.
       # ============================================================================================
-      - name: Trigger Dokploy deploy (api)
+      - name: Trigger Dokploy deploy
         run: |
           curl -fsS -X POST "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
             -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d "{\"applicationId\": \"${{ secrets.DOKPLOY_PRODUCTION_API_APP_ID }}\"}"
-
-      - name: Trigger Dokploy deploy (web)
-        run: |
-          curl -fsS -X POST "${{ secrets.DOKPLOY_URL }}/api/application.deploy" \
-            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "{\"applicationId\": \"${{ secrets.DOKPLOY_PRODUCTION_WEB_APP_ID }}\"}"
+            -d "{\"applicationId\": \"${{ secrets.DOKPLOY_PRODUCTION_APP_ID }}\"}"
