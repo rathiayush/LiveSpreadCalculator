@@ -5,10 +5,10 @@ Plesk). Target architecture:
 
 ```
 GitHub                                  GitHub Actions
-  .NET API                                Build images (api, web)
-  React dashboard                         Run tests
-  Dockerfiles          ──push──▶          Push to GHCR
-  docker-compose.yml                      Trigger Dokploy deploy
+  .NET API + React dashboard              Build image (api)
+  Dockerfile                              Run tests
+  docker-compose.yml   ──push──▶          Push to GHCR
+                                           Trigger Dokploy deploy
                                                   │
                                                   ▼
                                           VPS (Dokploy)
@@ -20,6 +20,17 @@ GitHub                                  GitHub Actions
 This replaces the Windows/IIS/SQL Server stack entirely: no app pool idle timeout to fight (see
 `PLESK_DEPLOYMENT.md` §1 for why that mattered there), no named SQL Server instance, one systemd-free
 deployment where the container *is* the process boundary - Docker restarts it, not IIS recycling it.
+
+**One container per instance, not two.** `LiveSpreadCalculator/Dockerfile` builds the React dashboard
+and bakes its static output into the same image's own `wwwroot`; `Program.cs` serves it from that
+same origin via `UseStaticFiles`/`MapFallbackToFile`. So the `api` image already IS the whole
+deployable - UI, REST API, and SignalR hub, one container, one port, no reverse-proxy hop between the
+dashboard and the API it talks to. There is no separate "web"/nginx container in this setup (a
+previous revision of this doc had one; `docker-compose.yml`'s comments explain why it was dropped).
+If you specifically want a split API/UI topology instead - e.g. to scale the UI independently, or to
+match the Azure sidecar model - `SpreadTrader.Dashboard/spreadtrader.dashboard.client/Dockerfile`
+still exists for that (used by `DEPLOYMENT.md`'s Azure setup); it's just not wired into this doc or
+`docker-compose.yml`.
 
 **Three instances, like the existing Azure setup.** This repo already runs three independent
 deployments of identical code - Production, pradeep-1, pradeep-2 (see `deploy.ps1`,
@@ -79,32 +90,29 @@ falling behind during market hours, which is a trigger-evaluation delay, not jus
 
 ## 2. GitHub Container Registry (GHCR)
 
-Images are built via `docker compose build`/`push` against `docker-compose.yml` (its `api`/`web`
-services' `image:` fields are driven by the `API_IMAGE`/`WEB_IMAGE` env vars - see the comments
-there), so the compose file stays the single source of truth for build context/Dockerfile paths
-whether you're running `docker compose up --build` locally or a workflow is building in CI. Each of
-the three per-instance workflows pushes its **own tag**, not a shared `:latest` - so redeploying
-Production can never be affected by whatever pradeep-1's last build happened to push, even though
-the image content is identical today:
+The image is built via `docker compose build`/`push` against `docker-compose.yml` (its `api`
+service's `image:` field is driven by the `API_IMAGE` env var - see the comment there), so the
+compose file stays the single source of truth for build context/Dockerfile path whether you're
+running `docker compose up --build` locally or a workflow is building in CI. Each of the three
+per-instance workflows pushes its **own tag**, not a shared `:latest` - so redeploying Production can
+never be affected by whatever pradeep-1's last build happened to push, even though the image content
+is identical today:
 
 ```
 ghcr.io/<owner>/<repo>/api:production   (+ :production-<commit-sha>)
 ghcr.io/<owner>/<repo>/api:pradeep-1    (+ :pradeep-1-<commit-sha>)
 ghcr.io/<owner>/<repo>/api:pradeep-2    (+ :pradeep-2-<commit-sha>)
-ghcr.io/<owner>/<repo>/web:production   (+ :production-<commit-sha>)
-ghcr.io/<owner>/<repo>/web:pradeep-1    (+ :pradeep-1-<commit-sha>)
-ghcr.io/<owner>/<repo>/web:pradeep-2    (+ :pradeep-2-<commit-sha>)
 ```
 
 using each workflow's built-in `GITHUB_TOKEN` - no separate registry account needed. Two things to
 set up once:
 
 - **Package visibility.** If this repo is private (it is - see the repo's own settings), the GHCR
-  packages default to private too. Dokploy needs a way to pull them: either make the packages public
-  (GitHub → your profile → Packages → each package → Package settings → Change visibility) or give
+  package defaults to private too. Dokploy needs a way to pull it: either make the package public
+  (GitHub → your profile → Packages → the package → Package settings → Change visibility) or give
   Dokploy a GHCR pull credential (a GitHub PAT with `read:packages`, added as a registry credential
-  in Dokploy's settings). Public packages are simpler if you're not worried about the image contents
-  being visible (they contain no secrets - see the Dockerfile's own comment about never baking
+  in Dokploy's settings). Public is simpler if you're not worried about the image contents being
+  visible (they contain no secrets - see the Dockerfile's own comment about never baking
   `ApiKey`/`ApiSecret` into the image).
 - **First push.** A tag doesn't exist until its workflow runs once - run each of the three manually
   (Actions tab → "Deploy to Dokploy - Production" / "- pradeep-1" / "- pradeep-2" → Run workflow)
@@ -112,20 +120,15 @@ set up once:
 
 ---
 
-## 3. Dokploy applications (six total: api + web, × three instances)
+## 3. Dokploy applications (three total - one per instance)
 
-This doc assumes the standard Dokploy flow: one **Application** per deployable, each pulling a GHCR
+This doc assumes the standard Dokploy flow: one **Application** per instance, each pulling a GHCR
 image, with Dokploy managing Traefik/SSL for you through its **Domains** tab - no manual Traefik
-labels needed. (If you'd rather deploy `docker-compose.yml` directly as a single Dokploy **Compose**
-app instead, see §7 - the tradeoffs are different enough that it's kept separate rather than
-complicating this section. Compose mode also doesn't map cleanly onto three independent instances
-sharing one image but needing separate config, so §3's per-Application approach is the better fit
-here regardless.)
+labels needed. (If you'd rather deploy `docker-compose.yml` directly as a Dokploy **Compose** app
+instead, see §7 - kept separate since the tradeoffs are different enough to complicate this section.)
 
-Repeat this whole section three times, once per instance - substitute `production` / `pradeep-1` /
+Repeat this section three times, once per instance - substitute `production` / `pradeep-1` /
 `pradeep-2` for the image tag and use that instance's own values throughout.
-
-### 3a. `api` application
 
 1. Dokploy dashboard → Create Application → **Docker Image** source (not git) →
    `ghcr.io/<owner>/<repo>/api:production` (or `:pradeep-1` / `:pradeep-2`).
@@ -138,26 +141,18 @@ Repeat this whole section three times, once per instance - substitute `productio
    | `ASPNETCORE_URLS` | `http://+:8080` |
    | `Kite__ApiKey` / `Kite__ApiSecret` (or `Dhan__*` - check that instance's `Broker:Platform`) | **this instance's own** broker credentials - each of the three uses a different account, never share one across instances |
    | `Kite__AccessToken` | leave empty - set daily via the dashboard's "Login to Kite" |
-   | `Dashboard__BaseUrl` | this instance's own public HTTPS URL, e.g. `https://spreadtrader.example.com`, `https://p1.spreadtrader.example.com` |
+   | `Dashboard__BaseUrl` | this instance's own public HTTPS URL - the SAME domain you put in the Domains tab below, since this one container serves both the API and the UI (e.g. `https://spreadtrader.example.com`, `https://p1.spreadtrader.example.com`) |
    | `Storage__SpreadHistoryConnectionString` | points at Postgres - see §4. All three instances can point at the SAME Postgres database - only the writer instance (`Engine:SpreadHistoryWriter=true`, currently pradeep-2 per `appsettings.pradeep-2.json`) writes to it |
    | `Storage__TriggersCsvPath` etc. | absolute paths under **this instance's own** mounted volume - see §6. Do NOT share one volume across instances, or they'll overwrite each other's trigger rules |
 
-3. **Port**: container port `8080` (matches `ASPNETCORE_URLS` and the Dockerfile's `EXPOSE 8080`).
-4. **Domain** (Dokploy's Domains tab): only if you want the API directly reachable on its own
-   subdomain. If `web` reverse-proxies `/api` and `/hubs` to `api` the way it does in
-   `docker-compose.yml` (see `nginx.conf.template` referenced in `DEPLOYMENT.md` §6), you may not
-   need a public domain on `api` at all - Dokploy's internal Docker network lets `web` reach `api` by
-   its Dokploy service name without exposing it publicly. Match whichever topology you actually run.
+3. **Port**: container port `8080` (matches `ASPNETCORE_URLS` and the Dockerfile's `EXPOSE 8080`) -
+   this is the only port; the dashboard, `/api`, and `/hubs` are all served from it.
+4. **Domain** (Dokploy's Domains tab): this instance's own public domain, routed straight to port
+   `8080`. Must match `Dashboard__BaseUrl` above exactly.
 5. **Health check**: point it at `GET /healthz` (see `Program.cs` - `AllowAnonymous`, no auth
    needed). This is a liveness probe only, not the engine-health signal - see the note in
    `PLESK_DEPLOYMENT.md` §5 if you want a real "is the engine actually ticking" probe; that work
    hasn't been ported to this branch.
-
-### 3b. `web` application
-
-Same pattern per instance: Docker Image source `ghcr.io/<owner>/<repo>/web:production` (or
-`:pradeep-1` / `:pradeep-2`), container port `80` (nginx), Domain = that instance's own public
-domain with Dokploy-managed SSL.
 
 ### Redeploying
 
@@ -176,9 +171,9 @@ Two ways to run it - pick one, don't run both:
 
 **Dokploy-managed Database (recommended for this setup).** Dokploy dashboard → Create Database →
 PostgreSQL. Dokploy provisions the container, generates credentials, and gives you a connection
-string you can copy into `api`'s `Storage__SpreadHistoryConnectionString` environment variable
-(§3a). This is the simplest path when `api`/`web` are separate Dokploy Applications rather than a
-Compose deployment, and it puts Postgres under Dokploy's own backup/restart handling.
+string you can copy into each instance's `Storage__SpreadHistoryConnectionString` environment
+variable (§3). This is the simplest path when instances are separate Dokploy Applications rather than
+a Compose deployment, and it puts Postgres under Dokploy's own backup/restart handling.
 
 **The `db` service in `docker-compose.yml`.** Useful for local dev (`docker compose up`) and for the
 Compose-deployment alternative in §7, where it becomes the same container Dokploy manages. Requires
@@ -205,19 +200,19 @@ with an AI assistant, including this one** - set them directly in GitHub's/Dokpl
 
 ### 5a. GitHub Actions secrets (build & deploy-trigger only)
 
-Set under the repo's Settings → Secrets and variables → Actions. These let the workflows push
-images and ask Dokploy to redeploy - they are NOT read by the running app itself, so they don't need
+Set under the repo's Settings → Secrets and variables → Actions. These let the workflows push the
+image and ask Dokploy to redeploy - they are NOT read by the running app itself, so they don't need
 to be broker credentials or anything trading-related:
 
 | Secret | What it is | Shared or per-instance? |
 |---|---|---|
 | `DOKPLOY_URL` | Your Dokploy instance's base URL, e.g. `https://dokploy.example.com` | Shared (one Dokploy dashboard) |
 | `DOKPLOY_API_TOKEN` | An API token generated in Dokploy (Settings → Profile, or wherever your version puts it) | Shared |
-| `DOKPLOY_PRODUCTION_API_APP_ID` / `DOKPLOY_PRODUCTION_WEB_APP_ID` | Production's api/web Application IDs (visible in each Dokploy dashboard URL) | Per-instance |
-| `DOKPLOY_PRADEEP1_API_APP_ID` / `DOKPLOY_PRADEEP1_WEB_APP_ID` | pradeep-1's, same way | Per-instance |
-| `DOKPLOY_PRADEEP2_API_APP_ID` / `DOKPLOY_PRADEEP2_WEB_APP_ID` | pradeep-2's, same way | Per-instance |
+| `DOKPLOY_PRODUCTION_APP_ID` | Production's Application ID (visible in its Dokploy dashboard URL) | Per-instance |
+| `DOKPLOY_PRADEEP1_APP_ID` | pradeep-1's, same way | Per-instance |
+| `DOKPLOY_PRADEEP2_APP_ID` | pradeep-2's, same way | Per-instance |
 
-8 secrets total. The application IDs don't exist until you've created the six Dokploy applications
+5 secrets total. The application IDs don't exist until you've created the three Dokploy applications
 in §3, so this is naturally the last step - create the applications first, then come back and set
 these.
 
@@ -233,12 +228,12 @@ All three `.github/workflows/deploy-dokploy-*.yml` are **manual-trigger only** (
 matching `deploy-azure.yml`'s existing, deliberate choice: a merge to master should not be able to
 redeploy a live trading app on its own. Add a `push:` trigger yourself if you decide you want that.
 
-### 5b. App runtime config (Dokploy environment variables, per instance - §3a's table)
+### 5b. App runtime config (Dokploy environment variables, per instance - §3's table)
 
 **Yes, you need to provide Kite/Dhan credentials** - one set per instance, since each of the three
 already uses its own separate broker account (confirmed against the committed `appsettings.*.json`
-files - they're not interchangeable). These go into each `api` Application's environment variables
-in Dokploy, never into GitHub Actions secrets and never into a file committed to git:
+files - they're not interchangeable). These go into each Application's environment variables in
+Dokploy, never into GitHub Actions secrets and never into a file committed to git:
 
 - `Kite__ApiKey` / `Kite__ApiSecret` (or `Dhan__ApiKey` / `Dhan__ApiSecret` etc. if that instance's
   `Broker:Platform` is `Dhan` - check `appsettings.<env>.json`) - this instance's real values.
@@ -265,8 +260,8 @@ in the first place. A container's own filesystem does **not** survive a redeploy
 new container, means a fresh filesystem), so without a persistent mount every deploy silently wipes
 your trigger rules.
 
-In Dokploy: add a **Volume** mount on the `api` Application (its Advanced/Volumes tab) - a host path
-or Dokploy-managed volume mounted at, say, `/data`, then set the `Storage:*CsvPath` environment
+In Dokploy: add a **Volume** mount on the Application (its Advanced/Volumes tab) - a host path or
+Dokploy-managed volume mounted at, say, `/data`, then set the `Storage:*CsvPath` environment
 variables to absolute paths under it:
 
 ```
@@ -291,17 +286,18 @@ Instead of per-instance Applications (§3), Dokploy can run `docker-compose.yml`
 **Compose** application type - this also brings `db` (Postgres) along as part of the same deployment
 rather than as a separate Dokploy Database resource. Note this doesn't map cleanly onto three
 instances sharing one image with different config each - you'd need three separate compose
-deployments (or one compose file parameterized per instance via a `.env`), which is more moving
-parts than the per-Application approach in §3 for no real benefit here. Mentioned for completeness;
-§3 is the better fit for this specific three-instance setup.
+deployments (one per instance's own `.env.*` file - see `.env.production.example` /
+`.env.pradeep-1.example` / `.env.pradeep-2.example`), which is more moving parts than the
+per-Application approach in §3 for no real benefit here. Mentioned for completeness; §3 is the better
+fit for this specific three-instance setup.
 
 This needs changes §3 doesn't: Dokploy's Compose mode typically expects the `dokploy-network` to be
-declared `external: true` so Traefik can reach your services, and you'd add Traefik routing labels
-directly to the `api`/`web` service definitions (domain, entrypoint, TLS resolver) rather than using
-the Domains-tab UI flow in §3. The exact label shape depends on your Dokploy/Traefik version, and
-getting it wrong silently means "no public route" rather than a loud error - worth doing once,
-carefully, against a test domain before pointing production DNS at it. Ask if you want this written
-out concretely once you've decided against the per-Application approach in §3.
+declared `external: true` so Traefik can reach your services, and you'd add a Traefik routing label
+directly to the `api` service definition (domain, entrypoint, TLS resolver) rather than using the
+Domains-tab UI flow in §3. The exact label shape depends on your Dokploy/Traefik version, and getting
+it wrong silently means "no public route" rather than a loud error - worth doing once, carefully,
+against a test domain before pointing production DNS at it. Ask if you want this written out
+concretely once you've decided against the per-Application approach in §3.
 
 ---
 
@@ -309,10 +305,10 @@ out concretely once you've decided against the per-Application approach in §3.
 
 - **Each of the three instances must individually stay a single running copy** - see `README.md`'s
   "Cloud deployment notes". Both brokers cap concurrent feed connections per account, and the tick
-  store / positions cache / rankings are in-memory and per-process, so scaling any ONE instance's
-  `api` to more than one replica means that instance double-evaluates triggers and possibly
-  double-fires orders. Running Production + pradeep-1 + pradeep-2 side by side is fine and intended
-  (they're different broker accounts); replica count > 1 on any single one of them is not.
+  store / positions cache / rankings are in-memory and per-process, so scaling any ONE instance to
+  more than one replica means that instance double-evaluates triggers and possibly double-fires
+  orders. Running Production + pradeep-1 + pradeep-2 side by side is fine and intended (they're
+  different broker accounts); replica count > 1 on any single one of them is not.
 - **Trading is live from the moment `Kite:AccessToken` exists** - no paper-trading mode exists in
   this codebase. Test trigger logic with thresholds that can't realistically fire before trusting it
   unattended, same warning as `DEPLOYMENT.md`.

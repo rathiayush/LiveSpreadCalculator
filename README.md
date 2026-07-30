@@ -311,7 +311,7 @@ The Dockerfile builds `LiveSpreadCalculator` and its project references (`Spread
 ```
 docker compose up --build
 ```
-Runs three containers - `api` (the backend, port 8080), `web` (nginx serving the built React app on port 8081, reverse-proxying `/api` and `/hubs` to `api`), and `db` (PostgreSQL, backing the hourly spread-history table - see `EfSpreadHistoryStore`). `db` has no host port mapping; only `api` reaches it, over the compose network as `db`.
+Runs two containers - `api` (the backend AND the built React dashboard, both served from the same origin/port - see `LiveSpreadCalculator/Dockerfile`'s comments on why there's no separate nginx/static container here) on port 8080, and `db` (PostgreSQL, backing the hourly spread-history table - see `EfSpreadHistoryStore`). `db` has no host port mapping; only `api` reaches it, over the compose network as `db`. Open `http://localhost:8080` for the dashboard.
 
 Required in your shell or a `.env` file next to `docker-compose.yml` (compose refuses to start without it, rather than silently using a guessable password):
 
@@ -335,14 +335,14 @@ docker compose --env-file .env.pradeep-1 -p spreadtrader-pradeep-1 up --build
 
 The `-p` flag gives that instance's containers/volumes their own Compose project name, so you can
 run more than one instance's stack side by side locally without them colliding - each example env
-file pre-assigns non-overlapping `API_PORT`/`WEB_PORT` values for exactly this reason. Building is
-identical either way - `docker compose build` never reads the `environment:` block at all, so no
-instance-specific config is ever baked into the image; only which container it's started AS differs.
+file pre-assigns a non-overlapping `API_PORT` for exactly this reason. Building is identical either
+way - `docker compose build` never reads the `environment:` block at all, so no instance-specific
+config is ever baked into the image; only which container it's started AS differs.
 
 ### Cloud deployment notes
 
 - **Run the Api as a single instance.** The tick ingestion/trigger engine must be a singleton - both brokers cap concurrent feed connections per account (Kite at 3 per API key; Dhan disconnects with code 805 over the limit), and running two instances would double-evaluate triggers and could double-fire orders. Don't set replica count > 1 for this service.
-- The **dashboard** (nginx/static) has no such constraint and can scale out normally if you ever need to.
+- If you'd rather split the UI into its own scalable container instead of the single-container setup above (e.g. the Azure sidecar model in `DEPLOYMENT.md`), `SpreadTrader.Dashboard/spreadtrader.dashboard.client/Dockerfile` builds it as a standalone nginx/static image with no such singleton constraint - it's just not wired into `docker-compose.yml` by default.
 - If you outgrow one process later, the Engine only depends on the abstractions in `SpreadTrader.Core` (`ITickStore`, `ISpreadPublisher`, `ITriggerEventSink`, `IOrderGateway`) - swap the SignalR-backed implementations for a message-queue-backed one and it can move to its own container without touching the Engine itself.
 
 ## Limitations to keep in mind

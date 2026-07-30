@@ -1,4 +1,13 @@
 services:
+  # One container for everything user-facing - REST API, SignalR hub, AND the React dashboard.
+  # LiveSpreadCalculator/Dockerfile builds the dashboard and bakes its static output into this
+  # image's own wwwroot (see that Dockerfile's comments), and Program.cs serves it from the same
+  # origin via UseStaticFiles/MapFallbackToFile - so there is no separate "web" container in this
+  # setup, no nginx, no reverse proxy hop between the UI and the API it talks to. A previous
+  # revision of this file also ran a second nginx-based "web" service duplicating that same UI on
+  # its own port; that's still a valid topology (see SpreadTrader.Dashboard/spreadtrader.dashboard.client/Dockerfile,
+  # still used by DEPLOYMENT.md's Azure sidecar setup, which has its own reasons for splitting the
+  # two), just not the one this compose file runs.
   api:
     # Overridden by CI (API_IMAGE=ghcr.io/<owner>/<repo>/api) so `docker compose build` +
     # `docker compose push` tags and pushes straight to GHCR - see the deploy-dokploy-*.yml
@@ -21,9 +30,9 @@ services:
     # any crash instead of restarting it.
     restart: unless-stopped
     ports:
-      # Parameterized (not just the image) so two instances' compose stacks can run side by side
-      # locally without a port clash - e.g. API_PORT=8090 WEB_PORT=8091 for a second instance. See
-      # .env.pradeep-1.example / .env.pradeep-2.example.
+      # The one port for everything - UI, API, and the SignalR hub all live here. Parameterized so
+      # two instances' compose stacks can run side by side locally without a port clash - e.g.
+      # API_PORT=8090 for a second instance. See .env.pradeep-1.example / .env.pradeep-2.example.
       - "${API_PORT:-8080}:8080"
     environment:
       # No hardcoded "Production" here on purpose - see the IMPORTANT note above. Defaults to
@@ -40,9 +49,9 @@ services:
       Kite__ApiKey: ${KITE_API_KEY:-}
       Kite__ApiSecret: ${KITE_API_SECRET:-}
       Kite__AccessToken: ${KITE_ACCESS_TOKEN:-}
-      # Must match wherever the web container / reverse proxy is publicly reachable, so the
-      # Kite login callback redirects the browser back to the right place and CORS allows it.
-      Dashboard__BaseUrl: ${DASHBOARD_BASE_URL:-http://localhost:8081}
+      # This container's own public URL (there's no separate web/proxy tier to point at instead -
+      # see the comment above) - where Kite redirects the browser after login and what CORS allows.
+      Dashboard__BaseUrl: ${DASHBOARD_BASE_URL:-http://localhost:8080}
       # Overrides the placeholder in appsettings.json with the real db service below. "db" only
       # resolves on this compose network - see EfSpreadHistoryStore / SpreadHistoryDbContext. All
       # three instances can point at this same Postgres - only the writer instance
@@ -84,17 +93,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  web:
-    # Same CI-override pattern as api's image: above (WEB_IMAGE=ghcr.io/<owner>/<repo>/web).
-    image: ${WEB_IMAGE:-spreadtrader-web:local}
-    build:
-      context: SpreadTrader.Dashboard/spreadtrader.dashboard.client
-    ports:
-      # Parameterized alongside api's API_PORT above - see the note there.
-      - "${WEB_PORT:-8081}:80"
-    depends_on:
-      - api
 
 volumes:
   spreadtrader-db-data:
