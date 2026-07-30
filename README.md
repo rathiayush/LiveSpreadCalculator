@@ -319,7 +319,7 @@ Required in your shell or a `.env` file next to `docker-compose.yml` (compose re
 POSTGRES_PASSWORD=<a real password>
 ```
 
-Optional, with defaults shown in `docker-compose.yml`: `POSTGRES_DB`, `POSTGRES_USER`, `KITE_API_KEY`, `KITE_API_SECRET`, `KITE_ACCESS_TOKEN`, `DASHBOARD_BASE_URL` - see that file for the exact variable names. `db`'s data lives in a named volume (`spreadtrader-db-data`) that survives `docker compose down` but not `docker compose down -v`.
+Optional, with defaults shown in `docker-compose.yml`: `POSTGRES_DB`, `POSTGRES_USER`, `Kite__ApiKey`, `Kite__ApiSecret`, `Kite__AccessToken`, `Dhan__ClientId` (+ the rest of `Dhan__*`), `Dashboard__BaseUrl`, `Jwt__Key`, `Security__PasswordKey`, `Telegram__BotToken`, `Telegram__ChatId` - see that file for the full list. These are deliberately named to match the exact ASP.NET Core config key they set (`Section__Key`), so the same names work unmodified whether you're setting them in a local `.env` file, exporting them in your shell, or pasting them into a platform like Dokploy's environment editor - see `LINUX_VPS_DEPLOYMENT.md` §5. `db`'s data lives in a named volume (`spreadtrader-db-data`) that survives `docker compose down` but not `docker compose down -v`.
 
 #### Running as a specific instance (Production / pradeep-1 / pradeep-2)
 

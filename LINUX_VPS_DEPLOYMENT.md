@@ -132,18 +132,27 @@ Repeat this section three times, once per instance - substitute `production` / `
 
 1. Dokploy dashboard → Create Application → **Docker Image** source (not git) →
    `ghcr.io/<owner>/<repo>/api:production` (or `:pradeep-1` / `:pradeep-2`).
-2. **Environment variables** (Dokploy's Environment tab) - same `Section__Key` convention as every
-   other deployment in this repo, and see §5 below for exactly which secrets you need to have ready:
+2. **Environment variables** (Dokploy's Environment tab). Every ASP.NET Core config key this app
+   reads is listed below - **you don't need to set them one field at a time**: `.env.production.example`
+   / `.env.pradeep-1.example` / `.env.pradeep-2.example` in the repo root already have every line
+   below, named exactly as shown, ready to copy-paste as one block into Dokploy's environment editor
+   (which accepts a raw `KEY=VALUE` block, not just individual fields). Copy that instance's file,
+   fill in the blanks with real values, paste the whole thing in one shot. **Never paste real values
+   into a chat with an AI assistant, including this one** - fill them in directly in your own editor.
 
    | Variable | Value |
    |---|---|
    | `ASPNETCORE_ENVIRONMENT` | `Production` / `pradeep-1` / `pradeep-2` - selects which `appsettings.*.json` loads |
    | `ASPNETCORE_URLS` | `http://+:8080` |
-   | `Kite__ApiKey` / `Kite__ApiSecret` (or `Dhan__*` - check that instance's `Broker:Platform`) | **this instance's own** broker credentials - each of the three uses a different account, never share one across instances |
-   | `Kite__AccessToken` | leave empty - set daily via the dashboard's "Login to Kite" |
+   | `Kite__ApiKey` / `Kite__ApiSecret` (Kite instances only) | **this instance's own** broker credentials - never share one across instances. pradeep-2 uses Kite; check `Broker:Platform` in that instance's `appsettings.*.json` if unsure |
+   | `Kite__AccessToken` | leave empty - set daily via the dashboard's "Login to Kite", never a standing value |
+   | `Dhan__ClientId` + (`Dhan__Pin`+`Dhan__TotpSecret` for TOTP mode, or `Dhan__AppId`+`Dhan__AppSecret` for Consent mode) (Dhan instances only) | **this instance's own** broker credentials - Production and pradeep-1 use Dhan, with different auth modes each; see that instance's `.env.*.example` for exactly which fields its `Dhan:AuthMode` needs |
+   | `Jwt__Key` | signs this instance's auth tokens - see the ⚠️ in §5, this is currently a shared placeholder across all three instances in git and must become a real secret |
+   | `Security__PasswordKey` | encrypts this instance's `App_Data/users.csv` - same ⚠️ as `Jwt__Key`. **Do not change this again once set and real users exist**, or their stored passwords become undecryptable |
+   | `Telegram__BotToken` / `Telegram__ChatId` | optional order/PNL alerts - leave blank for no notifications |
    | `Dashboard__BaseUrl` | this instance's own public HTTPS URL - the SAME domain you put in the Domains tab below, since this one container serves both the API and the UI (e.g. `https://spreadtrader.example.com`, `https://p1.spreadtrader.example.com`) |
    | `Storage__SpreadHistoryConnectionString` | points at Postgres - see §4. All three instances can point at the SAME Postgres database - only the writer instance (`Engine:SpreadHistoryWriter=true`, currently pradeep-2 per `appsettings.pradeep-2.json`) writes to it |
-   | `Storage__TriggersCsvPath` etc. | absolute paths under **this instance's own** mounted volume - see §6. Do NOT share one volume across instances, or they'll overwrite each other's trigger rules |
+   | `Storage__TriggersCsvPath` etc. (9 paths total - see §6) | absolute paths under **this instance's own** mounted volume - see §6. Do NOT share one volume across instances, or they'll overwrite each other's trigger rules |
 
 3. **Port**: container port `8080` (matches `ASPNETCORE_URLS` and the Dockerfile's `EXPOSE 8080`) -
    this is the only port; the dashboard, `/api`, and `/hubs` are all served from it.
@@ -230,47 +239,82 @@ redeploy a live trading app on its own. Add a `push:` trigger yourself if you de
 
 ### 5b. App runtime config (Dokploy environment variables, per instance - §3's table)
 
-**Yes, you need to provide Kite/Dhan credentials** - one set per instance, since each of the three
-already uses its own separate broker account (confirmed against the committed `appsettings.*.json`
-files - they're not interchangeable). These go into each Application's environment variables in
-Dokploy, never into GitHub Actions secrets and never into a file committed to git:
+**Yes, you need to provide real values for all of these** - one full set per instance. Every field
+below is already laid out, correctly named, in that instance's `.env.<env>.example` template (see
+§3) - fill in the blanks there and paste the whole block into Dokploy once, rather than typing each
+field individually. These go into each Application's environment variables in Dokploy, never into
+GitHub Actions secrets and never into a file committed to git:
 
-- `Kite__ApiKey` / `Kite__ApiSecret` (or `Dhan__ApiKey` / `Dhan__ApiSecret` etc. if that instance's
-  `Broker:Platform` is `Dhan` - check `appsettings.<env>.json`) - this instance's real values.
-- `Kite__AccessToken` - **do not** set this as a standing secret anywhere. It's obtained fresh each
-  trading day via the dashboard's "Login to Kite" button (see `AuthController.Callback`) - setting a
-  permanent one here would just be an expired token sitting in config, since Kite access tokens are
-  single-day.
+- **Broker credentials** - this instance's own account, never shared with another instance
+  (confirmed against the committed `appsettings.*.json` files - genuinely different accounts, not
+  interchangeable):
+  - Kite instances (pradeep-2): `Kite__ApiKey` / `Kite__ApiSecret`.
+  - Dhan instances (Production, pradeep-1): `Dhan__ClientId` plus whichever pair that instance's
+    `Dhan:AuthMode` needs - `Dhan__Pin`+`Dhan__TotpSecret` for TOTP (fully automatic), or
+    `Dhan__AppId`+`Dhan__AppSecret` for Consent (browser login, recurring). **Treat
+    `Pin`/`TotpSecret` as login credentials, not tokens** - unlike a leaked access token (expires
+    within 24h regardless of what happens to it), that pair lets anyone mint a fresh valid token
+    indefinitely until you rotate it in the Dhan portal.
+  - `Kite__AccessToken` - **never** set this as a standing secret anywhere, for any instance. It's
+    obtained fresh each trading day via the dashboard's "Login to Kite" button (see
+    `AuthController.Callback`) - a permanent one here would just be an expired token sitting in
+    config, since Kite access tokens are single-day.
+
+- ⚠️ **`Jwt__Key` and `Security__PasswordKey`** - **found sitting in git as the exact same
+  `"CHANGE_ME_dev_only_..."` / `"CHANGE_ME_pwd_dev_only_..."` placeholder across all three
+  instances' `appsettings.*.json` files, apparently never actually overridden.** `Jwt__Key` signs
+  every auth token this instance issues - anyone who has that string can forge a valid login token
+  for that instance's dashboard/API. `Security__PasswordKey` encrypts `App_Data/users.csv` - see
+  `PasswordProtector`. Generate a real, random 32+ character value for each, ideally a **different**
+  one per instance so a leak of one doesn't affect the others. **Do not change `Security__PasswordKey`
+  again once it's set and real users exist** - every already-encrypted password becomes permanently
+  undecryptable if you do (see `Tools/Decrypt-Users.ps1`'s own warning). This file did not touch
+  these values in `appsettings.*.json` - rotating `Jwt__Key` logs everyone out (mild), but rotating
+  `Security__PasswordKey` blind is destructive, so that has to be a deliberate action you take, not
+  something done for you.
+
+- `Telegram__BotToken` / `Telegram__ChatId` - optional (order/PNL alerts). Also currently committed
+  in git as real, live bot tokens (different per instance, at least). Rotate via @BotFather if
+  you're treating this migration as the point to clean these up; leave both blank in Dokploy for no
+  notifications.
+
 - `Storage__SpreadHistoryConnectionString` - the Postgres connection string from §4. Not secret in
   the same sense as broker keys, but still shouldn't be committed to git - same reasoning as
   `appsettings.*.json`'s connection-string placeholders (§0).
 
-The Kite/Dhan values already sitting in the committed `appsettings.*.json` files are flagged in
-`DEPLOYMENT.md` §0 as compromised (this repo's git history), so treat this migration as a good time
-to actually rotate them in each broker's developer console, not just copy the old ones over.
+The broker/Telegram values already sitting in the committed `appsettings.*.json` files are exposed
+in this repo's git history and should be treated as compromised (see `DEPLOYMENT.md` §0's warning
+about the Kite key specifically - the same applies to everything else found here), so treat this
+migration as a good time to actually rotate them in each provider's console, not just copy the old
+ones over.
 
 ---
 
 ## 6. Persistent state (App_Data)
 
 Same hazard as every other deployment target in this repo: `triggers.csv`, `exit_triggers.csv`,
-`pnl-alerts.csv`, `users.csv`, and the universe CSVs are runtime state rewritten by the app, not
-static config - see the `.csproj` comment on why `App_Data\**` is bundled into every publish output
-in the first place. A container's own filesystem does **not** survive a redeploy (a new image means a
-new container, means a fresh filesystem), so without a persistent mount every deploy silently wipes
-your trigger rules.
+`pnl-alerts.csv`, `users.csv`, the universe CSVs, and a few more (nine files total - see below) are
+runtime state rewritten by the app, not static config - see the `.csproj` comment on why
+`App_Data\**` is bundled into every publish output in the first place. A container's own filesystem
+does **not** survive a redeploy (a new image means a new container, means a fresh filesystem), so
+without a persistent mount every deploy silently wipes your trigger rules.
 
 In Dokploy: add a **Volume** mount on the Application (its Advanced/Volumes tab) - a host path or
-Dokploy-managed volume mounted at, say, `/data`, then set the `Storage:*CsvPath` environment
-variables to absolute paths under it:
+Dokploy-managed volume mounted at, say, `/data`, then set every one of these nine `Storage:*Path`
+environment variables to an absolute path under it (all nine are already in the `.env.*.example`
+files from §3 - `Storage__DhanScripMasterCachePath` only matters for the two Dhan instances, harmless
+to set on pradeep-2 too if you'd rather keep all three identical):
 
 ```
 Storage__TriggersCsvPath=/data/triggers.csv
 Storage__ExitTriggersCsvPath=/data/exit_triggers.csv
 Storage__PnlAlertsCsvPath=/data/pnl-alerts.csv
-Storage__UsersCsvPath=/data/users.csv
+Storage__FuturesCsvPath=/data/futures_instruments.csv
+Storage__DhanScripMasterCachePath=/data/dhan_scrip_master_cache.csv
+Storage__BrokerPlatformOverridePath=/data/broker-platform-override.txt
 Storage__UniverseCsvPath=/data/universe_futures.csv
 Storage__McxUniverseCsvPath=/data/universe_mcx.csv
+Storage__UsersCsvPath=/data/users.csv
 ```
 
 This is the same fix `DEPLOYMENT.md` §4 does with an Azure Files share and `PLESK_DEPLOYMENT.md`
