@@ -59,10 +59,19 @@ public sealed class EngineOptions
     /// rejection, as before this option existed.</summary>
     public bool RetryUnfilledLegOnPartialFill { get; set; } = true;
 
-    /// <summary>How much wider than the rule's own SlippagePercent the one-time retry above is
-    /// allowed to price through - e.g. 3 means a rule fired with 0.10% slippage retries its
-    /// rejected leg at 0.30%. Only used when RetryUnfilledLegOnPartialFill is true.</summary>
+    /// <summary>How much wider than the rule's own SlippagePercent every retry above is allowed
+    /// to price through - e.g. 3 means a rule fired with 0.10% slippage retries its rejected leg
+    /// at 0.30%. The SAME multiplier is reused for every attempt (see RetryUnfilledLegMaxAttempts)
+    /// rather than widening further each round - only the reference price is refreshed each
+    /// attempt, not the band. Only used when RetryUnfilledLegOnPartialFill is true.</summary>
     public decimal RetryUnfilledLegSlippageMultiplier { get; set; } = 3m;
+
+    /// <summary>How many times OrderDispatchHostedService.RetryUnfilledLegsAsync re-attempts a
+    /// still-unfilled leg of a genuine partial fill, each at RetryUnfilledLegSlippageMultiplier's
+    /// wider slippage band and each re-priced off the latest market price, before giving up on
+    /// that leg and falling back to square-off. Only used when RetryUnfilledLegOnPartialFill is
+    /// true.</summary>
+    public int RetryUnfilledLegMaxAttempts { get; set; } = 2;
 
     /// <summary>Cap on consecutive fires of the same rule that fill nothing at all (blocked on
     /// margin, or every leg rejected/skipped - see OrderDispatchHostedService.
