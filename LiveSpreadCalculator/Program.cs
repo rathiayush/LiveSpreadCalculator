@@ -393,7 +393,7 @@ if (spreadHistoryWriter)
     catch (Exception ex)
     {
         app.Services.GetRequiredService<ILogger<Program>>()
-            .LogError(ex, "Spread history store failed to initialize - hourly capture and the history chart will be unavailable until the connection string / SQL Server is fixed.");
+            .LogError(ex, "Spread history store failed to initialize - hourly capture and the history chart will be unavailable until the connection string / PostgreSQL server is fixed.");
     }
 }
 
