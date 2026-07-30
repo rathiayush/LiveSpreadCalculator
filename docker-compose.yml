@@ -45,18 +45,47 @@ services:
       # Fill these in (or pass via `docker compose --env-file`, a .env file next to this
       # compose file, or your platform's secrets manager) - never commit real values. Each of the
       # three deployed instances uses ITS OWN broker account/key - see the three .env.*.example
-      # files - so don't reuse one instance's values for another, even locally.
-      Kite__ApiKey: ${KITE_API_KEY:-}
-      Kite__ApiSecret: ${KITE_API_SECRET:-}
-      Kite__AccessToken: ${KITE_ACCESS_TOKEN:-}
+      # files - so don't reuse one instance's values for another, even locally. Named to match the
+      # container-facing key exactly, same reasoning as Dhan below.
+      Kite__ApiKey: ${Kite__ApiKey:-}
+      Kite__ApiSecret: ${Kite__ApiSecret:-}
+      Kite__AccessToken: ${Kite__AccessToken:-}
+      # Same "fill in via .env, never commit" treatment as Kite above - for whichever instance uses
+      # Dhan instead (Production/pradeep-1 - see the .env.*.example files for which fields each
+      # instance's AuthMode actually needs; the rest are simply blank and unused). Named to match
+      # the container-facing key exactly (Compose interpolation handles the double underscore/mixed
+      # case fine) - deliberately, so the SAME .env.*.example file works unmodified as either a
+      # local `docker compose --env-file` or a direct paste into Dokploy's Environment tab, which
+      # needs these exact ASP.NET Core Section__Key names, not a separate SCREAMING_SNAKE_CASE set.
+      Dhan__ClientId: ${Dhan__ClientId:-}
+      Dhan__AccessToken: ${Dhan__AccessToken:-}
+      Dhan__Pin: ${Dhan__Pin:-}
+      Dhan__TotpSecret: ${Dhan__TotpSecret:-}
+      Dhan__AppId: ${Dhan__AppId:-}
+      Dhan__AppSecret: ${Dhan__AppSecret:-}
       # This container's own public URL (there's no separate web/proxy tier to point at instead -
       # see the comment above) - where Kite redirects the browser after login and what CORS allows.
-      Dashboard__BaseUrl: ${DASHBOARD_BASE_URL:-http://localhost:8080}
+      Dashboard__BaseUrl: ${Dashboard__BaseUrl:-http://localhost:8080}
+      # Signs auth tokens / encrypts App_Data/users.csv - see the WARNING in
+      # LINUX_VPS_DEPLOYMENT.md §5 about the shared "CHANGE_ME_dev_only" placeholders currently
+      # committed in appsettings.*.json. Blank here just falls back to those placeholders (fine for
+      # a throwaway local run, NOT fine for anything you'd trust with real logins).
+      Jwt__Key: ${Jwt__Key:-}
+      Security__PasswordKey: ${Security__PasswordKey:-}
+      # Optional order/PNL Telegram alerts - see Telegram:Enabled in appsettings.*.json. Blank
+      # means no notifications sent, not a startup failure.
+      Telegram__BotToken: ${Telegram__BotToken:-}
+      Telegram__ChatId: ${Telegram__ChatId:-}
       # Overrides the placeholder in appsettings.json with the real db service below. "db" only
       # resolves on this compose network - see EfSpreadHistoryStore / SpreadHistoryDbContext. All
       # three instances can point at this same Postgres - only the writer instance
       # (Engine:SpreadHistoryWriter=true, currently pradeep-2) actually writes to it.
       Storage__SpreadHistoryConnectionString: "Host=db;Port=5432;Database=${POSTGRES_DB:-spreadtrader_history};Username=${POSTGRES_USER:-spreadtrader};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env - see README}"
+      # Storage:*CsvPath (App_Data persistence) deliberately NOT overridden here, unlike on Dokploy
+      # (see .env.*.example and LINUX_VPS_DEPLOYMENT.md §6) - there's no /data volume declared in
+      # this compose file, so pointing these at /data locally would just fail to write. A local run
+      # uses the image's baked-in App_Data/*.csv defaults instead, which is fine for a throwaway
+      # test (state resets on `docker compose down`, same as it always did).
     depends_on:
       db:
         condition: service_healthy
