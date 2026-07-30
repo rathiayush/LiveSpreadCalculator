@@ -69,4 +69,10 @@ ENV ASPNETCORE_URLS=http://+:8080
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/healthz || exit 1
 
-ENTRYPOINT ["dotnet", "LiveSpreadCalculator.dll"]
+# Root only for the entrypoint script's own startup step (fixing ownership of a mounted volume -
+# see docker-entrypoint.sh) - it drops to the image's normal non-root user itself before ever
+# executing application code, so the app still never runs as root.
+USER root
+COPY --chmod=755 LiveSpreadCalculator/docker-entrypoint.sh /docker-entrypoint.sh
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
