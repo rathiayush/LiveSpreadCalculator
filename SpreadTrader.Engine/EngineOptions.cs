@@ -64,6 +64,17 @@ public sealed class EngineOptions
     /// rejected leg at 0.30%. Only used when RetryUnfilledLegOnPartialFill is true.</summary>
     public decimal RetryUnfilledLegSlippageMultiplier { get; set; } = 3m;
 
+    /// <summary>Cap on consecutive fires of the same rule that fill nothing at all (blocked on
+    /// margin, or every leg rejected/skipped - see OrderDispatchHostedService.
+    /// RestoreRuleIfNothingFilled) before the rule is auto-disarmed instead of being given its
+    /// shot back again. Without this, a condition that can never actually fill - chronic
+    /// insufficient margin, a frozen/delisted instrument, a persistently rejected order - would
+    /// re-arm and re-fire forever every time the spread re-crosses the threshold. 5 consecutive
+    /// misses and it stops, waiting for a human to look at it and re-enable manually (see
+    /// TriggerRuleControllerBase.Enable). TriggerRule.UnfilledAttempts tracks the running count
+    /// and resets to 0 the moment any fire actually fills something.</summary>
+    public int MaxUnfilledDispatchAttempts { get; set; } = 5;
+
     /// <summary>Kite Connect's API rejects plain MARKET orders outright with "Market orders
     /// without market protection are not allowed via API" for F&amp;O - there's no
     /// market_protection flag in the order-placement API itself, so any leg configured as

@@ -195,13 +195,18 @@ public abstract class TriggerRuleControllerBase : ControllerBase
     }
 
     /// <summary>Manually re-enables a rule - including one that disabled itself after using up
-    /// every bounded shot (FireCount reached MaxFireCount - see TriggerRule.MaxFireCount) or after
-    /// its single OneShot fire. FireCount is reset to 0 here (not just Enabled/IsArmed) - without
-    /// this, a used-up bounded-shot rule would come back Enabled=true but still sitting at
-    /// FireCount==MaxFireCount, so SpreadCalculationHostedService.EvaluateTriggersAsync's bounded-
-    /// shots guard (`if (rule.FireCount >= rule.MaxFireCount) continue;`) would silently skip it
-    /// forever - it would look enabled in the UI but never actually fire again. A plain OneShot
-    /// rule's FireCount is always 0 already, so this is a no-op for that case.</summary>
+    /// every bounded shot (FireCount reached MaxFireCount - see TriggerRule.MaxFireCount), after
+    /// its single OneShot fire, or after OrderDispatchHostedService.RestoreRuleIfNothingFilled
+    /// auto-disarmed it for hitting EngineOptions.MaxUnfilledDispatchAttempts consecutive
+    /// unfilled fires. FireCount and UnfilledAttempts are both reset to 0 here (not just
+    /// Enabled/IsArmed) - without that, a used-up bounded-shot rule would come back Enabled=true
+    /// but still sitting at FireCount==MaxFireCount, so SpreadCalculationHostedService.
+    /// EvaluateTriggersAsync's bounded-shots guard (`if (rule.FireCount >= rule.MaxFireCount)
+    /// continue;`) would silently skip it forever - it would look enabled in the UI but never
+    /// actually fire again. Likewise, leaving UnfilledAttempts at its old value would let the very
+    /// next unfilled fire immediately re-trip the auto-disarm instead of giving the rule a fresh
+    /// run of attempts. A plain OneShot rule's FireCount/UnfilledAttempts are usually already 0,
+    /// so this is a no-op for that case.</summary>
     [HttpPost("{id}/enable")]
     public ActionResult<TriggerRule> Enable(string id)
     {
@@ -210,6 +215,7 @@ public abstract class TriggerRuleControllerBase : ControllerBase
         rule.Enabled = true;
         rule.IsArmed = true;
         rule.FireCount = 0;
+        rule.UnfilledAttempts = 0;
         if (!TryUpsert(rule, out var problem)) return problem!;
         return Ok(rule);
     }

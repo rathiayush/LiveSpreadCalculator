@@ -234,7 +234,16 @@ public sealed class OrderDispatchHostedService : BackgroundService
             legResults.AddRange(await SquareOffPartialFillAsync(rule, legPlans, placements, stoppingToken));
 
         if (!anyLegFilled)
+        {
             RestoreRuleIfNothingFilled(ruleStore, rule.Id); // fully rejected/unfilled - don't burn a shot on this
+        }
+        else if (rule.UnfilledAttempts > 0)
+        {
+            // A genuine fill breaks the consecutive-miss streak that counts toward
+            // EngineOptions.MaxUnfilledDispatchAttempts - see RestoreRuleIfNothingFilled.
+            rule.UnfilledAttempts = 0;
+            ruleStore.Upsert(rule);
+        }
 
         await _executionSink.PublishAsync(
             new BasketExecutionEvent(triggerEvent.FireId, rule.Id, spread.Id, spread.Underlying, orderKind, legResults, MarginBlocked: false, BlockedReason: null, DateTimeOffset.UtcNow, SpreadValueAtTrigger: triggerEvent.SpreadValueAtTrigger),
@@ -253,24 +262,43 @@ public sealed class OrderDispatchHostedService : BackgroundService
     /// anything. Deliberately NOT called for a genuine partial fill that gets auto-squared-off -
     /// see the anyLegFilled comment in DispatchAsync. LastFiredAt is deliberately left untouched
     /// so EngineOptions.MinFireIntervalPerRuleMs still throttles an immediate retry (e.g. against
-    /// a persistently-insufficient-margin condition that won't resolve instantly).</summary>
+    /// a persistently-insufficient-margin condition that won't resolve instantly).
+    ///
+    /// This is also the only place TriggerRule.UnfilledAttempts is incremented. Re-arming this
+    /// rule unconditionally forever would mean a condition that can NEVER fill (chronic
+    /// insufficient margin, a frozen/delisted instrument, a persistently rejected order) re-fires
+    /// every single time the spread re-crosses the threshold, indefinitely. Once UnfilledAttempts
+    /// reaches EngineOptions.MaxUnfilledDispatchAttempts, this disarms AND disables the rule
+    /// instead of giving it another shot - it stays that way until a human re-enables it (see
+    /// TriggerRuleControllerBase.Enable, which also resets UnfilledAttempts back to 0). A fill on
+    /// any later attempt resets the counter too - see the anyLegFilled branch in DispatchAsync -
+    /// so an occasional reject on an otherwise-healthy rule never counts toward the cap.</summary>
     private void RestoreRuleIfNothingFilled(ITriggerRuleStore ruleStore, string ruleId)
     {
         var rule = ruleStore.Get(ruleId);
         if (rule is null) return; // deleted since it fired - nothing to restore
 
-        var changed = false;
-        if (!rule.IsArmed) { rule.IsArmed = true; changed = true; }
-        if (!rule.Enabled) { rule.Enabled = true; changed = true; }
-        if (!rule.OneShot && rule.MaxFireCount > 0 && rule.FireCount > 0) { rule.FireCount--; changed = true; }
+        rule.UnfilledAttempts++;
 
-        if (changed)
+        if (rule.UnfilledAttempts >= _options.MaxUnfilledDispatchAttempts)
         {
+            rule.IsArmed = false;
+            rule.Enabled = false;
             ruleStore.Upsert(rule);
-            _logger.LogInformation(
-                "Rule {RuleId}: nothing filled on this fire (blocked or fully rejected) - re-armed/re-enabled so it can try again.",
-                ruleId);
+            _logger.LogError(
+                "Rule {RuleId}: {Attempts} consecutive fire(s) with nothing filled (blocked or fully rejected) - disarming instead of retrying forever. Re-enable it manually once the underlying issue (margin, instrument status, etc.) is resolved.",
+                ruleId, rule.UnfilledAttempts);
+            return;
         }
+
+        if (!rule.IsArmed) rule.IsArmed = true;
+        if (!rule.Enabled) rule.Enabled = true;
+        if (!rule.OneShot && rule.MaxFireCount > 0 && rule.FireCount > 0) rule.FireCount--;
+        ruleStore.Upsert(rule);
+
+        _logger.LogInformation(
+            "Rule {RuleId}: nothing filled on this fire (blocked or fully rejected, {Attempts}/{Max} consecutive) - re-armed/re-enabled so it can try again.",
+            ruleId, rule.UnfilledAttempts, _options.MaxUnfilledDispatchAttempts);
     }
 
     /// <summary>Places the basket hedge-first: all BUY (long/hedge) legs go in first and only once
