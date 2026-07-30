@@ -1,5 +1,27 @@
 services:
+  # One container for everything user-facing - REST API, SignalR hub, AND the React dashboard.
+  # LiveSpreadCalculator/Dockerfile builds the dashboard and bakes its static output into this
+  # image's own wwwroot (see that Dockerfile's comments), and Program.cs serves it from the same
+  # origin via UseStaticFiles/MapFallbackToFile - so there is no separate "web" container in this
+  # setup, no nginx, no reverse proxy hop between the UI and the API it talks to. A previous
+  # revision of this file also ran a second nginx-based "web" service duplicating that same UI on
+  # its own port; that's still a valid topology (see SpreadTrader.Dashboard/spreadtrader.dashboard.client/Dockerfile,
+  # still used by DEPLOYMENT.md's Azure sidecar setup, which has its own reasons for splitting the
+  # two), just not the one this compose file runs.
   api:
+    # Overridden by CI (API_IMAGE=ghcr.io/<owner>/<repo>/api) so `docker compose build` +
+    # `docker compose push` tags and pushes straight to GHCR - see the deploy-dokploy-*.yml
+    # workflows. Local `docker compose up --build` is unaffected (falls back to a local-only tag,
+    # never pushed anywhere).
+    #
+    # IMPORTANT: `docker compose build` never reads the environment: block below - build args and
+    # runtime env vars are separate things in Compose. That's why ONE Dockerfile/ONE image serves
+    # all three deployed instances (Production/pradeep-1/pradeep-2 - see LINUX_VPS_DEPLOYMENT.md):
+    # the build is byte-for-byte identical no matter which instance you're building for, and only
+    # the *tag* changes per workflow. Which instance a given container actually behaves as is
+    # decided entirely at container-start time, by ASPNETCORE_ENVIRONMENT below (Dokploy sets this
+    # per Application in production; locally it's whatever ASPNETCORE_ENVIRONMENT resolves to here).
+    image: ${API_IMAGE:-spreadtrader-api:local}
     build:
       context: .
       dockerfile: LiveSpreadCalculator/Dockerfile
@@ -8,28 +30,98 @@ services:
     # any crash instead of restarting it.
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # The one port for everything - UI, API, and the SignalR hub all live here. Parameterized so
+      # two instances' compose stacks can run side by side locally without a port clash - e.g.
+      # API_PORT=8090 for a second instance. See .env.pradeep-1.example / .env.pradeep-2.example.
+      - "${API_PORT:-8080}:8080"
     environment:
-      ASPNETCORE_ENVIRONMENT: Production
+      # No hardcoded "Production" here on purpose - see the IMPORTANT note above. Defaults to
+      # Production so a bare `docker compose up` (no .env file) behaves the same as before this was
+      # parameterized; pass ASPNETCORE_ENVIRONMENT=pradeep-1 (directly, or via
+      # `docker compose --env-file .env.pradeep-1 up --build`) to run this stack AS that instance
+      # instead - same appsettings.pradeep-1.json selection Dokploy does in production.
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       ASPNETCORE_URLS: http://+:8080
       # Fill these in (or pass via `docker compose --env-file`, a .env file next to this
-      # compose file, or your platform's secrets manager) - never commit real values.
-      Kite__ApiKey: ${KITE_API_KEY:-}
-      Kite__ApiSecret: ${KITE_API_SECRET:-}
-      Kite__AccessToken: ${KITE_ACCESS_TOKEN:-}
-      # Must match wherever the web container / reverse proxy is publicly reachable, so the
-      # Kite login callback redirects the browser back to the right place and CORS allows it.
-      Dashboard__BaseUrl: ${DASHBOARD_BASE_URL:-http://localhost:8081}
+      # compose file, or your platform's secrets manager) - never commit real values. Each of the
+      # three deployed instances uses ITS OWN broker account/key - see the three .env.*.example
+      # files - so don't reuse one instance's values for another, even locally. Named to match the
+      # container-facing key exactly, same reasoning as Dhan below.
+      Kite__ApiKey: ${Kite__ApiKey:-}
+      Kite__ApiSecret: ${Kite__ApiSecret:-}
+      Kite__AccessToken: ${Kite__AccessToken:-}
+      # Same "fill in via .env, never commit" treatment as Kite above - for whichever instance uses
+      # Dhan instead (Production/pradeep-1 - see the .env.*.example files for which fields each
+      # instance's AuthMode actually needs; the rest are simply blank and unused). Named to match
+      # the container-facing key exactly (Compose interpolation handles the double underscore/mixed
+      # case fine) - deliberately, so the SAME .env.*.example file works unmodified as either a
+      # local `docker compose --env-file` or a direct paste into Dokploy's Environment tab, which
+      # needs these exact ASP.NET Core Section__Key names, not a separate SCREAMING_SNAKE_CASE set.
+      Dhan__ClientId: ${Dhan__ClientId:-}
+      Dhan__AccessToken: ${Dhan__AccessToken:-}
+      Dhan__Pin: ${Dhan__Pin:-}
+      Dhan__TotpSecret: ${Dhan__TotpSecret:-}
+      Dhan__AppId: ${Dhan__AppId:-}
+      Dhan__AppSecret: ${Dhan__AppSecret:-}
+      # This container's own public URL (there's no separate web/proxy tier to point at instead -
+      # see the comment above) - where Kite redirects the browser after login and what CORS allows.
+      Dashboard__BaseUrl: ${Dashboard__BaseUrl:-http://localhost:8080}
+      # Signs auth tokens / encrypts App_Data/users.csv - see the WARNING in
+      # LINUX_VPS_DEPLOYMENT.md §5 about the shared "CHANGE_ME_dev_only" placeholders currently
+      # committed in appsettings.*.json. Blank here just falls back to those placeholders (fine for
+      # a throwaway local run, NOT fine for anything you'd trust with real logins).
+      Jwt__Key: ${Jwt__Key:-}
+      Security__PasswordKey: ${Security__PasswordKey:-}
+      # Optional order/PNL Telegram alerts - see Telegram:Enabled in appsettings.*.json. Blank
+      # means no notifications sent, not a startup failure.
+      Telegram__BotToken: ${Telegram__BotToken:-}
+      Telegram__ChatId: ${Telegram__ChatId:-}
+      # Overrides the placeholder in appsettings.json with the real db service below. "db" only
+      # resolves on this compose network - see EfSpreadHistoryStore / SpreadHistoryDbContext. All
+      # three instances can point at this same Postgres - only the writer instance
+      # (Engine:SpreadHistoryWriter=true, currently pradeep-2) actually writes to it.
+      Storage__SpreadHistoryConnectionString: "Host=db;Port=5432;Database=${POSTGRES_DB:-spreadtrader_history};Username=${POSTGRES_USER:-spreadtrader};Password=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env - see README}"
+      # Storage:*CsvPath (App_Data persistence) deliberately NOT overridden here, unlike on Dokploy
+      # (see .env.*.example and LINUX_VPS_DEPLOYMENT.md §6) - there's no /data volume declared in
+      # this compose file, so pointing these at /data locally would just fail to write. A local run
+      # uses the image's baked-in App_Data/*.csv defaults instead, which is fine for a throwaway
+      # test (state resets on `docker compose down`, same as it always did).
+    depends_on:
+      db:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
       interval: 30s
       timeout: 3s
       retries: 3
 
-  web:
-    build:
-      context: SpreadTrader.Dashboard/spreadtrader.dashboard.client
-    ports:
-      - "8081:80"
-    depends_on:
-      - api
+  # Backs the hourly spread-history table (see EfSpreadHistoryStore). Only the writer instance
+  # (Engine:SpreadHistoryWriter=true - pradeep-2, per appsettings.pradeep-2.json) needs this
+  # reachable for writes; reader instances (Production, pradeep-1) only need it for
+  # GET /api/spreads/{id}/history. Whether THIS compose stack's api container writes or just reads
+  # depends entirely on which ASPNETCORE_ENVIRONMENT it's running as - see api's environment: block
+  # above - not on anything in this db service.
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-spreadtrader_history}
+      POSTGRES_USER: ${POSTGRES_USER:-spreadtrader}
+      # No default on purpose - a real password must come from your .env file / platform secrets,
+      # never be committed here. `docker compose up` fails fast with a clear message if it's unset,
+      # rather than silently starting Postgres with a guessable password.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env - see README}
+    volumes:
+      # Named volume, NOT a bind mount - survives `docker compose down` (but not `down -v`), so
+      # captured spread history survives a redeploy. This is Postgres' own data directory only;
+      # the CSV state (App_Data - trigger rules, users, universe) is separate and needs its own
+      # persistence - see LINUX_VPS_DEPLOYMENT.md.
+      - spreadtrader-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-spreadtrader} -d ${POSTGRES_DB:-spreadtrader_history}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  spreadtrader-db-data:

@@ -81,13 +81,14 @@ var mcxUniverseCsvPath = Path.Combine(builder.Environment.ContentRootPath,
 var usersCsvPath = Path.Combine(builder.Environment.ContentRootPath,
     builder.Configuration["Storage:UsersCsvPath"] ?? "App_Data/users.csv");
 
-// Hourly spread history lives in a real SQL Server / LocalDB database (unlike the CSV stores above),
-// so the "Live Spread" popup can chart datetime-vs-spread and a leg's rows can be flushed on expiry -
-// see SqlSpreadHistoryStore / SpreadHistoryCaptureHostedService. Default targets LocalDB; override
-// Storage:SpreadHistoryConnectionString (or Storage__SpreadHistoryConnectionString env var) with a
-// real SQL Server connection string on Linux/Docker, where LocalDB isn't available.
+// Hourly spread history lives in a real PostgreSQL database (unlike the CSV stores above), so the
+// "Live Spread" popup can chart datetime-vs-spread and a leg's rows can be flushed on expiry - see
+// EfSpreadHistoryStore / SpreadHistoryCaptureHostedService. Default targets a Postgres instance on
+// localhost with the conventional default superuser (matches `docker compose up db` locally);
+// override Storage:SpreadHistoryConnectionString (or Storage__SpreadHistoryConnectionString env var)
+// for every real deployment - see docker-compose.yml for the container wiring.
 var spreadHistoryConnectionString = builder.Configuration["Storage:SpreadHistoryConnectionString"]
-    ?? @"Server=(localdb)\MSSQLLocalDB;Database=SpreadTraderHistory;Trusted_Connection=True;TrustServerCertificate=True;";
+    ?? "Host=localhost;Database=spreadtrader_history;Username=postgres;Password=postgres";
 // Exactly one deployed instance (pradeep-2) is the WRITER of the shared history DB: only it captures
 // snapshots, creates the schema, and runs purges. Every other instance leaves Engine:SpreadHistoryWriter
 // false and only READS the history (to serve the chart), so multiple instances on one database never
@@ -105,13 +106,13 @@ builder.Services.AddSingleton<IPnlAlertStore>(sp =>
 builder.Services.AddSingleton<ISpreadDefinitionStore, InMemorySpreadDefinitionStore>();
 builder.Services.AddSingleton<ISpreadSnapshotCache, InMemorySpreadSnapshotCache>();
 builder.Services.AddSingleton<ISpreadRankingStore, InMemorySpreadRankingStore>();
-// Durable hourly spread history (EF Core over SQL Server / LocalDB) - see EfSpreadHistoryStore.
+// Durable hourly spread history (EF Core over PostgreSQL / Npgsql) - see EfSpreadHistoryStore.
 // A pooled DbContext factory is used because the store (and the capture hosted service that drives
 // it) are singletons, and a DbContext must not be shared across threads - the store creates a
 // short-lived context per operation instead. Schema is created on startup below
 // (app.Services...InitializeAsync): the database if missing, then the table if missing.
 builder.Services.AddDbContextFactory<SpreadHistoryDbContext>(options =>
-    options.UseSqlServer(spreadHistoryConnectionString));
+    options.UseNpgsql(spreadHistoryConnectionString));
 builder.Services.AddSingleton<ISpreadHistoryStore>(sp =>
     new EfSpreadHistoryStore(
         sp.GetRequiredService<IDbContextFactory<SpreadHistoryDbContext>>(),
@@ -361,6 +362,28 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// First-boot only: creates users.csv with one admin row if - and only if - the file doesn't exist
+// yet, so a brand-new deployment (a fresh App_Data volume, nothing committed/copied in) has SOME
+// way to log in at all - there is no self-registration endpoint (see AuthController). Both env vars
+// optional and read once; leave them unset on every deployment after the first boot rather than
+// removing them - BootstrapAdminIfMissing no-ops the instant the file exists, so there's no ongoing
+// risk in leaving a stale Bootstrap__AdminPassword configured.
+var bootstrapAdminEmail = builder.Configuration["Bootstrap:AdminEmail"];
+var bootstrapAdminPassword = builder.Configuration["Bootstrap:AdminPassword"];
+if (!string.IsNullOrWhiteSpace(bootstrapAdminEmail) && !string.IsNullOrWhiteSpace(bootstrapAdminPassword))
+    app.Services.GetRequiredService<CsvUserStore>().BootstrapAdminIfMissing(bootstrapAdminEmail, bootstrapAdminPassword);
+
+// Adds one more login on top of whatever's already in users.csv, without touching any existing
+// row - for a deployment where users.csv already exists (so BootstrapAdminIfMissing above is a
+// no-op) but there's no other reachable way to add a login: no self-registration endpoint (see
+// AuthController), and the hosting platform's own file-upload API has proven unreliable here.
+// Safe to leave configured indefinitely - see CsvUserStore.AddUserIfMissing, which no-ops once
+// this email is present regardless of whether its password has since changed.
+var addUserEmail = builder.Configuration["Bootstrap:AddUserEmail"];
+var addUserPassword = builder.Configuration["Bootstrap:AddUserPassword"];
+if (!string.IsNullOrWhiteSpace(addUserEmail) && !string.IsNullOrWhiteSpace(addUserPassword))
+    app.Services.GetRequiredService<CsvUserStore>().AddUserIfMissing(addUserEmail, addUserPassword);
+
 // One-time-per-file upgrade of App_Data/users.csv: any legacy plaintext password rows are rewritten
 // as encrypted blobs on startup. No-op once every row is already encrypted, so ordinary restarts
 // don't touch the file (and don't disturb live sessions). See CsvUserStore.MigrateToEncrypted.
@@ -381,7 +404,7 @@ if (spreadHistoryWriter)
     catch (Exception ex)
     {
         app.Services.GetRequiredService<ILogger<Program>>()
-            .LogError(ex, "Spread history store failed to initialize - hourly capture and the history chart will be unavailable until the connection string / SQL Server is fixed.");
+            .LogError(ex, "Spread history store failed to initialize - hourly capture and the history chart will be unavailable until the connection string / PostgreSQL server is fixed.");
     }
 }
 

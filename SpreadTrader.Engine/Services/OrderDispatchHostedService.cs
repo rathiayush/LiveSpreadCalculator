@@ -198,11 +198,14 @@ public sealed class OrderDispatchHostedService : BackgroundService
             // risk placing two live orders for the same leg at once.
             await CancelStrayOpenOrdersAsync(rule.Id, legs, placements, stoppingToken);
 
-            // One more shot at whichever leg(s) came back genuinely rejected/cancelled (NOT the
-            // hedge's deliberately-skipped partner - see RetryUnfilledLegsAsync) at a wider
-            // slippage band, before falling back to unwinding whatever else already filled.
-            // Mutates legs/placements in place, so legResults below and the square-off after it
-            // both see the retried outcome rather than the original rejection.
+            // Up to EngineOptions.RetryUnfilledLegMaxAttempts more shots at whichever leg(s) still
+            // have quantity outstanding - fully rejected/cancelled OR only partially filled (NOT
+            // the hedge's deliberately-skipped partner - see RetryUnfilledLegsAsync), each
+            // re-priced fresh off the current market, for just the outstanding quantity, at the
+            // same wider slippage band, before giving up on the remainder and falling back to
+            // unwinding whatever else already filled. Mutates legs/placements in place, so
+            // legResults below and the square-off after it both see the final cumulative outcome
+            // rather than the original rejection.
             if (_options.RetryUnfilledLegOnPartialFill)
                 await RetryUnfilledLegsAsync(rule, legPlans, legs, placements, stoppingToken);
         }
@@ -234,7 +237,16 @@ public sealed class OrderDispatchHostedService : BackgroundService
             legResults.AddRange(await SquareOffPartialFillAsync(rule, legPlans, placements, stoppingToken));
 
         if (!anyLegFilled)
+        {
             RestoreRuleIfNothingFilled(ruleStore, rule.Id); // fully rejected/unfilled - don't burn a shot on this
+        }
+        else if (rule.UnfilledAttempts > 0)
+        {
+            // A genuine fill breaks the consecutive-miss streak that counts toward
+            // EngineOptions.MaxUnfilledDispatchAttempts - see RestoreRuleIfNothingFilled.
+            rule.UnfilledAttempts = 0;
+            ruleStore.Upsert(rule);
+        }
 
         await _executionSink.PublishAsync(
             new BasketExecutionEvent(triggerEvent.FireId, rule.Id, spread.Id, spread.Underlying, orderKind, legResults, MarginBlocked: false, BlockedReason: null, DateTimeOffset.UtcNow, SpreadValueAtTrigger: triggerEvent.SpreadValueAtTrigger),
@@ -253,24 +265,43 @@ public sealed class OrderDispatchHostedService : BackgroundService
     /// anything. Deliberately NOT called for a genuine partial fill that gets auto-squared-off -
     /// see the anyLegFilled comment in DispatchAsync. LastFiredAt is deliberately left untouched
     /// so EngineOptions.MinFireIntervalPerRuleMs still throttles an immediate retry (e.g. against
-    /// a persistently-insufficient-margin condition that won't resolve instantly).</summary>
+    /// a persistently-insufficient-margin condition that won't resolve instantly).
+    ///
+    /// This is also the only place TriggerRule.UnfilledAttempts is incremented. Re-arming this
+    /// rule unconditionally forever would mean a condition that can NEVER fill (chronic
+    /// insufficient margin, a frozen/delisted instrument, a persistently rejected order) re-fires
+    /// every single time the spread re-crosses the threshold, indefinitely. Once UnfilledAttempts
+    /// reaches EngineOptions.MaxUnfilledDispatchAttempts, this disarms AND disables the rule
+    /// instead of giving it another shot - it stays that way until a human re-enables it (see
+    /// TriggerRuleControllerBase.Enable, which also resets UnfilledAttempts back to 0). A fill on
+    /// any later attempt resets the counter too - see the anyLegFilled branch in DispatchAsync -
+    /// so an occasional reject on an otherwise-healthy rule never counts toward the cap.</summary>
     private void RestoreRuleIfNothingFilled(ITriggerRuleStore ruleStore, string ruleId)
     {
         var rule = ruleStore.Get(ruleId);
         if (rule is null) return; // deleted since it fired - nothing to restore
 
-        var changed = false;
-        if (!rule.IsArmed) { rule.IsArmed = true; changed = true; }
-        if (!rule.Enabled) { rule.Enabled = true; changed = true; }
-        if (!rule.OneShot && rule.MaxFireCount > 0 && rule.FireCount > 0) { rule.FireCount--; changed = true; }
+        rule.UnfilledAttempts++;
 
-        if (changed)
+        if (rule.UnfilledAttempts >= _options.MaxUnfilledDispatchAttempts)
         {
+            rule.IsArmed = false;
+            rule.Enabled = false;
             ruleStore.Upsert(rule);
-            _logger.LogInformation(
-                "Rule {RuleId}: nothing filled on this fire (blocked or fully rejected) - re-armed/re-enabled so it can try again.",
-                ruleId);
+            _logger.LogError(
+                "Rule {RuleId}: {Attempts} consecutive fire(s) with nothing filled (blocked or fully rejected) - disarming instead of retrying forever. Re-enable it manually once the underlying issue (margin, instrument status, etc.) is resolved.",
+                ruleId, rule.UnfilledAttempts);
+            return;
         }
+
+        if (!rule.IsArmed) rule.IsArmed = true;
+        if (!rule.Enabled) rule.Enabled = true;
+        if (!rule.OneShot && rule.MaxFireCount > 0 && rule.FireCount > 0) rule.FireCount--;
+        ruleStore.Upsert(rule);
+
+        _logger.LogInformation(
+            "Rule {RuleId}: nothing filled on this fire (blocked or fully rejected, {Attempts}/{Max} consecutive) - re-armed/re-enabled so it can try again.",
+            ruleId, rule.UnfilledAttempts, _options.MaxUnfilledDispatchAttempts);
     }
 
     /// <summary>Places the basket hedge-first: all BUY (long/hedge) legs go in first and only once
@@ -447,69 +478,166 @@ public sealed class OrderDispatchHostedService : BackgroundService
         }
     }
 
-    /// <summary>One more attempt, at a wider slippage band, for whichever leg(s) of a genuinely
-    /// partial fill came back rejected/cancelled - tried BEFORE SquareOffPartialFillAsync
-    /// unwinds whatever else already filled, since a fill (even at worse pricing) keeps the
-    /// intended hedged spread intact, which is strictly better than flattening a leg that DID
-    /// fill and ending the attempt with no position at all. Only fires for a genuine partial
-    /// fill (at least one leg already filled - nothing to protect otherwise) and only retries
-    /// legs that are actually safe to retry:
+    /// <summary>Up to EngineOptions.RetryUnfilledLegMaxAttempts attempts, each at the same wider
+    /// slippage band and each re-priced fresh off the latest market price, for whichever leg(s)
+    /// of a genuinely partial fill still have quantity outstanding - either a leg that was fully
+    /// rejected/cancelled (0 filled) OR one that itself only PARTIALLY filled (e.g. 1 of 2 lots,
+    /// the IOC protection filled what it could and cancelled the rest) - tried BEFORE
+    /// SquareOffPartialFillAsync unwinds whatever else already filled, since a fill (even at
+    /// worse pricing) keeps the intended hedged spread intact, which is strictly better than
+    /// flattening a leg that DID fill and ending the attempt with no position at all. Only fires
+    /// for a genuine partial fill (at least one leg already has some fill - nothing to protect
+    /// otherwise) and only retries legs that are actually safe to retry:
     ///  - NOT "SKIPPED" (the hedge's sell/buy partner deliberately never sent because the hedge
     ///    leg itself didn't fill - see PlaceHedgeFirstAsync). Retrying that would defeat the
     ///    entire point of hedge-first sequencing: it would risk placing a naked short/long
     ///    exactly like PlaceHedgeFirstAsync exists to avoid.
-    ///  - NOT "OPEN" (CancelStrayOpenOrdersAsync, which runs immediately before this, couldn't
-    ///    confirm the original order was actually cancelled) - retrying that risks the original
-    ///    order ALSO filling later, double-executing this leg.
-    /// Mutates <paramref name="legs"/>/<paramref name="placements"/> in place at the retried
-    /// index/indices so every caller downstream (legResults, SquareOffPartialFillAsync) sees the
-    /// retry's outcome instead of the original rejection.</summary>
+    ///  - NOT "OPEN" - either the original order (CancelStrayOpenOrdersAsync, which runs
+    ///    immediately before this, couldn't confirm it was actually cancelled) or a PRIOR retry
+    ///    attempt within this same call that itself came back unconfirmed. Retrying either risks
+    ///    that still-maybe-live order ALSO filling later, double-executing this leg - so once a
+    ///    leg lands on "OPEN" it's left alone for the rest of this call rather than retried again.
+    /// Each retry only asks for the OUTSTANDING quantity (requested minus however much has
+    /// already filled across the original attempt and any earlier retries this call), not the
+    /// full original quantity again - a leg that already got 1 of 2 lots is retried for the
+    /// remaining 1, not re-sent for 2. Fills accumulate: FilledQuantity and AverageFillPrice on
+    /// the leg's OrderResult become the running total/weighted-average across every attempt, so a
+    /// leg that fills 1 lot on the original attempt and 1 more on retry #1 reports FilledQuantity
+    /// = 2, not 1. Every attempt reuses the SAME wider slippage (rule.SlippagePercent *
+    /// RetryUnfilledLegSlippageMultiplier, e.g. 3x) rather than widening further each round - only
+    /// the reference price and the outstanding quantity are refreshed each attempt, not the band
+    /// itself. After RetryUnfilledLegMaxAttempts attempts a leg still has quantity outstanding,
+    /// this gives up on the remainder and lets the caller's square-off fallback take over -
+    /// NOTE that fallback only unwinds a leg with literally zero total fill; it does not
+    /// currently detect/correct a case where retries end with the two legs at genuinely different
+    /// filled quantities (e.g. leg A ends at 2 lots, leg B at 1) - that residual quantity mismatch
+    /// is left as-is today. Mutates <paramref name="legs"/>/<paramref name="placements"/> in place
+    /// at the retried index/indices so every caller downstream (legResults,
+    /// SquareOffPartialFillAsync) sees the final cumulative outcome instead of the original
+    /// rejection.</summary>
     private async Task RetryUnfilledLegsAsync(TriggerRule rule, List<LegPlan> legPlans, List<OrderLegRequest> legs, OrderResult[] placements, CancellationToken cancellationToken)
     {
         var filledCount = 0;
-        var retryIndices = new List<int>();
+        var pending = new List<int>();
         for (var i = 0; i < placements.Length; i++)
         {
-            if (placements[i].Success && placements[i].FilledQuantity > 0) { filledCount++; continue; }
+            if (placements[i].FilledQuantity > 0) filledCount++;
+            if (placements[i].FilledQuantity >= legPlans[i].Request.Quantity) continue; // already fully filled - nothing outstanding
             if (string.Equals(placements[i].Status, "SKIPPED", StringComparison.OrdinalIgnoreCase)) continue;
             if (string.Equals(placements[i].Status, "OPEN", StringComparison.OrdinalIgnoreCase)) continue;
-            retryIndices.Add(i);
+            pending.Add(i);
         }
 
-        if (filledCount == 0 || retryIndices.Count == 0)
+        if (filledCount == 0 || pending.Count == 0)
             return; // nothing filled yet to protect, or nothing eligible to retry
 
         var widerSlippage = rule.SlippagePercent * _options.RetryUnfilledLegSlippageMultiplier;
+        var maxAttempts = Math.Max(1, _options.RetryUnfilledLegMaxAttempts);
 
-        foreach (var i in retryIndices)
+        for (var attempt = 1; attempt <= maxAttempts && pending.Count > 0; attempt++)
         {
-            var plan = legPlans[i];
-            _logger.LogWarning(
-                "Rule {RuleId}: {Symbol} {Side} did not fill at {OriginalSlippage}% slippage ({Status}) - retrying once at {WiderSlippage}% before falling back to square-off.",
-                rule.Id, plan.Request.TradingSymbol, plan.Request.TransactionType, rule.SlippagePercent, placements[i].Status, widerSlippage);
+            var nextRound = new List<int>();
 
-            // Re-priced fresh off whatever the tick store has right now (Protect reads it at
-            // call time) rather than reusing the original attempt's stale reference - the whole
-            // point of a wider band is to reach a price the market may have since moved to/past.
-            var retryLeg = _marketProtection.Protect(plan.Request, plan.InstrumentToken, plan.TickSize, $"Rule {rule.Id} retry", widerSlippage);
-            var retryResult = await _orderGateway.PlaceOrderAsync(retryLeg, cancellationToken);
-
-            legs[i] = retryLeg;
-            placements[i] = retryResult;
-
-            if (retryResult.Success)
+            foreach (var i in pending)
             {
-                _logger.LogInformation(
-                    "Rule {RuleId}: retry filled {Symbol} {Side} at {WiderSlippage}% slippage -> order {OrderId}",
-                    rule.Id, plan.Request.TradingSymbol, plan.Request.TransactionType, widerSlippage, retryResult.OrderId);
-            }
-            else
-            {
+                var plan = legPlans[i];
+                var already = placements[i];
+                var outstandingQty = plan.Request.Quantity - already.FilledQuantity;
+
                 _logger.LogWarning(
-                    "Rule {RuleId}: retry at {WiderSlippage}% still did not fill {Symbol} {Side} - {Error}. Falling back to square-off.",
-                    rule.Id, widerSlippage, plan.Request.TradingSymbol, plan.Request.TransactionType, retryResult.ErrorMessage);
+                    "Rule {RuleId}: {Symbol} {Side} has {Outstanding}/{Requested} lot(s) outstanding at {OriginalSlippage}% slippage ({Status}) - retry {Attempt}/{MaxAttempts} at {WiderSlippage}%.",
+                    rule.Id, plan.Request.TradingSymbol, plan.Request.TransactionType, outstandingQty, plan.Request.Quantity, rule.SlippagePercent, already.Status, attempt, maxAttempts, widerSlippage);
+
+                // Re-priced fresh off whatever the tick store has right now (Protect reads it at
+                // call time) rather than reusing a stale reference from the original attempt or an
+                // earlier retry - the whole point of a wider band is to reach a price the market
+                // may have since moved to/past. Only the OUTSTANDING quantity is requested, not
+                // the full original quantity again.
+                var outstandingRequest = WithQuantity(plan.Request, outstandingQty);
+                var retryLeg = _marketProtection.Protect(outstandingRequest, plan.InstrumentToken, plan.TickSize, $"Rule {rule.Id} retry {attempt}", widerSlippage);
+                var retryResult = await _orderGateway.PlaceOrderAsync(retryLeg, cancellationToken);
+
+                var combinedFilled = already.FilledQuantity + retryResult.FilledQuantity;
+                var combinedAvgPrice = CombineAverageFillPrice(already.FilledQuantity, already.AverageFillPrice, retryResult.FilledQuantity, retryResult.AverageFillPrice);
+
+                // Report the leg's ORIGINAL total requested quantity (not just this attempt's
+                // outstanding remainder) so legResults/the dashboard still show "requested 2,
+                // filled 1", not "requested 1, filled 1".
+                legs[i] = WithQuantity(retryLeg, plan.Request.Quantity);
+                placements[i] = new OrderResult
+                {
+                    Success = combinedFilled > 0,
+                    OrderId = retryResult.OrderId ?? already.OrderId,
+                    ErrorMessage = retryResult.ErrorMessage,
+                    FilledQuantity = combinedFilled,
+                    Status = retryResult.Status,
+                    AverageFillPrice = combinedAvgPrice,
+                };
+
+                if (combinedFilled >= plan.Request.Quantity)
+                {
+                    _logger.LogInformation(
+                        "Rule {RuleId}: retry {Attempt}/{MaxAttempts} completed {Symbol} {Side} - {Filled}/{Requested} lot(s) now filled at {WiderSlippage}% slippage -> order {OrderId}",
+                        rule.Id, attempt, maxAttempts, plan.Request.TradingSymbol, plan.Request.TransactionType, combinedFilled, plan.Request.Quantity, widerSlippage, retryResult.OrderId);
+                }
+                else if (string.Equals(retryResult.Status, "OPEN", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning(
+                        "Rule {RuleId}: retry {Attempt}/{MaxAttempts} for {Symbol} {Side} came back OPEN/unconfirmed - leaving it as-is rather than risking a further retry double-placing it.",
+                        rule.Id, attempt, maxAttempts, plan.Request.TradingSymbol, plan.Request.TransactionType);
+                }
+                else
+                {
+                    var giveUp = attempt == maxAttempts;
+                    _logger.LogWarning(
+                        "Rule {RuleId}: retry {Attempt}/{MaxAttempts} at {WiderSlippage}% still leaves {Symbol} {Side} at {Filled}/{Requested} lot(s) - {Error}.{Next}",
+                        rule.Id, attempt, maxAttempts, widerSlippage, plan.Request.TradingSymbol, plan.Request.TransactionType, combinedFilled, plan.Request.Quantity, retryResult.ErrorMessage,
+                        giveUp ? " Giving up on the remainder - falling back to square-off." : " Trying again for the remainder.");
+                    if (!giveUp)
+                        nextRound.Add(i);
+                }
             }
+
+            pending = nextRound;
         }
+    }
+
+    /// <summary>Clones <paramref name="source"/> with a different Quantity - used by
+    /// RetryUnfilledLegsAsync both to build a retry request for just the outstanding remainder of
+    /// a partially-filled leg, and to restore the ORIGINAL total quantity on the leg reported back
+    /// to the caller (legResults/dashboard should show "requested 2", not "requested 1" just
+    /// because the last retry only asked for the 1 remaining lot).</summary>
+    private static OrderLegRequest WithQuantity(OrderLegRequest source, int quantity) => new()
+    {
+        TradingSymbol = source.TradingSymbol,
+        Exchange = source.Exchange,
+        InstrumentToken = source.InstrumentToken,
+        TransactionType = source.TransactionType,
+        Quantity = quantity,
+        Product = source.Product,
+        OrderType = source.OrderType,
+        Price = source.Price,
+        PriceReference = source.PriceReference,
+        Validity = source.Validity,
+        Variety = source.Variety,
+        Tag = source.Tag,
+    };
+
+    /// <summary>Fill-weighted average price across two fills of the same leg (e.g. 1 lot at the
+    /// original attempt's price plus 1 more lot at a retry's wider-slippage price) - used by
+    /// RetryUnfilledLegsAsync to keep OrderResult.AverageFillPrice a true average of everything
+    /// that's actually filled for the leg so far, not just the most recent attempt's price.
+    /// Falls back to whichever side has a fill when the other side has none (nothing to
+    /// average against), and to null when neither side has filled anything yet.</summary>
+    private static decimal? CombineAverageFillPrice(int qtyA, decimal? avgA, int qtyB, decimal? avgB)
+    {
+        if (qtyA > 0 && avgA is { } priceA && qtyB > 0 && avgB is { } priceB)
+            return (priceA * qtyA + priceB * qtyB) / (qtyA + qtyB);
+        if (qtyB > 0 && avgB is { } onlyB)
+            return onlyB;
+        if (qtyA > 0 && avgA is { } onlyA)
+            return onlyA;
+        return null;
     }
 
     /// <summary>Flattens whichever leg(s) actually filled if the basket only partially went

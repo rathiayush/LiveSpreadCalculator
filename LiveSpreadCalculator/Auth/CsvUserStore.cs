@@ -129,6 +129,97 @@ public sealed class CsvUserStore
         return ChangePasswordResult.Success();
     }
 
+    /// <summary>Creates App_Data/users.csv with a single admin row if - and only if - the file
+    /// doesn't exist yet. There is no self-registration in this app (see AuthController - login is
+    /// the only unauthenticated endpoint), so on a brand-new deployment with an empty/fresh
+    /// App_Data volume there is no way to obtain the first account at all without this. Called once
+    /// at startup, before MigrateToEncrypted() (see Program.cs), so the plaintext row this writes is
+    /// immediately encrypted under whatever Security:PasswordKey this instance is actually running
+    /// with - never left sitting in plaintext even for one restart.
+    ///
+    /// Deliberately does nothing once the file exists, even if it's later emptied down to just a
+    /// header - "the file is present" is the only signal checked, so this can never silently reset
+    /// or duplicate a real deployment's users after the first boot.</summary>
+    public void BootstrapAdminIfMissing(string email, string password)
+    {
+        if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
+            return;
+
+        lock (_writeLock)
+        {
+            if (File.Exists(_csvPath))
+                return;
+
+            if (TryWriteAllLines(new[] { "email,password", $"{email.Trim()},{password}" }))
+                _logger.LogInformation(
+                    "Bootstrapped the first admin account ({Email}) into {Path} - no users.csv existed yet.",
+                    email, _csvPath);
+            else
+                _logger.LogError("Failed to bootstrap the first admin account into {Path}.", _csvPath);
+        }
+    }
+
+    /// <summary>Adds one email/password row if - and only if - that email isn't already in the
+    /// file (case-insensitive), creating the file first if it doesn't exist at all yet. Existing
+    /// rows are never touched - if the email is already present, this is a silent no-op, even if
+    /// the password given here differs from what's stored. That matters for the same reason
+    /// BootstrapAdminIfMissing only fires once: it means an operator can leave
+    /// Bootstrap:AddUserEmail/AddUserPassword configured indefinitely without every restart
+    /// clobbering a password the user has since changed themselves via ChangePassword. Meant for
+    /// deployments where there's no other reachable way to add a login (no self-registration
+    /// endpoint - see AuthController - and no working file-upload path on the hosting platform).
+    /// Written in plaintext like BootstrapAdminIfMissing's row; MigrateToEncrypted (called right
+    /// after this in Program.cs) picks it up and encrypts it before this boot finishes.</summary>
+    public void AddUserIfMissing(string email, string password)
+    {
+        if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password))
+            return;
+
+        var trimmedEmail = email.Trim();
+
+        lock (_writeLock)
+        {
+            if (!File.Exists(_csvPath))
+            {
+                if (TryWriteAllLines(new[] { "email,password", $"{trimmedEmail},{password}" }))
+                    _logger.LogInformation(
+                        "Added {Email} into a newly-created {Path} (no users.csv existed yet).",
+                        trimmedEmail, _csvPath);
+                else
+                    _logger.LogError("Failed to add {Email} into {Path}.", trimmedEmail, _csvPath);
+                return;
+            }
+
+            List<string> lines;
+            try
+            {
+                lines = File.ReadAllLines(_csvPath).ToList();
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                _logger.LogError(ex, "Could not read users CSV at {Path} while adding {Email}", _csvPath, trimmedEmail);
+                return;
+            }
+
+            var alreadyExists = lines.Skip(1).Any(line =>
+            {
+                var trimmedLine = line.Trim();
+                if (trimmedLine.Length == 0 || trimmedLine.StartsWith('#')) return false;
+                var comma = trimmedLine.IndexOf(',');
+                return comma > 0 && string.Equals(trimmedLine[..comma].Trim(), trimmedEmail, StringComparison.OrdinalIgnoreCase);
+            });
+
+            if (alreadyExists)
+                return; // already present - leave it (and its password) exactly as-is
+
+            lines.Add($"{trimmedEmail},{password}");
+            if (TryWriteAllLines(lines))
+                _logger.LogInformation("Added {Email} to {Path} - existing users untouched.", trimmedEmail, _csvPath);
+            else
+                _logger.LogError("Failed to add {Email} to {Path}.", trimmedEmail, _csvPath);
+        }
+    }
+
     /// <summary>One-time-per-file upgrade: rewrite any legacy plaintext password rows as encrypted
     /// blobs. Called once at startup (see Program.cs). If every row is already encrypted this is a
     /// no-op and does NOT rewrite the file, so stamps (and therefore live sessions) stay stable
