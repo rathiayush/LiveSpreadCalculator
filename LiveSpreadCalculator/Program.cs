@@ -362,6 +362,17 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// First-boot only: creates users.csv with one admin row if - and only if - the file doesn't exist
+// yet, so a brand-new deployment (a fresh App_Data volume, nothing committed/copied in) has SOME
+// way to log in at all - there is no self-registration endpoint (see AuthController). Both env vars
+// optional and read once; leave them unset on every deployment after the first boot rather than
+// removing them - BootstrapAdminIfMissing no-ops the instant the file exists, so there's no ongoing
+// risk in leaving a stale Bootstrap__AdminPassword configured.
+var bootstrapAdminEmail = builder.Configuration["Bootstrap:AdminEmail"];
+var bootstrapAdminPassword = builder.Configuration["Bootstrap:AdminPassword"];
+if (!string.IsNullOrWhiteSpace(bootstrapAdminEmail) && !string.IsNullOrWhiteSpace(bootstrapAdminPassword))
+    app.Services.GetRequiredService<CsvUserStore>().BootstrapAdminIfMissing(bootstrapAdminEmail, bootstrapAdminPassword);
+
 // One-time-per-file upgrade of App_Data/users.csv: any legacy plaintext password rows are rewritten
 // as encrypted blobs on startup. No-op once every row is already encrypted, so ordinary restarts
 // don't touch the file (and don't disturb live sessions). See CsvUserStore.MigrateToEncrypted.
