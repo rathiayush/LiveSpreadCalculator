@@ -69,6 +69,11 @@ public sealed class DhanAuthService : IBrokerAuthService
 
     public bool SupportsInteractiveLogin => _options.HasConsentCredentials;
 
+    // A manually pasted Dhan token (freshly generated in the web portal) is always a legitimate,
+    // functional fallback here - even in Totp mode, where it isn't the primary flow - so this is
+    // unconditionally true, unlike Kotak's.
+    public bool SupportsManualToken => true;
+
     /// <summary>Only shown when SupportsInteractiveLogin is false, i.e. no consent credentials are
     /// configured - so this has to distinguish three cases: Consent mode explicitly selected but
     /// not yet configured, Totp, or Static (the fallback for everything else, including consent

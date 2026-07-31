@@ -60,6 +60,12 @@ public sealed class KotakAuthService : IBrokerAuthService
 
     public bool SupportsInteractiveLogin => false;
 
+    // Kotak's "access token" (the edit token from totp_validate) is minted only by completing the
+    // TOTP+MPIN handshake server-side - there is no Kotak portal that hands a user a copy-pasteable
+    // token the way Dhan's does, so a manual-entry box here would only ever accept something that
+    // can't possibly work. False, unlike every other platform - see IBrokerAuthService's doc comment.
+    public bool SupportsManualToken => false;
+
     public string NotAuthenticatedGuidance =>
         "Kotak Neo doesn't use a browser login here - it authenticates automatically via TOTP+MPIN, " +
         "the same way Dhan's TOTP mode does. The server should mint its own session within a few " +
