@@ -7,17 +7,17 @@ namespace SpreadTrader.KotakIntegration.Orders;
 
 /// <summary>
 /// Pre-trade margin checks against Kotak Neo - BASKET MARGIN via POST quick/user/check-margin,
-/// AVAILABLE MARGIN via GET quick/user/limits.
+/// AVAILABLE MARGIN via POST quick/user/limits. Both endpoints and their jData/response shapes are
+/// now CONFIRMED against Kotak's own Trade API docs (Margins / Limits pages) - previously these
+/// were reverse-engineered guesses; several things were actually wrong (see git history for this
+/// file): check-margin's field names are NOT the same abbreviations the order-placement endpoint
+/// uses (it wants brkName/brnchId/exSeg/prc/prcTp/prod/qty/tok/trnsTp, a different vocabulary from
+/// es/pc/pr/pt/qt/tt/ts), and limits is a POST with a jData body, not a bodyless GET.
 ///
 /// Like KiteMarginService/DhanMarginService, a failed margin CHECK is reported as failure rather
 /// than a pessimistic estimate - OrderDispatchHostedService treats that as non-fatal and proceeds
 /// (Kotak's own order entry still enforces margin), which is the safer of the two wrong answers
 /// when the check itself can't be trusted.
-///
-/// RESPONSE FIELD NAMES ARE BEST-EFFORT - see KotakApiClient's doc comment on why this whole
-/// integration is unverified against a live account. Several plausible field-name candidates are
-/// tried for the margin figures; a response with none of them is treated as a failed check (see
-/// GetBasketMarginAsync/GetAvailableMarginAsync), never as "zero margin required/available".
 /// </summary>
 public sealed class KotakMarginService : IMarginService
 {
@@ -45,15 +45,20 @@ public sealed class KotakMarginService : IMarginService
         decimal total = 0m;
         foreach (var leg in legs)
         {
+            // Field names/values confirmed against Kotak's Margins doc - a different abbreviation
+            // vocabulary from the order-placement endpoint (brkName/brnchId are fixed constants
+            // every caller sends verbatim; tok is the numeric instrument token, not tradingSymbol).
             var fields = new Dictionary<string, string>
             {
-                ["es"] = KotakSymbology.ToKotakSegment(leg.Exchange),
-                ["pc"] = KotakSymbology.ToKotakProduct(leg.Product),
-                ["pr"] = (leg.Price ?? 0m).ToString(System.Globalization.CultureInfo.InvariantCulture),
-                ["pt"] = KotakSymbology.ToKotakOrderType(leg.OrderType),
-                ["qt"] = leg.Quantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                ["tt"] = KotakSymbology.ToKotakTransactionType(leg.TransactionType),
-                ["ts"] = leg.TradingSymbol,
+                ["brkName"] = "KOTAK",
+                ["brnchId"] = "ONLINE",
+                ["exSeg"] = KotakSymbology.ToKotakSegment(leg.Exchange),
+                ["prc"] = (leg.Price ?? 0m).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["prcTp"] = KotakSymbology.ToKotakOrderType(leg.OrderType),
+                ["prod"] = KotakSymbology.ToKotakProduct(leg.Product),
+                ["qty"] = leg.Quantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["tok"] = leg.InstrumentToken.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                ["trnsTp"] = KotakSymbology.ToKotakTransactionType(leg.TransactionType),
             };
 
             using var response = await _api.SendSessionAsync(
@@ -65,7 +70,10 @@ public sealed class KotakMarginService : IMarginService
                 return new BasketMarginResult(false, null, null, response.ErrorMessage);
             }
 
-            var legMargin = ReadDecimal(response.Data, "marginUsed") ?? ReadDecimal(response.Data, "totalMargin") ?? ReadDecimal(response.Data, "margin");
+            // reqdMrgn ("Net required margin for the order") and ordMrgn ("Margin required for the
+            // order") are both confirmed response fields - reqdMrgn is preferred since it's the net
+            // figure after any margin benefit, same as every other broker's margin check here uses.
+            var legMargin = ReadDecimal(response.Data, "reqdMrgn") ?? ReadDecimal(response.Data, "ordMrgn");
             if (legMargin is null)
             {
                 const string message = "Kotak's margin check response carried no recognisable margin figure - treating the check as failed rather than as 'no margin required'.";
@@ -86,8 +94,12 @@ public sealed class KotakMarginService : IMarginService
         if (!_api.HasSession)
             return new AvailableMarginResult(false, null, "No Kotak session - complete the login flow first.");
 
+        // Confirmed by Kotak's Limits doc: POST (NOT a bodyless GET, which is what this sent before
+        // being fixed) with jData={"seg":"ALL","exch":"ALL","prod":"ALL"} for a consolidated report
+        // across every segment/exchange/product.
+        var fields = new Dictionary<string, string> { ["seg"] = "ALL", ["exch"] = "ALL", ["prod"] = "ALL" };
         using var response = await _api.SendSessionAsync(
-            HttpMethod.Get, "quick/user/limits", null, "checking available margin", cancellationToken);
+            HttpMethod.Post, "quick/user/limits", fields, "checking available margin", cancellationToken);
 
         if (!response.Success)
         {
@@ -95,8 +107,9 @@ public sealed class KotakMarginService : IMarginService
             return new AvailableMarginResult(false, null, response.ErrorMessage);
         }
 
-        var available = ReadDecimal(response.Data, "Net") ?? ReadDecimal(response.Data, "netAvailableMargin")
-            ?? ReadDecimal(response.Data, "availableMargin") ?? ReadDecimal(response.Data, "cash");
+        // "Net" ("Net available margin/cash") is the confirmed field for this - the others are kept
+        // as a fallback only in case a given account/segment response ever omits it.
+        var available = ReadDecimal(response.Data, "Net") ?? ReadDecimal(response.Data, "CollateralValue");
 
         return new AvailableMarginResult(
             available is not null,

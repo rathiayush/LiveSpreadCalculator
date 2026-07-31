@@ -10,17 +10,24 @@ namespace SpreadTrader.KotakIntegration.Positions;
 /// Calls Kotak Neo's GET quick/user/positions to report live open positions and PNL - the Kotak
 /// counterpart of KitePositionsService/DhanPositionsService.
 ///
-/// Like Dhan, this app has no confirmed evidence Kotak's positions response carries a
-/// last-traded-price field, so LastPrice is taken from the live tick store the same way
-/// DhanPositionsService does (see its doc comment) - PositionsCache anchors a subscription for
-/// every open position specifically so that data is there.
+/// FIELD NAMES: exSeg, trdSym, prod, and the flBuyQty/flSellQty/qty quantity fields are CONFIRMED
+/// by Kotak's own Positions API docs - qty in particular is documented as the NET position quantity
+/// directly, so it's tried before falling back to the flBuyQty-minus-flSellQty derivation this app
+/// used before that was confirmed. avgPrice/pnl are NOT covered by that doc's field list at all (no
+/// avgPrc-shaped or pnl-shaped field appears anywhere in the confirmed response) - avgPrice is
+/// therefore derived from buyAmt/sellAmt (both confirmed) divided by the matching filled quantity
+/// instead of guessing an unconfirmed field name; pnl has no such derivation available and stays a
+/// best-effort guess like before, since no PNL figure appears in the confirmed docs at all - the
+/// live PositionExitPricing.Compute-based ExitPnl below (based on this app's own tick store) is
+/// what OrderDispatchHostedService and the dashboard actually rely on.
+///
+/// LastPrice is taken from the live tick store rather than the response, same as
+/// DhanPositionsService (see its doc comment) - PositionsCache anchors a subscription for every
+/// open position specifically so that data is there.
 ///
 /// NO MCX. Only NFO is ever tracked here, regardless of McxOptions - see KotakSymbology's class doc
 /// comment for why: Kotak Neo's documented exchange-segment list has no MCX entry at all, so an MCX
 /// position could never resolve to a valid Kotak segment even if one existed on the account.
-///
-/// RESPONSE FIELD NAMES ARE BEST-EFFORT - see KotakApiClient's doc comment for the overall caveat
-/// on this integration's confidence level pending a real account to test against.
 /// </summary>
 public sealed class KotakPositionsService : IPositionsService
 {
@@ -65,10 +72,13 @@ public sealed class KotakPositionsService : IPositionsService
         var positions = new List<PositionSnapshot>();
         foreach (var p in root.EnumerateArray())
         {
-            // Net quantity: prefer an explicit net field, else derive buy-minus-sell (both spelling
-            // conventions - flBuyQty/flSellQty and buyQty/sellQty - are tried since neither is
-            // confirmed against a real response).
-            var quantity = ReadInt(p, "flBuyQty") - ReadInt(p, "flSellQty");
+            // "qty" is the CONFIRMED net position quantity field - tried first, ahead of the
+            // flBuyQty-minus-flSellQty derivation this app used before that was confirmed (kept as
+            // a fallback for any response shape that omits qty).
+            var flBuyQty = ReadInt(p, "flBuyQty");
+            var flSellQty = ReadInt(p, "flSellQty");
+            var quantity = ReadInt(p, "qty");
+            if (quantity == 0) quantity = flBuyQty - flSellQty;
             if (quantity == 0) quantity = ReadInt(p, "netQty");
             if (quantity == 0) quantity = ReadInt(p, "buyQty") - ReadInt(p, "sellQty");
             if (quantity == 0) continue; // fully squared off already
@@ -80,7 +90,18 @@ public sealed class KotakPositionsService : IPositionsService
             var tradingSymbol = ReadString(p, "trdSym") ?? ReadString(p, "tradingSymbol") ?? "";
             var product = KotakSymbology.ToCanonicalProduct(ReadString(p, "prod") ?? ReadString(p, "product") ?? "");
 
-            var avgPrice = ReadDecimal(p, "avgNetPrc") ?? ReadDecimal(p, "buyAvgPrc") ?? ReadDecimal(p, "avgPrice") ?? 0m;
+            // No avgPrc-shaped field appears in Kotak's confirmed Positions response at all - derive
+            // it instead from buyAmt/sellAmt (both confirmed) over the matching filled quantity,
+            // falling back to the old guessed field names only if that derivation isn't possible.
+            var buyAmt = ReadDecimal(p, "buyAmt");
+            var sellAmt = ReadDecimal(p, "sellAmt");
+            var avgPrice =
+                quantity > 0 && flBuyQty > 0 ? (buyAmt ?? 0m) / flBuyQty :
+                quantity < 0 && flSellQty > 0 ? (sellAmt ?? 0m) / flSellQty :
+                ReadDecimal(p, "avgNetPrc") ?? ReadDecimal(p, "buyAvgPrc") ?? ReadDecimal(p, "avgPrice") ?? 0m;
+            // pnl: unconfirmed - Kotak's docs list no PNL field for this endpoint at all. Kept as a
+            // best-effort guess; ExitPnl (computed below from this app's own live ticks) is what
+            // dispatch/dashboard actually rely on.
             var pnl = ReadDecimal(p, "pnl") ?? ReadDecimal(p, "urPnl") ?? 0m;
 
             var instrument = _instrumentMaster.Find(tradingSymbol, exchange);

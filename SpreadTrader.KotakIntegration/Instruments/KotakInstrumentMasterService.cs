@@ -24,13 +24,15 @@ namespace SpreadTrader.KotakIntegration.Instruments;
 /// KotakSymbology's class doc comment: Kotak Neo's documented exchange-segment list has no MCX
 /// entry, so there is no file to even ask for.
 ///
-/// COLUMN LAYOUT IS BEST-EFFORT. No confirmed Kotak scrip-master CSV was available while building
-/// this (see KotakOptions' doc comment on the overall confidence level) - ParseCsv tries several
-/// plausible column-name candidates per field (a "p"-prefixed convention observed in other Kotak
-/// Securities API generations, e.g. pTrdSymbol/pExchSeg/pInstType), the same alias-resolution
-/// pattern DhanInstrumentMasterService uses for its compact/detailed column differences. A file
-/// whose real columns don't match any candidate fails loudly (logged, zero instruments loaded)
-/// rather than silently parsing garbage - see the required-column check in ParseCsv.
+/// COLUMN LAYOUT: pSymbol (token), pTrdSymbol (trading symbol) and lLotSize (lot size) are now
+/// CONFIRMED by Kotak's own Scrip Master API docs ("Response CSV Files column mapping" table) and
+/// are tried first in ParseCsv; lExpiryDate is confirmed too but is an EPOCH value requiring a
+/// segment-specific offset before it converts to a real date - see ParseExpiry. Everything else
+/// (instrument type, underlying name, tick size) isn't covered by that table and remains a best-
+/// effort guess, using the same alias-resolution pattern DhanInstrumentMasterService uses for its
+/// compact/detailed column differences. A file whose real columns don't match any candidate fails
+/// loudly (logged, zero instruments loaded) rather than silently parsing garbage - see the
+/// required-column check in ParseCsv.
 /// </summary>
 public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
 {
@@ -151,9 +153,14 @@ public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-    /// <summary>GET script-details/1.0/masterscrip/file-paths -&gt; { data: { filesPaths: { segment:
-    /// url, ... } } } per the reference SDK. The exact shape of filesPaths (object keyed by segment
-    /// vs. an array of {segment,url} pairs) is unconfirmed, so both are handled.</summary>
+    /// <summary>GET script-details/1.0/masterscrip/file-paths -&gt; { data: { filesPaths: [url,
+    /// url, ...] } }, CONFIRMED against Kotak's own Scrip Master API docs - filesPaths is a flat
+    /// array of download URLs, one per segment, with NO segment field alongside each url; the
+    /// segment has to be read off the URL's own filename instead (e.g. ".../transformed/nse_fo.csv"
+    /// -&gt; "nse_fo", ".../transformed-v1/nse_cm-v1.csv" -&gt; "nse_cm" after stripping the "-v1"
+    /// suffix the cash-segment files carry). This replaces an earlier guess (object keyed by segment,
+    /// or an array of {segment,url} pairs) that didn't match either - the entire instrument master
+    /// would have loaded zero segments against a real account until this was confirmed.</summary>
     private async Task<Dictionary<string, string>> FetchFilePathsAsync(CancellationToken cancellationToken)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -170,28 +177,33 @@ public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
         var data = response.Data;
         var filesPaths = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("filesPaths", out var fp) ? fp : data;
 
-        if (filesPaths.ValueKind == JsonValueKind.Object)
-        {
-            foreach (var property in filesPaths.EnumerateObject())
-            {
-                if (property.Value.ValueKind == JsonValueKind.String)
-                    result[property.Name] = property.Value.GetString()!;
-            }
-        }
-        else if (filesPaths.ValueKind == JsonValueKind.Array)
+        if (filesPaths.ValueKind == JsonValueKind.Array)
         {
             foreach (var entry in filesPaths.EnumerateArray())
             {
-                if (entry.ValueKind != JsonValueKind.Object) continue;
-                var segment = entry.TryGetProperty("exchangeSegment", out var s) ? s.GetString() : null;
-                var url = entry.TryGetProperty("filePath", out var u) ? u.GetString() :
-                          entry.TryGetProperty("url", out var u2) ? u2.GetString() : null;
+                if (entry.ValueKind != JsonValueKind.String) continue;
+                var url = entry.GetString();
+                var segment = ExtractSegmentFromUrl(url);
                 if (!string.IsNullOrWhiteSpace(segment) && !string.IsNullOrWhiteSpace(url))
                     result[segment] = url;
             }
         }
 
         return result;
+    }
+
+    /// <summary>".../transformed/nse_fo.csv" -&gt; "nse_fo"; ".../transformed-v1/nse_cm-v1.csv" -&gt;
+    /// "nse_cm" - the segment is the URL's filename, minus the .csv extension and an optional
+    /// trailing "-v1" the cash-segment files carry (see FetchFilePathsAsync's doc comment).</summary>
+    private static string? ExtractSegmentFromUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return null;
+        var fileName = url[(url.LastIndexOf('/') + 1)..];
+        if (fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+            fileName = fileName[..^4];
+        if (fileName.EndsWith("-v1", StringComparison.OrdinalIgnoreCase))
+            fileName = fileName[..^3];
+        return fileName;
     }
 
     private bool IsFresh() => _instruments.Count > 0 && DateTimeOffset.UtcNow - _loadedAt < CacheLifetime;
@@ -287,12 +299,17 @@ public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
 
     private static class Columns
     {
+        // pSymbol, pTrdSymbol and lLotSize are CONFIRMED by Kotak's own Scrip Master API docs
+        // (the "Response CSV Files column mapping" table) - listed first; the rest remain best-
+        // effort guesses (InstrumentType/UnderlyingName/TickSize aren't covered by that table at
+        // all) so the alias fallback stays in place for them.
         public static readonly string[] Token = { "pSymbol", "instrumentToken", "token", "scripCode" };
         public static readonly string[] TradingSymbol = { "pTrdSymbol", "tradingSymbol", "trdSym", "symbol" };
         public static readonly string[] InstrumentType = { "pInstType", "instrumentType", "instType" };
         public static readonly string[] UnderlyingName = { "pSymbolName", "symbolName", "underlying" };
-        public static readonly string[] Expiry = { "pExpiryDate", "expiryDate", "expiry" };
-        public static readonly string[] LotSize = { "pLotSize", "lotSize", "lot_size" };
+        // lExpiryDate is confirmed but is an EPOCH value, not a date string - see ParseExpiry.
+        public static readonly string[] Expiry = { "lExpiryDate", "pExpiryDate", "expiryDate", "expiry" };
+        public static readonly string[] LotSize = { "lLotSize", "pLotSize", "lotSize", "lot_size" };
         public static readonly string[] TickSize = { "pTickSize", "tickSize", "tick_size" };
     }
 
@@ -315,7 +332,7 @@ public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
         var symbolIndex = Resolve(header, Columns.TradingSymbol);
         var instrumentTypeIndex = Resolve(header, Columns.InstrumentType);
         var underlyingIndex = Resolve(header, Columns.UnderlyingName);
-        var expiryIndex = Resolve(header, Columns.Expiry);
+        var (expiryIndex, expiryColumnName) = ResolveNamed(header, Columns.Expiry);
         var lotSizeIndex = Resolve(header, Columns.LotSize);
         var tickSizeIndex = Resolve(header, Columns.TickSize);
 
@@ -357,7 +374,7 @@ public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
                 Exchange: canonicalExchange,
                 Segment: kotakSegment,
                 InstrumentType: "FUT",
-                Expiry: ParseExpiry(Get(fields, expiryIndex)),
+                Expiry: ParseExpiry(Get(fields, expiryIndex), expiryColumnName, kotakSegment),
                 LotSize: ParseLotSize(Get(fields, lotSizeIndex)),
                 TickSize: ParseDecimal(Get(fields, tickSizeIndex))), null));
         }
@@ -395,18 +412,58 @@ public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
         return -1;
     }
 
+    /// <summary>Same as <see cref="Resolve"/> but also returns which candidate matched, so a caller
+    /// (ParseExpiry) can tell the confirmed epoch column (lExpiryDate) apart from the older guessed
+    /// date-string ones without re-deriving that from the raw value alone.</summary>
+    private static (int Index, string? Name) ResolveNamed(Dictionary<string, int> header, string[] candidates)
+    {
+        foreach (var candidate in candidates)
+            if (header.TryGetValue(candidate, out var index)) return (index, candidate);
+        return (-1, null);
+    }
+
     private static string? Get(string[] fields, int index) =>
         index >= 0 && index < fields.Length ? fields[index].Trim() : null;
 
-    private static DateOnly? ParseExpiry(string? raw)
+    /// <summary>lExpiryDate (the confirmed column) is an EPOCH value, not a date string - per
+    /// Kotak's Scrip Master docs: nse_fo/cde_fo need <c>epoch + 315511200</c> before converting to
+    /// IST; mcx_fo/bse_fo convert the raw epoch directly. Any other (guessed, unconfirmed) column
+    /// name falls back to the old plain-date-string parsing, since only lExpiryDate itself is known
+    /// to need the epoch treatment.</summary>
+    private static DateOnly? ParseExpiry(string? raw, string? columnName, string kotakSegment)
     {
         if (string.IsNullOrWhiteSpace(raw)) return null;
+
+        if (string.Equals(columnName, "lExpiryDate", StringComparison.OrdinalIgnoreCase))
+            return ParseEpochExpiry(raw, kotakSegment);
+
         var datePart = raw.Length > 10 ? raw[..10] : raw;
         if (DateOnly.TryParse(datePart, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
             return date;
         return DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dateTime)
             ? DateOnly.FromDateTime(dateTime)
             : null;
+    }
+
+    private static readonly TimeSpan IstOffset = TimeSpan.FromHours(5.5);
+
+    private static DateOnly? ParseEpochExpiry(string raw, string kotakSegment)
+    {
+        if (!long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var epoch)) return null;
+
+        if (kotakSegment.Equals("nse_fo", StringComparison.OrdinalIgnoreCase) ||
+            kotakSegment.Equals("cde_fo", StringComparison.OrdinalIgnoreCase))
+            epoch += 315511200;
+
+        try
+        {
+            var ist = DateTimeOffset.FromUnixTimeSeconds(epoch).ToOffset(IstOffset);
+            return DateOnly.FromDateTime(ist.DateTime);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
     }
 
     private static int ParseLotSize(string? raw)

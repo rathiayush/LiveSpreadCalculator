@@ -15,21 +15,25 @@ namespace SpreadTrader.KotakIntegration.Auth;
 /// KotakSessionAutoRenewalHostedService exactly the way DhanTotpAutoRenewalHostedService drives
 /// DhanAuthService.GenerateAccessTokenViaTotpAsync (same shape, one more step):
 ///
-///  1. totp_login: POST {RestBaseUrl}/login/1.0/tradeApiLogin, JSON body
+///  1. totp_login: POST {LoginBaseUrl}/login/1.0/tradeApiLogin, JSON body
 ///     {"mobileNumber","ucc","totp"} (a fresh 6-digit RFC 6238 code from KotakOptions.TotpSecret -
 ///     see TotpGenerator), headers Authorization={ConsumerKey}, neo-fin-key={NeoFinKey}. Returns a
 ///     short-lived "view token" (<c>data.token</c>) + session id (<c>data.sid</c>) that authenticate
 ///     ONLY the next call, not the trading API.
-///  2. totp_validate: POST {RestBaseUrl}/login/1.0/tradeApiValidate, JSON body {"mpin"}, headers
+///  2. totp_validate: POST {LoginBaseUrl}/login/1.0/tradeApiValidate, JSON body {"mpin"}, headers
 ///     Authorization={ConsumerKey}, sid={view sid from step 1}, Auth={view token from step 1},
 ///     neo-fin-key={NeoFinKey}. Returns the actual session - <c>data.token</c> ("edit token") and
 ///     <c>data.sid</c> ("edit sid") - which is what KotakApiClient.SendSessionAsync sends on every
 ///     subsequent trading call (orders, positions, margin, limits) as the Auth/Sid headers.
 ///
-/// Wire shapes (exact header names, JSON field names, endpoint paths) were reverse-engineered from
-/// the public Kotak-Neo/Kotak-neo-api-v2 Python SDK's source, not verified against a live account -
-/// see KotakOptions' doc comment for the full caveat and what needs confirming once real API access
-/// is available.
+/// BOTH LOGIN CALLS GO TO KotakOptions.LoginBaseUrl, NOT RestBaseUrl - confirmed by Kotak's own
+/// Trade API Authentication docs, which hardcode a fixed host (mis.kotaksecurities.com) for login
+/// regardless of environment. RestBaseUrl only comes into play afterwards, once step 2's response
+/// hands back the real trading host (see KotakSession.BaseUrl).
+///
+/// Everything else here (exact header names, JSON field names, endpoint paths, response shapes) is
+/// now CONFIRMED against Kotak's own Trade API docs, not just the reverse-engineered Python SDK
+/// source this was originally built from.
 /// </summary>
 public sealed class KotakAuthService : IBrokerAuthService
 {
@@ -159,7 +163,7 @@ public sealed class KotakAuthService : IBrokerAuthService
             totp,
         });
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"{_options.RestBaseUrl.TrimEnd('/')}/login/1.0/tradeApiLogin");
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{_options.LoginBaseUrl.TrimEnd('/')}/login/1.0/tradeApiLogin");
         request.Headers.TryAddWithoutValidation("Authorization", _options.ConsumerKey);
         request.Headers.TryAddWithoutValidation("neo-fin-key", _options.NeoFinKey);
         request.Content = new StringContent(payload, Encoding.UTF8, "application/json");
@@ -199,7 +203,7 @@ public sealed class KotakAuthService : IBrokerAuthService
     {
         var payload = JsonSerializer.Serialize(new { mpin = _options.Mpin });
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"{_options.RestBaseUrl.TrimEnd('/')}/login/1.0/tradeApiValidate");
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{_options.LoginBaseUrl.TrimEnd('/')}/login/1.0/tradeApiValidate");
         request.Headers.TryAddWithoutValidation("Authorization", _options.ConsumerKey);
         request.Headers.TryAddWithoutValidation("sid", viewSid);
         request.Headers.TryAddWithoutValidation("Auth", viewToken);

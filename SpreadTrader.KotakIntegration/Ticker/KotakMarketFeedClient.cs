@@ -22,12 +22,12 @@ namespace SpreadTrader.KotakIntegration.Ticker;
 /// <c>{"type":"cn","Authorization":{editToken},"Sid":{editSid}}</c>. A periodic heartbeat
 /// <c>{"type":"hb"}</c> keeps the connection alive (Kotak's own SDK sends this every 29s).
 ///
-/// TICK FIELD MAPPING IS BEST-EFFORT. No confirmed sample tick message was available while
-/// building this (the reference SDK's own field-mapping dictionary was not included in what could
-/// be inspected - see KotakOptions' doc comment on the overall confidence level for this whole
-/// integration). ParseTick tries several plausible field-name candidates per value, the same
-/// defensive multi-candidate pattern used throughout this project, and a tick with no recognisable
-/// price field is dropped (logged once) rather than published as all-zeros.
+/// TICK FIELD MAPPING IS NOW CONFIRMED against Kotak's own "Field mapping in the websocket
+/// response" table (tk=token, ltp/ltq, bp/bq=best bid, sp/bs=best ask - note "bs" is the ask
+/// QUANTITY despite the b-prefix, per that table - op/h/lo/c=OHLC, oi=open interest). Merge tries
+/// the confirmed name first for every field; the older guessed alternates (bp1/sp1/o/l, from before
+/// a real field-mapping table was available) are kept only as a fallback in case a future message
+/// shape ever omits the confirmed one.
 ///
 /// ORDER UPDATES ARE NOT WIRED. No confirmed Kotak order-update push channel (WebSocket message
 /// type or separate socket) was available either - OrderUpdateReceived exists to satisfy
@@ -314,17 +314,17 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
         var now = DateTimeOffset.UtcNow;
 
         var lastPrice = ReadDecimal(element, "ltp") ?? ReadDecimal(element, "lastPrice") ?? ReadDecimal(element, "c");
-        var bestBid = ReadDecimal(element, "bp1") ?? ReadDecimal(element, "bestBidPrice") ?? ReadDecimal(element, "bp");
-        var bestAsk = ReadDecimal(element, "sp1") ?? ReadDecimal(element, "bestAskPrice") ?? ReadDecimal(element, "sp");
+        var bestBid = ReadDecimal(element, "bp") ?? ReadDecimal(element, "bp1") ?? ReadDecimal(element, "bestBidPrice");
+        var bestAsk = ReadDecimal(element, "sp") ?? ReadDecimal(element, "sp1") ?? ReadDecimal(element, "bestAskPrice");
 
         return new Tick(
             InstrumentToken: token,
             LastPrice: lastPrice is > 0 ? lastPrice.Value : previous.LastPrice,
             LastTradedQuantity: ReadLong(element, "ltq") ?? previous.LastTradedQuantity,
             Volume: ReadLong(element, "v") ?? ReadLong(element, "vol") ?? previous.Volume,
-            Open: ReadDecimal(element, "o") ?? previous.Open,
+            Open: ReadDecimal(element, "op") ?? ReadDecimal(element, "o") ?? previous.Open,
             High: ReadDecimal(element, "h") ?? previous.High,
-            Low: ReadDecimal(element, "l") ?? previous.Low,
+            Low: ReadDecimal(element, "lo") ?? ReadDecimal(element, "l") ?? previous.Low,
             Close: ReadDecimal(element, "c") ?? previous.Close,
             OpenInterest: ReadLong(element, "oi") ?? previous.OpenInterest,
             ExchangeTimestamp: now,
