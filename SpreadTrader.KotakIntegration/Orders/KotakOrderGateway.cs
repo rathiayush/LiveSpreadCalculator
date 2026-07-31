@@ -12,27 +12,25 @@ namespace SpreadTrader.KotakIntegration.Orders;
 /// polling the order's real status after placement rather than treating acceptance as a fill - but
 /// the wire format differs in ways this class hides:
 ///
-///  1. FORM-URLENCODED BODY WITH ABBREVIATED FIELD NAMES, not JSON. Reverse-engineered from the
-///     Kotak-Neo/Kotak-neo-api-v2 Python SDK's order_api.py: es=exchange_segment, pc=product,
-///     pr=price, pt=order_type ("price type"), qt=quantity, rt=validity, ts=trading_symbol,
-///     tt=transaction_type. These eight are the ones confirmed from that source; optional fields
-///     the SDK's place_order() also accepts (AMO, disclosed quantity, market protection, trigger
-///     price, tag) are deliberately NOT sent here since their abbreviated JSON keys were not found
-///     in the available source excerpts - see KotakOptions' doc comment on this integration's
-///     overall confidence level. This is fine for the one order shape this app actually sends
-///     (MarketProtectionService always converts a MARKET leg into a protected IOC LIMIT before it
-///     reaches any gateway), but SL/SL-M/AMO order types would need those fields wired in and
-///     confirmed first.
+///  1. WIRE FORMAT CONFIRMED against Kotak's own Place/Modify/Cancel Order Trade API docs. Place
+///     order (POST quick/order/rule/ms/place) sends: am=AMO flag, dq=disclosed quantity,
+///     es=exchange_segment, mp=market protection, pc=product, pf=portfolio flag, pr=price,
+///     pt=order_type ("price type"), qt=quantity, rt=validity, tp=trigger price, ts=trading_symbol,
+///     tt=transaction_type - all thirteen are sent on every call (matching the docs' own example
+///     request body) even though this app only ever needs a few of them to vary: am/dq/mp/pf/tp
+///     are fixed at their "plain order" defaults ("NO"/"0"/"0"/"N"/"0") since MarketProtectionService
+///     always converts a MARKET leg into a protected IOC LIMIT before it reaches any gateway, so
+///     this app never places an AMO, disclosed-quantity, or SL/SL-M/trigger order. Wiring those up
+///     for real would just mean varying these five instead of adding new ones.
 ///
-///  2. ORDERS ARE ADDRESSED BY tradingSymbol, per the SDK - not a numeric token the way Dhan
+///  2. ORDERS ARE ADDRESSED BY tradingSymbol, per the docs - not a numeric token the way Dhan
 ///     addresses by securityId. leg.TradingSymbol is sent directly.
 ///
-///  3. RESPONSE FIELD NAMES ARE BEST-EFFORT. No confirmed Kotak order-placement/order-status
-///     response was available while building this (see KotakApiClient's doc comment) - several
-///     plausible field-name candidates are tried for the order id, status and fill quantity,
-///     falling back to treating an unrecognised response as "accepted, fill status unknown" rather
-///     than guessing wrong in either direction. Tighten ReadOrderId/ReadStatus/ReadFilledQuantity
-///     once a real response has been seen.
+///  3. RESPONSE FIELD NAMES: nOrdNo/stat/stCode/emsg are CONFIRMED (the docs' own place/modify/
+///     cancel response shapes) and are tried first in every reader below. The remaining candidates
+///     in each reader are for order-STATUS responses (GET quick/order/history), which these docs
+///     don't cover and remain best-effort - see KotakApiClient's doc comment for the overall
+///     confidence split between confirmed and guessed endpoints.
 /// </summary>
 public sealed class KotakOrderGateway : IOrderGateway
 {
@@ -59,12 +57,17 @@ public sealed class KotakOrderGateway : IOrderGateway
 
         var fields = new Dictionary<string, string>
         {
+            ["am"] = "NO", // AMO flag - this app never places after-market orders
+            ["dq"] = "0", // disclosed quantity - never used
             ["es"] = KotakSymbology.ToKotakSegment(leg.Exchange),
+            ["mp"] = "0", // market protection - MarketProtectionService already converts MARKET legs to a protected LIMIT before this gateway sees them
             ["pc"] = KotakSymbology.ToKotakProduct(leg.Product),
+            ["pf"] = "N", // portfolio flag - per the docs' own example
             ["pr"] = (leg.Price ?? 0m).ToString(System.Globalization.CultureInfo.InvariantCulture),
             ["pt"] = KotakSymbology.ToKotakOrderType(leg.OrderType),
             ["qt"] = leg.Quantity.ToString(System.Globalization.CultureInfo.InvariantCulture),
             ["rt"] = KotakSymbology.ToKotakValidity(leg.Validity),
+            ["tp"] = "0", // trigger price - only meaningful for SL/SL-M, which this app never sends
             ["ts"] = leg.TradingSymbol,
             ["tt"] = KotakSymbology.ToKotakTransactionType(leg.TransactionType),
         };
@@ -158,7 +161,9 @@ public sealed class KotakOrderGateway : IOrderGateway
             return false;
         }
 
-        var fields = new Dictionary<string, string> { ["nOrdNo"] = orderId };
+        // Cancel's order-id field is "on" (Nest order number) - NOT "nOrdNo", unlike every other
+        // endpoint here. Confirmed by the docs' own example jData: {"am":"NO","on":"<orderNo>"}.
+        var fields = new Dictionary<string, string> { ["am"] = "NO", ["on"] = orderId };
         using var response = await _api.SendSessionAsync(
             HttpMethod.Post, "quick/order/cancel", fields, $"cancelling order {orderId}", cancellationToken);
 
