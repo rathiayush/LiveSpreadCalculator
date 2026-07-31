@@ -137,6 +137,8 @@ public sealed class KotakAuthService : IBrokerAuthService
         _session.Sid = step2.EditSid;
         if (!string.IsNullOrWhiteSpace(step2.BaseUrl))
             _session.BaseUrl = step2.BaseUrl;
+        if (!string.IsNullOrWhiteSpace(step2.DataCenter))
+            _session.DataCenter = step2.DataCenter;
 
         var expiresUtc = GetTokenExpiryUtc(DateTimeOffset.UtcNow);
         return new BrokerLoginResult(true, step2.EditToken, _session.ClientId, expiresUtc, null);
@@ -197,7 +199,7 @@ public sealed class KotakAuthService : IBrokerAuthService
         }
     }
 
-    private readonly record struct Step2Result(bool Success, string? EditToken, string? EditSid, string? BaseUrl, string? Error);
+    private readonly record struct Step2Result(bool Success, string? EditToken, string? EditSid, string? BaseUrl, string? DataCenter, string? Error);
 
     private async Task<Step2Result> LoginStep2Async(string viewSid, string viewToken, CancellationToken cancellationToken)
     {
@@ -218,7 +220,7 @@ public sealed class KotakAuthService : IBrokerAuthService
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning("Kotak TOTP login step 2 (MPIN validate) failed (HTTP {Status}): {Body}", (int)response.StatusCode, Truncate(body));
-                return new Step2Result(false, null, null, null, $"Kotak rejected the MPIN validation (HTTP {(int)response.StatusCode}).");
+                return new Step2Result(false, null, null, null, null, $"Kotak rejected the MPIN validation (HTTP {(int)response.StatusCode}).");
             }
 
             using var document = JsonDocument.Parse(body);
@@ -229,16 +231,18 @@ public sealed class KotakAuthService : IBrokerAuthService
             // Confirmed by Kotak's own trade-api-guide ("Save your TRADING_TOKEN, TRADING_SID, and
             // BASE_URL for all subsequent API calls") - see KotakSession.BaseUrl's doc comment.
             var baseUrl = data.TryGetProperty("baseUrl", out var b) ? b.GetString() : null;
+            // Confirmed by the Order & Position Streaming docs - see KotakSession.DataCenter's doc comment.
+            var dataCenter = data.TryGetProperty("dataCenter", out var dc) ? dc.GetString() : null;
 
             if (string.IsNullOrWhiteSpace(editToken) || string.IsNullOrWhiteSpace(editSid))
-                return new Step2Result(false, null, null, null, "Kotak's MPIN validation response contained no token/sid.");
+                return new Step2Result(false, null, null, null, null, "Kotak's MPIN validation response contained no token/sid.");
 
-            return new Step2Result(true, editToken, editSid, baseUrl, null);
+            return new Step2Result(true, editToken, editSid, baseUrl, dataCenter, null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Kotak TOTP login step 2 (MPIN validate) failed (network error or unexpected response).");
-            return new Step2Result(false, null, null, null, ex.Message);
+            return new Step2Result(false, null, null, null, null, ex.Message);
         }
     }
 

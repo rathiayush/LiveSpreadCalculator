@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -29,13 +30,20 @@ namespace SpreadTrader.KotakIntegration.Ticker;
 /// a real field-mapping table was available) are kept only as a fallback in case a future message
 /// shape ever omits the confirmed one.
 ///
-/// ORDER UPDATES ARE NOT WIRED. No confirmed Kotak order-update push channel (WebSocket message
-/// type or separate socket) was available either - OrderUpdateReceived exists to satisfy
-/// IMarketDataFeed but never actually fires from this client. This is not silently broken:
-/// PositionsCache (the only subscriber) also re-polls positions on its own fixed timer regardless
-/// of this event ever firing, the same "still refreshes even without a push" safety net
-/// DhanMarketFeedClient's doc comment describes for its own order-socket outages - it just means a
-/// Kotak-driven position change is only ever noticed on the next scheduled poll, never instantly.
+/// ORDER/POSITION UPDATES: a SECOND, SEPARATE socket, confirmed by Kotak's own Order & Position
+/// Streaming docs - wss://{dataCenter}.kotaksecurities.com/realtime (KotakSession.DataCenter, from
+/// the login response - NOT the same host as WsUrl/RestBaseUrl). Its auth handshake is a raw
+/// string, deliberately NOT JSON ("Do NOT use JSON.stringify" per the docs):
+/// <c>{type:cn,Authorization:{editToken},Sid:{editSid},src:WEB}</c>. Every message on this socket
+/// that carries <c>"type":"order"</c> or <c>"type":"position"</c> just raises OrderUpdateReceived
+/// (deliberately parameterless - see IMarketDataFeed's doc comment) rather than parsing the full
+/// order/position payload, since PositionsCache (the only subscriber) only needs "something
+/// changed, re-fetch now" - it already does its own REST fetch either way. Runs as its own
+/// reconnect/backoff loop alongside (not gating) the HSM tick socket above: RunOrderStreamAsync
+/// simply waits for DataCenter/AccessToken/Sid to exist and retries on any disconnect, so a slow or
+/// failed login never blocks ticks, and losing this socket never stops ticks either - PositionsCache
+/// still re-polls on its own fixed timer regardless, same "still refreshes even without a push"
+/// safety net DhanMarketFeedClient's doc comment describes for its own order-socket outages.
 /// </summary>
 public sealed class KotakMarketFeedClient : IMarketDataFeed
 {
@@ -57,15 +65,13 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
     private readonly ConcurrentDictionary<uint, Tick> _lastTick = new();
 
     private ClientWebSocket? _socket;
+    private ClientWebSocket? _orderStreamSocket;
 
     public event Action<Tick>? TickReceived;
 
-    // Never raised - see the class doc comment's "ORDER UPDATES ARE NOT WIRED" section. Kept to
-    // satisfy IMarketDataFeed; suppressed rather than left as a compiler warning since the reason
-    // is deliberate and documented, not an oversight.
-#pragma warning disable CS0067
+    // Raised from the separate order/position stream socket - see the class doc comment's
+    // "ORDER/POSITION UPDATES" section.
     public event Action? OrderUpdateReceived;
-#pragma warning restore CS0067
 
     public KotakMarketFeedClient(
         IOptions<KotakOptions> options,
@@ -108,6 +114,11 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
     public async Task RunAsync(IReadOnlyCollection<uint> instrumentTokens, CancellationToken cancellationToken)
     {
         lock (_tokensLock) { foreach (var token in instrumentTokens) _subscribedTokens.Add(token); }
+
+        // Runs its own independent reconnect loop for the process lifetime - deliberately not
+        // awaited here, and its failures never propagate to the tick socket loop below (see the
+        // class doc comment's "ORDER/POSITION UPDATES" section on why the two are decoupled).
+        _ = RunOrderStreamSupervisorAsync(cancellationToken);
 
         var backoff = TimeSpan.FromSeconds(1);
         while (!cancellationToken.IsCancellationRequested)
@@ -224,6 +235,107 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
             if (!await DelayAsync(HeartbeatInterval, cancellationToken)) return;
             try { await SendAsync(new { type = "hb" }, cancellationToken); }
             catch { /* connection loss surfaces via the receive loop instead */ }
+        }
+    }
+
+    // ---- Order/position stream (wss://{dataCenter}.kotaksecurities.com/realtime) - see the class
+    // doc comment's "ORDER/POSITION UPDATES" section. Entirely independent of the tick socket
+    // above: its own supervisor loop, its own backoff, its own ClientWebSocket instance.
+
+    private async Task RunOrderStreamSupervisorAsync(CancellationToken cancellationToken)
+    {
+        var backoff = TimeSpan.FromSeconds(1);
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (await RunOrderStreamOnceAsync(cancellationToken))
+                    backoff = TimeSpan.FromSeconds(1); // a real connection was made and later dropped - reset backoff
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Kotak order/position stream connection lost, retrying in {Seconds}s", backoff.TotalSeconds);
+            }
+
+            if (!await DelayAsync(backoff, cancellationToken)) break;
+            backoff = TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 30));
+        }
+    }
+
+    /// <summary>Connects, authenticates, and receives until the socket closes or the session isn't
+    /// ready yet. Returns true if a connection was actually established (so the supervisor knows to
+    /// reset its backoff), false if it never got that far (e.g. DataCenter/session not set yet -
+    /// login hasn't completed) so the supervisor keeps its current backoff instead of hot-looping.</summary>
+    private async Task<bool> RunOrderStreamOnceAsync(CancellationToken cancellationToken)
+    {
+        var dataCenter = _session.DataCenter;
+        var accessToken = _session.AccessToken;
+        var sid = _session.Sid;
+        if (string.IsNullOrWhiteSpace(dataCenter) || string.IsNullOrWhiteSpace(accessToken) || string.IsNullOrWhiteSpace(sid))
+            return false; // no session yet - KotakSessionAutoRenewalHostedService hasn't logged in (or this response had no dataCenter)
+
+        _orderStreamSocket?.Dispose();
+        var socket = new ClientWebSocket();
+        _orderStreamSocket = socket;
+
+        var uri = new Uri($"wss://{dataCenter.ToLowerInvariant()}.kotaksecurities.com/realtime");
+        await socket.ConnectAsync(uri, cancellationToken);
+
+        // Deliberately a raw string, NOT JSON.stringify'd - confirmed by Kotak's own docs ("This is
+        // NOT JSON. Do NOT use JSON.stringify. It must be sent as a single raw string.").
+        var authPayload = $"{{type:cn,Authorization:{accessToken},Sid:{sid},src:WEB}}";
+        var authBytes = Encoding.UTF8.GetBytes(authPayload);
+        await socket.SendAsync(new ArraySegment<byte>(authBytes), WebSocketMessageType.Text, true, cancellationToken);
+
+        _logger.LogInformation("Connected to Kotak order/position stream ({Host})", uri.Host);
+
+        var buffer = new byte[16 * 1024];
+        using var messageStream = new MemoryStream();
+
+        while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
+        {
+            messageStream.SetLength(0);
+            WebSocketReceiveResult result;
+
+            do
+            {
+                result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "server closed", cancellationToken);
+                    return true;
+                }
+                messageStream.Write(buffer, 0, result.Count);
+            } while (!result.EndOfMessage);
+
+            if (result.MessageType == WebSocketMessageType.Text)
+                HandleOrderStreamMessage(messageStream.GetBuffer().AsSpan(0, (int)messageStream.Length));
+        }
+
+        return true;
+    }
+
+    /// <summary>Deliberately doesn't parse the order/position payload itself - see the class doc
+    /// comment on why a bare OrderUpdateReceived is enough for PositionsCache. The connection
+    /// acknowledgement (<c>{"ak":"ok","type":"cn",...}</c>) also lands here and is silently ignored
+    /// since its type is "cn", not "order"/"position".</summary>
+    private void HandleOrderStreamMessage(ReadOnlySpan<byte> bytes)
+    {
+        JsonDocument document;
+        try { document = JsonDocument.Parse(bytes.ToArray()); }
+        catch (JsonException) { return; }
+
+        using (document)
+        {
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return;
+            var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
+            if (type is "order" or "position")
+                OrderUpdateReceived?.Invoke();
         }
     }
 
@@ -385,8 +497,15 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
             try { await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "disposing", CancellationToken.None); }
             catch { /* best-effort close */ }
         }
-
         _socket?.Dispose();
+
+        if (_orderStreamSocket is { State: WebSocketState.Open })
+        {
+            try { await _orderStreamSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "disposing", CancellationToken.None); }
+            catch { /* best-effort close */ }
+        }
+        _orderStreamSocket?.Dispose();
+
         _sendLock.Dispose();
     }
 }
