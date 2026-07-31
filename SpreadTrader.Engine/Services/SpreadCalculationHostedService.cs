@@ -341,6 +341,7 @@ public sealed class SpreadCalculationHostedService : BackgroundService
 
                 await _triggerSink.PublishAsync(seqTriggerEvent, stoppingToken);
                 await _triggerChannel.Writer.WriteAsync(seqTriggerEvent, stoppingToken);
+                SendTriggerMetNotification(rule, spread, measured, isExitTrigger, snapshot.Direction);
                 continue;
             }
 
@@ -368,7 +369,48 @@ public sealed class SpreadCalculationHostedService : BackgroundService
 
             await _triggerSink.PublishAsync(triggerEvent, stoppingToken);
             await _triggerChannel.Writer.WriteAsync(triggerEvent, stoppingToken);
+            SendTriggerMetNotification(rule, spread, measured, isExitTrigger, snapshot.Direction);
         }
+    }
+
+    /// <summary>
+    /// Tells the user the instant a trigger's condition is satisfied - separate from (and earlier
+    /// than) TelegramOrderExecutionSink's message, which only fires once OrderDispatchHostedService
+    /// has finished acting on the TriggerEvent this same cycle just queued (margin check, order
+    /// placement, fill/reject outcome). This one answers "did my trigger price get hit at all",
+    /// independent of whatever the resulting order actually does. Fire-and-forget with
+    /// CancellationToken.None, same as TelegramOrderExecutionSink - a slow/hung Telegram call must
+    /// never delay evaluating the rest of this cycle's rules or the order dispatch that already
+    /// happened above via the channel write, and TelegramNotifier.SendAsync itself never throws
+    /// (best-effort, logs and swallows), so there is nothing here to catch.
+    /// </summary>
+    private void SendTriggerMetNotification(TriggerRule rule, SpreadDefinition spread, decimal measured, bool isExitTrigger, string direction) =>
+        _ = _notifier.SendAsync(BuildTriggerMetMessage(rule, spread, measured, isExitTrigger, direction), CancellationToken.None);
+
+    private string BuildTriggerMetMessage(TriggerRule rule, SpreadDefinition spread, decimal measured, bool isExitTrigger, string direction)
+    {
+        var kind = isExitTrigger ? "Exit" : "Entry";
+        var unit = rule.ThresholdIsPercent ? "%" : "";
+        var nowIst = TimeZoneInfo.ConvertTime(DateTimeOffset.UtcNow, _ist);
+
+        return $"🎯 <b>{kind} trigger price met</b>\n" +
+               $"Underlying: {spread.Underlying}\n" +
+               $"Condition: {DescribeCondition(rule)}\n" +
+               $"Value at trigger: {measured:0.00}{unit} ({direction})\n" +
+               $"Order is being placed now.\n" +
+               $"{nowIst:dd-MMM HH:mm:ss} IST";
+    }
+
+    private static string DescribeCondition(TriggerRule rule)
+    {
+        var unit = rule.ThresholdIsPercent ? "%" : "";
+        return rule.Operator switch
+        {
+            TriggerOperator.GreaterThanOrEqual => $"rises to/above {rule.Threshold:0.##}{unit}",
+            TriggerOperator.LessThanOrEqual => $"falls to/below {rule.Threshold:0.##}{unit}",
+            TriggerOperator.AbsoluteGreaterThanOrEqual => $"moves ±{rule.Threshold:0.##}{unit} from zero",
+            _ => $"{rule.Operator} {rule.Threshold:0.##}{unit}",
+        };
     }
 
     /// <summary>Picks which of the snapshot's four measured values (raw/percent x auto-direction/
