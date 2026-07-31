@@ -89,6 +89,7 @@ public sealed class AuthController : ControllerBase
     {
         platform = _brokerAuth.PlatformName,
         supportsInteractiveLogin = _brokerAuth.SupportsInteractiveLogin,
+        supportsManualToken = _brokerAuth.SupportsManualToken,
         isAuthenticated = _session.IsAuthenticated,
         notAuthenticatedGuidance = _brokerAuth.NotAuthenticatedGuidance,
     });

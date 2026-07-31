@@ -39,6 +39,7 @@ public sealed class SwitchingBrokerAuthService : IBrokerAuthService
 
     public string PlatformName => Active.PlatformName;
     public bool SupportsInteractiveLogin => Active.SupportsInteractiveLogin;
+    public bool SupportsManualToken => Active.SupportsManualToken;
     public string NotAuthenticatedGuidance => Active.NotAuthenticatedGuidance;
 
     public Task<string> BuildLoginUrlAsync(CancellationToken cancellationToken) =>
