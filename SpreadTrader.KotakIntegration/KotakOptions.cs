@@ -40,7 +40,8 @@ public sealed class KotakOptions
     public string ConsumerKey { get; set; } = "";
 
     /// <summary>The mobile number registered on the Kotak Neo trading account, used in step 1 of
-    /// login (totp_login). Digits only, no country code prefix, matching the SDK's own examples.</summary>
+    /// login (totp_login). Confirmed by Kotak's own Trade API docs to include the ISD/country code
+    /// prefix - e.g. "+919876543210", not "9876543210".</summary>
     public string MobileNumber { get; set; } = "";
 
     /// <summary>The Kotak Neo client code (UCC - "Unique Client Code"), used alongside
@@ -72,14 +73,23 @@ public sealed class KotakOptions
 
     private string? _restBaseUrl;
 
-    /// <summary>Base URL every REST call is built against - see the class doc comment's
-    /// "BASE URLS ARE BEST-EFFORT" note. Defaults by <see cref="Environment"/> when not explicitly
-    /// set: Kotak's trading-API gateway host for prod, the UAT gateway host otherwise.</summary>
+    /// <summary>Base URL every trading REST call (orders, positions, margin, limits) is built
+    /// against once a session exists - see the class doc comment's "BASE URLS" note. Defaults by
+    /// <see cref="Environment"/> when not explicitly set: Kotak's trading-API gateway host for
+    /// prod, the UAT gateway host otherwise. NOT used for login - see <see cref="LoginBaseUrl"/>,
+    /// which is a fixed, different host confirmed by Kotak's own Trade API docs.</summary>
     public string RestBaseUrl
     {
         get => _restBaseUrl ?? (IsUat ? "https://nsbxapi-gw.kotaksecurities.com" : "https://gw-napi.kotaksecurities.com");
         set => _restBaseUrl = value;
     }
+
+    /// <summary>The two login endpoints (tradeApiLogin, tradeApiValidate) are hosted on a fixed,
+    /// separate host - confirmed by Kotak's own Trade API Authentication docs, which hardcode
+    /// <c>https://mis.kotaksecurities.com</c> for both regardless of environment/prod-vs-uat. This
+    /// is NOT the same host as <see cref="RestBaseUrl"/> (the post-login trading gateway) - do not
+    /// merge the two just because both are "the Kotak base URL".</summary>
+    public string LoginBaseUrl { get; set; } = "https://mis.kotaksecurities.com";
 
     private string? _wsUrl;
 
