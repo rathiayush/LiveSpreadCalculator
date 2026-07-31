@@ -56,14 +56,22 @@ public sealed class KotakApiResponse : IDisposable
 ///     from the Kotak-Neo/Kotak-neo-api-v2 Python SDK's per-endpoint header_params, not verified
 ///     against a live account (see KotakOptions' doc comment).
 ///
-///  2. FORM-URLENCODED BODIES, not JSON. Every order/margin/scrip-master call in the reference SDK
-///     sends <c>Content-Type: application/x-www-form-urlencoded</c> with abbreviated field names
-///     (see KotakSymbology's order-field comment on KotakOrderGateway) rather than a JSON object.
+///  2. A SINGLE "jData" FORM FIELD CARRYING A JSON STRING, not a normal multi-field form body and
+///     not a raw JSON request body either. Confirmed against Kotak's own Trade API docs for Place/
+///     Modify/Cancel Order: <c>Content-Type: application/x-www-form-urlencoded</c>, but the body is
+///     one field - <c>jData=&lt;url-encoded JSON object&gt;</c> - not <c>es=...&amp;pc=...&amp;...</c> the
+///     way a normal HTML form would send those same keys. <see cref="SendAsync"/> takes the caller's
+///     field dictionary, serializes IT (not the request) to a JSON object, and posts that single
+///     jData field - callers themselves still just build a plain string dictionary, same as before.
 ///
-/// Error parsing is defensive/best-effort (try several plausible field names, fall back to the raw
-/// body) rather than keyed to one confirmed shape, for the same reason KotakOptions' base URLs are
-/// configurable: this integration has not yet been exercised against a real Kotak Neo account, so
-/// the exact error envelope is unconfirmed. Tighten this once real responses are seen.
+///  3. neo-fin-key IS REQUIRED ON TRADING CALLS TOO, not just login. Confirmed by the same Place/
+///     Modify/Cancel Order docs - <see cref="SendSessionAsync"/> sends it alongside Sid/Auth on every
+///     call, the same static per-environment value KotakAuthService already sends on login.
+///
+/// Error parsing (stat/emsg/stCode) is confirmed for the order endpoints by the same docs; the field
+/// names tried for OTHER endpoints (positions, margin, scrip master, order-status polling) remain
+/// best-effort - see each service's own doc comment for which parts of its wire format are confirmed
+/// vs. still a reverse-engineered guess.
 /// </summary>
 public sealed class KotakApiClient
 {
@@ -96,8 +104,8 @@ public sealed class KotakApiClient
 
     /// <summary>Sends a request authenticated with the live session's Sid/Auth headers - every
     /// trading call (orders, positions, margin, limits) goes through this.
-    /// <paramref name="formFields"/> is serialized as <c>application/x-www-form-urlencoded</c>;
-    /// pass null for a GET/DELETE with no body.</summary>
+    /// <paramref name="formFields"/> is JSON-serialized and sent as the single <c>jData</c> form
+    /// field (see the class doc comment); pass null for a GET/DELETE with no body.</summary>
     public Task<KotakApiResponse> SendSessionAsync(
         HttpMethod method,
         string path,
@@ -109,6 +117,7 @@ public sealed class KotakApiClient
         {
             ["Sid"] = _session.Sid ?? "",
             ["Auth"] = _session.AccessToken ?? "",
+            ["neo-fin-key"] = _options.NeoFinKey,
         };
         return SendAsync(method, path, formFields, headers, context, cancellationToken);
     }
@@ -143,8 +152,15 @@ public sealed class KotakApiClient
             request.Headers.TryAddWithoutValidation(name, value);
         request.Headers.TryAddWithoutValidation("Accept", "application/json");
 
+        // Wrap the caller's fields as the single "jData" form field carrying a JSON string, per
+        // Kotak's confirmed Place/Modify/Cancel Order wire format (see the class doc comment) -
+        // NOT a normal multi-field form body. FormUrlEncodedContent still does the outer
+        // "jData=<url-encoded value>" encoding; only the value itself is JSON here.
         if (formFields is { Count: > 0 })
-            request.Content = new FormUrlEncodedContent(formFields);
+        {
+            var jData = JsonSerializer.Serialize(formFields);
+            request.Content = new FormUrlEncodedContent(new[] { new KeyValuePair<string, string>("jData", jData) });
+        }
 
         try
         {
