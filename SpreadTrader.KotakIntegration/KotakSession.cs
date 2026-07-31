@@ -22,6 +22,10 @@ namespace SpreadTrader.KotakIntegration;
 ///  - <see cref="ClientId"/> is the UCC (client code) the session belongs to - matches
 ///    IBrokerSession's contract (Dhan's dhanClientId-equivalent), used where an adapter needs to
 ///    know which account it's talking to rather than just proving it's authenticated.
+///  - <see cref="DataCenter"/> ("E22", "E43", ...) is what the order/position streaming WebSocket
+///    host is built from - confirmed by Kotak's own Order & Position Streaming docs, whose example
+///    host (wss://e21.kotaksecurities.com/realtime) matches this field's naming pattern, not
+///    BaseUrl's (which uses an unrelated subdomain, e.g. "cis"). See KotakMarketFeedClient.
 /// </summary>
 public sealed class KotakSession : IBrokerSession
 {
@@ -47,6 +51,12 @@ public sealed class KotakSession : IBrokerSession
     /// to KotakOptions.RestBaseUrl's configured guess whenever this is null (e.g. before the first
     /// login completes, or if a given response happens not to include it).</summary>
     public string? BaseUrl { get; set; }
+
+    /// <summary>The data-center code from the totp_validate response - see the class doc comment.
+    /// Null until a successful login (or on a login whose response happens not to include it), in
+    /// which case KotakMarketFeedClient simply can't open the order/position stream yet and keeps
+    /// retrying - the tick feed and REST calls are unaffected either way.</summary>
+    public string? DataCenter { get; set; }
 
     public string? ClientId { get; set; }
 
