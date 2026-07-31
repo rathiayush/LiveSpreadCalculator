@@ -15,26 +15,39 @@ using SpreadTrader.KiteIntegration.Instruments;
 using SpreadTrader.KiteIntegration.Orders;
 using SpreadTrader.KiteIntegration.Positions;
 using SpreadTrader.KiteIntegration.Ticker;
+using SpreadTrader.KotakIntegration;
+using SpreadTrader.KotakIntegration.Auth;
+using SpreadTrader.KotakIntegration.Instruments;
+using SpreadTrader.KotakIntegration.Orders;
+using SpreadTrader.KotakIntegration.Positions;
+using SpreadTrader.KotakIntegration.Ticker;
 
 namespace LiveSpreadCalculator.Brokers;
 
 /// <summary>
-/// Wires up BOTH Kite's and Dhan's implementations of the seven interfaces in
+/// Wires up Kite's, Dhan's AND Kotak's implementations of the seven interfaces in
 /// SpreadTrader.Core.Brokers, always - not exactly one, chosen at startup, the way this used to
 /// work. Every interface is bound to a "Switching*" wrapper (see the Switching folder) that reads
 /// BrokerSwitchState.Current on every call and forwards to whichever platform's concrete
 /// instance is presently active. That is what lets BrokerPlatformController switch platforms with
 /// a plain in-process call - BrokerSwitchState.SwitchTo - instead of restarting the process.
 ///
-/// Consequence worth knowing: since both platforms are always constructed, both platforms' config
-/// sections need to be at least well-formed enough not to throw eagerly (none of these constructors
+/// Consequence worth knowing: since every platform is always constructed, every platform's config
+/// section needs to be at least well-formed enough not to throw eagerly (none of these constructors
 /// validate credentials - see each auth service's own "not configured" exceptions, thrown lazily
 /// at first use, same as before). A deployment that only ever intends to use one platform can leave
-/// the other's credentials blank; that platform will simply fail to authenticate if ever switched
+/// the others' credentials blank; that platform will simply fail to authenticate if ever switched
 /// to, exactly like an unconfigured platform already fails today - it just doesn't stop the OTHER
-/// platform's services from constructing and running normally.
+/// platforms' services from constructing and running normally.
 ///
-/// SpreadTrader.Engine still never references either broker project directly - it only depends on
+/// KOTAK IS DELIBERATELY NOT SELECTABLE FROM THE DASHBOARD - BrokerPlatformPage.jsx's PLATFORMS
+/// list only offers Kite/Dhan by design (see that file's comment). Switching to Kotak is a
+/// backend-only action: POST /api/settings/broker-platform with {"Platform":"Kotak"}, or setting
+/// Broker__Platform=Kotak before boot. BrokerPlatformController itself needed no code change for
+/// this - Enum.TryParse&lt;BrokerPlatform&gt; already accepts "Kotak" once the enum has the member;
+/// only the frontend's own dropdown omits it.
+///
+/// SpreadTrader.Engine still never references any broker project directly - it only depends on
 /// the interfaces, now satisfied by the Switching* wrappers instead of a single concrete
 /// implementation. That boundary is what makes PositionsCache/TickIngestionHostedService/etc.
 /// completely unaware that a switch can even happen.
@@ -68,6 +81,7 @@ public static class BrokerRegistration
 
         services.AddKite(configuration, mcxOptions, futuresCsvPath);
         services.AddDhan(configuration, mcxOptions, futuresCsvPath, dhanScripMasterCachePath);
+        services.AddKotak(configuration, mcxOptions, futuresCsvPath);
 
         // A broker switch made from the dashboard (see BrokerPlatformController) writes its choice
         // to this file, so it survives a later literal restart too - see
@@ -242,6 +256,76 @@ public static class BrokerRegistration
             mcxOptions));
 
         services.AddSingleton<DhanMarketFeedClient>();
+
+        return services;
+    }
+
+    // ---- Kotak Neo ------------------------------------------------------------------------------
+
+    private static IServiceCollection AddKotak(
+        this IServiceCollection services,
+        IConfiguration configuration,
+        McxOptions mcxOptions,
+        string futuresCsvPath)
+    {
+        services.Configure<KotakOptions>(configuration.GetSection(KotakOptions.SectionName));
+        var kotakOptions = configuration.GetSection(KotakOptions.SectionName).Get<KotakOptions>() ?? new KotakOptions();
+
+        services.AddSingleton<KotakSession>();
+
+        // See kiteRateLimiter's comment in AddKite above for why this is a local variable, not a
+        // DI registration.
+        var kotakRateLimiter = new RateLimiter(maxOperationsPerSecond: kotakOptions.OrdersPerSecond);
+
+        // Detects a dead Kotak session at every call site, clears it, and pushes the dashboard -
+        // see its doc comment for the (best-effort, unconfirmed) detection heuristic.
+        services.AddSingleton<KotakAuthFailureHandler>();
+
+        // Every session-authenticated Kotak REST call goes through this - see KotakApiClient.
+        services.AddSingleton(sp => new KotakApiClient(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KotakApiClient)),
+            sp.GetRequiredService<IOptions<KotakOptions>>(),
+            sp.GetRequiredService<KotakSession>(),
+            sp.GetRequiredService<KotakAuthFailureHandler>(),
+            sp.GetRequiredService<ILogger<KotakApiClient>>()));
+
+        services.AddSingleton(sp => new KotakAuthService(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(KotakAuthService)),
+            sp.GetRequiredService<IOptions<KotakOptions>>(),
+            sp.GetRequiredService<KotakSession>(),
+            sp.GetRequiredService<ILogger<KotakAuthService>>()));
+
+        // Kotak has no static-token mode at all (unlike Dhan) - this is the only way a Kotak
+        // session is ever obtained, so it always runs, not gated behind an AuthMode check.
+        services.AddHostedService<KotakSessionAutoRenewalHostedService>();
+
+        services.AddSingleton(sp => new KotakInstrumentMasterService(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(InstrumentMasterHttpClient),
+            sp.GetRequiredService<KotakApiClient>(),
+            sp.GetRequiredService<IOptions<KotakOptions>>(),
+            sp.GetRequiredService<ILogger<KotakInstrumentMasterService>>(),
+            futuresCsvPath,
+            // Kotak has no MCX segment at all (see KotakSymbology) - MCX is filtered out inside
+            // KotakInstrumentMasterService.ResolveRequestedSegments even if mcxOptions enables it
+            // for the other two platforms, so passing the same resolved exchange list here is safe.
+            mcxOptions.ResolveExchanges()));
+
+        services.AddSingleton(sp => new KotakOrderGateway(
+            sp.GetRequiredService<KotakApiClient>(),
+            kotakRateLimiter,
+            sp.GetRequiredService<ILogger<KotakOrderGateway>>()));
+
+        services.AddSingleton(sp => new KotakMarginService(
+            sp.GetRequiredService<KotakApiClient>(),
+            sp.GetRequiredService<ILogger<KotakMarginService>>()));
+
+        services.AddSingleton(sp => new KotakPositionsService(
+            sp.GetRequiredService<KotakApiClient>(),
+            sp.GetRequiredService<KotakInstrumentMasterService>(),
+            sp.GetRequiredService<ITickStore>(),
+            sp.GetRequiredService<ILogger<KotakPositionsService>>()));
+
+        services.AddSingleton<KotakMarketFeedClient>();
 
         return services;
     }

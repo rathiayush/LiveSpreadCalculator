@@ -40,7 +40,7 @@ public sealed class BrokerPlatformController : ControllerBase
     public ActionResult<SwitchResponse> Switch([FromBody] SwitchRequest request)
     {
         if (!Enum.TryParse<BrokerPlatform>(request.Platform, ignoreCase: true, out var platform))
-            return BadRequest(new { error = $"Unknown platform '{request.Platform}'. Use 'Kite' or 'Dhan'." });
+            return BadRequest(new { error = $"Unknown platform '{request.Platform}'. Use 'Kite', 'Dhan', or 'Kotak'." });
 
         var switched = _state.SwitchTo(platform);
 
