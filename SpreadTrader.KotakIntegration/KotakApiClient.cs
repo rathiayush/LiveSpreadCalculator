@@ -204,9 +204,23 @@ public sealed class KotakApiClient
             errorMessage ?? (isSuccess ? "Kotak returned an empty or unparseable body." : $"Kotak returned HTTP {(int)statusCode}."));
     }
 
+    /// <summary>Kotak's "there is simply nothing here" response for an empty book - HTTP 200 with
+    /// <c>{"stCode":5203,"errMsg":"No Data","stat":"Not_Ok"}</c>. Despite the Not_Ok, this is a
+    /// normal empty result, not a failure: an account that hasn't traded today legitimately has no
+    /// positions/orders/trades. Verified live against a real (untraded) Kotak account.</summary>
+    private const int NoDataStatusCode = 5203;
+
     private static bool BodyIndicatesFailure(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object) return false;
+
+        // Checked before the stat/status checks below, since "No Data" carries stat="Not_Ok" and
+        // would otherwise be misreported as a failed call - which is what made an empty position
+        // book surface to the dashboard as an API error rather than simply "no open positions".
+        if (root.TryGetProperty("stCode", out var stCode) &&
+            stCode.ValueKind == JsonValueKind.Number &&
+            stCode.TryGetInt32(out var code) && code == NoDataStatusCode)
+            return false;
 
         if (root.TryGetProperty("stat", out var stat) && stat.ValueKind == JsonValueKind.String &&
             !string.Equals(stat.GetString(), "Ok", StringComparison.OrdinalIgnoreCase))

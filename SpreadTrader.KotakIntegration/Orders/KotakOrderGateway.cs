@@ -101,9 +101,19 @@ public sealed class KotakOrderGateway : IOrderGateway
             await Task.Delay(StatusPollDelay, cancellationToken);
             await _rateLimiter.WaitAsync(cancellationToken);
 
+            // POST, not GET. Every Kotak call carries its parameters as a jData FORM BODY (see
+            // KotakApiClient) and Kotak's gateway does not accept a body on a GET - verified
+            // against the live API, where the GET form of this exact call is bounced with a 303
+            // redirect to an interstitial security page rather than ever reaching the order
+            // service, while the POST form reaches it and validates the order number properly.
+            // This ran on every single order placement, so with GET no Kotak order's fill status
+            // could EVER be confirmed: each one came back Status="OPEN"/Success=false, which then
+            // had OrderDispatchHostedService cancel it as a stray and treat the hedge leg as
+            // unfilled, so the paired SELL leg was never sent - i.e. Kotak could place orders but
+            // never actually complete a basket.
             var fields = new Dictionary<string, string> { ["nOrdNo"] = orderId };
             using var response = await _api.SendSessionAsync(
-                HttpMethod.Get, "quick/order/history", fields, $"polling status of order {orderId}", cancellationToken);
+                HttpMethod.Post, "quick/order/history", fields, $"polling status of order {orderId}", cancellationToken);
 
             if (!response.Success)
             {

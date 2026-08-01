@@ -19,6 +19,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SpreadTrader.DhanIntegratio
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SpreadTrader.KotakIntegration", "SpreadTrader.KotakIntegration\SpreadTrader.KotakIntegration.csproj", "{0C9D72AB-8F5B-4A33-A1D0-99C02DA73F38}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SpreadTrader.Engine.Tests", "SpreadTrader.Engine.Tests\SpreadTrader.Engine.Tests.csproj", "{FB5884B0-DB90-4C57-9B5E-6F665DBB739C}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -59,6 +61,10 @@ Global
 		{0C9D72AB-8F5B-4A33-A1D0-99C02DA73F38}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{0C9D72AB-8F5B-4A33-A1D0-99C02DA73F38}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{0C9D72AB-8F5B-4A33-A1D0-99C02DA73F38}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FB5884B0-DB90-4C57-9B5E-6F665DBB739C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FB5884B0-DB90-4C57-9B5E-6F665DBB739C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FB5884B0-DB90-4C57-9B5E-6F665DBB739C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FB5884B0-DB90-4C57-9B5E-6F665DBB739C}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
