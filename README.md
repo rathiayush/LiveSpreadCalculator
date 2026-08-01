@@ -1,7 +1,7 @@
 # SpreadTrader / LiveSpreadCalculator
 
 Live calendar-spread dashboard for NSE/NFO futures (e.g. July vs August contracts). Works against
-either **Zerodha Kite Connect** or **DhanHQ**, selected by a single configuration flag
+**Zerodha Kite Connect**, **DhanHQ** or **Kotak Neo**, selected by a single configuration flag
 (`Broker:Platform`) - see "Choosing a broker" below. Streams tick data over a WebSocket, computes each spread from the
 legs' **best ask price** (not last traded price - see below), evaluates user-configured trigger
 rules, and can punch basket orders automatically when a trigger fires. Ticks and spread values
@@ -15,8 +15,10 @@ file so they survive one (see Limitations).
 | `SpreadTrader.Core` | Domain models and interfaces. No external dependencies. |
 | `SpreadTrader.KiteIntegration` | Kite Connect login/token exchange, instrument master lookup, the binary WebSocket ticker client (parses best bid/ask from market depth), REST order placement, margin and positions. |
 | `SpreadTrader.DhanIntegration` | The same, against DhanHQ API v2: consent/static-token login, scrip-master lookup, Dhan's binary market feed plus its separate order-update socket, order placement, margin and positions. |
+| `SpreadTrader.KotakIntegration` | The same, against the Kotak Neo Trade API: two-step TOTP+MPIN login, scrip-master lookup, the HSM market-data socket plus a separate order/position stream, order placement, margin and positions. |
 | `SpreadTrader.Engine` | The background pipeline: tick ingestion -> spread calculation (ask-price based) -> trigger evaluation -> order dispatch. Runs as hosted services inside the Api process (not a separate process). References no broker project - it works purely against the interfaces in `SpreadTrader.Core/Brokers/`. |
 | `LiveSpreadCalculator` | The ASP.NET Core Web Api. Hosts the REST endpoints, the SignalR hub that pushes live spread/trigger updates, and wires the whole DI graph together. **This is what you run.** |
+| `SpreadTrader.Engine.Tests` | xUnit tests for the engine. Mostly the order-dispatch business rules - hedge-first sequencing, the always-fill retry policy, margin gating, trigger re-arming - driven end to end against the real service through an in-memory harness. Run with `dotnet test`. |
 | `SpreadTrader.Dashboard/spreadtrader.dashboard.client` | The React (Vite) dashboard - two pages: a read-only live grid (Dashboard) and configuration (Trigger Config: symbol sync, spreads, triggers). SignalR client. |
 
 ## Ask price, not last traded price
@@ -91,7 +93,8 @@ All settings live under `LiveSpreadCalculator/appsettings.json`:
 
 ## Choosing a broker
 
-`Broker:Platform` decides which broker the app STARTS on - `"Kite"` (default) or `"Dhan"`. Override
+`Broker:Platform` decides which broker the app STARTS on - `"Kite"` (default), `"Dhan"` or
+`"Kotak"`. Override
 it per-deployment with the `Broker__Platform` environment variable. Both platforms' services are
 always constructed and running, regardless of this setting - it only picks which one is active the
 moment the process boots (see "Switching from the dashboard" below for changing it afterwards).
@@ -101,7 +104,9 @@ otherwise switching to it works, but it shows up "not authenticated" until you d
 unconfigured platform already behaves today.
 
 **Switching from the dashboard.** Admin -> Broker Platform lets you switch between Kite and Dhan
-instantly, with no restart and no downtime - both platforms' order gateways, market data feeds,
+instantly, with no restart and no downtime (Kotak is deliberately excluded from this UI - see
+"Running on Kotak Neo" below - but the same in-process switch is available for it over the API).
+All three platforms' order gateways, market data feeds,
 instrument masters, positions services and sessions exist side by side for the whole life of the
 process (see `BrokerRegistration`); switching just flips which one every request is routed to (see
 `BrokerSwitchState`). A platform that was already authenticated before the switch (e.g. Dhan on
@@ -112,7 +117,7 @@ default), purely so a LATER, unrelated process restart (a redeploy, a crash) als
 whichever platform was last switched to, rather than reverting to `Broker:Platform`. Like any
 platform switch, this clears every live tick and spread definition (trigger rules and PNL alerts
 are untouched - they're saved to disk and keyed by a broker-neutral id, see below) and needs a
-universe rebuild afterwards, since Kite and Dhan use different instrument ids for the same
+universe rebuild afterwards, since every platform uses different instrument ids for the same
 contracts.
 
 **Running on Dhan.** No browser login is required either way - pick between a token you paste in
@@ -152,7 +157,7 @@ Two things to know before trading on Dhan:
   without it) - the same requirement `zerodha-ip-whitelist.txt` documents for Zerodha.
 - **The universe rebuilds itself automatically** - at startup, and again right after every broker
   switch (see `AutoUniverseBuilderHostedService`) - so there's no manual step needed to get back to
-  a streaming state. Kite and Dhan use different tradingsymbols and different instrument ids, which
+  a streaming state. Each platform uses different tradingsymbols and different instrument ids, which
   is exactly why a rebuild is needed at all: spreads resolved against one broker's instrument master
   can't be reused against the other's, and switching already clears them (see `BrokerSwitchState`).
   The manual "Build universe" button on the Symbols page still exists too, for picking up a newly
@@ -162,6 +167,43 @@ Two things to know before trading on Dhan:
   F&O contracts, which don't need intraday-fresh listings. The download is also saved to disk
   (`Storage:DhanScripMasterCachePath`), so a restart loads instantly from that local file instead
   of waiting on a fresh ~26 MB download from Dhan before anything can resolve a symbol.
+
+**Running on Kotak Neo.** Kotak is deliberately **not offered in the dashboard's broker-switch UI** -
+switch to it from the backend only, either with `Broker:Platform: "Kotak"` / `Broker__Platform=Kotak`
+(applies at boot) or `POST /api/settings/broker-platform` with `{"platform":"Kotak"}` (applies
+immediately, no restart).
+
+Kotak has **no browser login and no pasteable token at all** - there is only the automatic TOTP+MPIN
+handshake, so unlike Kite there is no login button and unlike Dhan there is no "Enter token" box
+either. Set all five of these and the app authenticates itself within seconds of startup, and
+re-authenticates on its own whenever a session dies:
+
+| Key | Env var | What it is |
+|---|---|---|
+| `Kotak:ConsumerKey` | `Kotak__ConsumerKey` | Token from the Neo API dashboard (More -> Trade API -> your app). |
+| `Kotak:MobileNumber` | `Kotak__MobileNumber` | Registered mobile, **with ISD code** - e.g. `+919876543210`. |
+| `Kotak:Ucc` | `Kotak__Ucc` | Your client code. **Case-sensitive** - Kotak rejects the login with "Consumer key is not linked to &lt;ucc&gt;" if the case is wrong. |
+| `Kotak:Mpin` | `Kotak__Mpin` | Trading MPIN. |
+| `Kotak:TotpSecret` | `Kotak__TotpSecret` | Base32 seed from Kotak's TOTP registration page (the manual-entry text, not the QR image). |
+
+`Kotak:Environment` (`"prod"` / `"uat"`) picks which gateway the defaults point at; everything else
+(`RestBaseUrl`, `WsUrl`, `TickerMode`, `OrdersPerSecond`) has a working default. The login host is
+fixed and separate from the trading host - the trading host comes back from the login response
+itself, so there is nothing to configure there.
+
+The same security note as Dhan's TOTP mode applies, and more strongly: `Kotak:Mpin` +
+`Kotak:TotpSecret` together let whoever holds them mint a valid trading session at will,
+indefinitely. Supply them via environment variables or user-secrets, never a committed file.
+
+Two Kotak-specific limits worth knowing before you switch:
+
+- **No MCX.** Kotak Neo's documented exchange segments have no MCX entry, so an instance running the
+  commodity add-on (silver/gold/crude spreads) cannot use Kotak for those - see `KotakSymbology`.
+- **The account must actually be funded.** With `Engine:VerifyMarginBeforeDispatch` on, a zero-margin
+  account blocks every basket - and each blocked fire counts toward
+  `Engine:MaxUnfilledDispatchAttempts`, so after ten of them the rule **disarms and disables itself**
+  and needs manual re-enabling. An unfunded account doesn't sit idle; it quietly switches your
+  triggers off.
 
 ### Every `Dhan:*` key
 
@@ -249,6 +291,37 @@ auto-login failure (wrong PIN/secret, or the deployment's clock is far enough ou
 invalidate the TOTP window).
 
 See ARCHITECTURE.md §3.1 for the interfaces involved and what actually differs between the two.
+
+## Broker auth callback URLs
+
+Kite's browser login and Dhan's consent flow both redirect the browser back to this app when they
+finish, so the exact URL has to be registered in that broker's own console first. The route is
+always `/api/auth/callback` on the instance's own host - the API serves the dashboard from the same
+origin, so it is simply that instance's `Dashboard:BaseUrl` plus the path. Register the CUSTOM
+domain where an instance has one (Dokploy also gives each app a `*.sslip.io` domain, but the custom
+one is what `Dashboard:BaseUrl` is set to and what the callback redirects back to).
+
+| Instance | Callback URL |
+|---|---|
+| Production | `https://spreadtrader-production-api-sbxrqg-6b959d-200-141-7-234.sslip.io/api/auth/callback` |
+| pradeep-1 | `https://pradeep1.mahakaltradinggroup.online/api/auth/callback` |
+| pradeep-2 | `https://mahakaltradinggroup.online/api/auth/callback` |
+| Local dev | `https://localhost:7105/api/auth/callback` |
+
+Note the local one is the **API's** port (7105), not the Vite dashboard's (63061) - the broker
+redirects to the backend, which then bounces the browser on to `Dashboard:BaseUrl`.
+
+Where each is actually needed:
+
+- **Kite** - always. Register it in the Kite Connect developer console as the app's Redirect URL;
+  without it the daily login cannot complete.
+- **Dhan** - only on the consent flow (`Dhan:AppId` + `Dhan:AppSecret`). Static-token and TOTP modes
+  never open a browser, so they need no callback at all.
+- **Kotak** - never. There is no browser flow; it authenticates itself over TOTP+MPIN.
+
+If an instance's domain changes, update both `Dashboard__BaseUrl` on that Dokploy app AND the
+registered redirect URL in the broker console - they have to agree, and a mismatch fails the login
+with the broker's own (usually unhelpful) error.
 
 ## Running locally
 
@@ -349,7 +422,7 @@ config is ever baked into the image; only which container it's started AS differ
 
 - **Ticks and spreads are not persisted** - a restart loses live prices and computed spread values (expected: they're only meaningful live). **Spread definitions are also in-memory only** - re-add them via the Trigger Config page after a restart (they're quick to re-add now that the symbol picker is synced). **Trigger rules are the one thing that persists**, via the CSV file described above - but see the next point.
 - **The trigger CSV is a stopgap, not a database.** The whole file is rewritten on every add/remove/fire/enable/disable. Fine at the scale of tens or low hundreds of rules; would not hold up under high write concurrency. If that ever matters, swap `CsvTriggerRuleStore` for a real database behind the same `ITriggerRuleStore` interface - nothing else needs to change.
-- **No official .NET SDK exists for either broker** - the WebSocket tick parsers and REST calls here are hand-implemented against each vendor's documented protocol, not a vendor library.
+- **No official .NET SDK exists for any of the three brokers** - the WebSocket tick parsers and REST calls here are hand-implemented against each vendor's documented protocol, not a vendor library.
 - **Daily login is required on Kite, with no way around it.** Kite access tokens expire ~6 AM daily by regulation, and Kite offers no programmatic way to mint one - a human has to complete the browser flow every trading day. Dhan tokens also last 24 hours, but Dhan's TOTP mode (`Dhan:AuthMode: "Totp"`) lets this app generate and renew its own with zero manual steps, ever - see "Choosing a broker" above. That option doesn't exist on Kite.
 - **Full ticker mode uses more bandwidth than quote mode** since it carries market depth on every change - necessary for ask-price triggers, but worth knowing if you scale well past ~200 instruments.
 - **This places real orders.** SEBI's retail algo-trading framework (mandatory since April 2026) requires algo orders to carry an exchange-assigned Algo-ID tagged through your broker - confirm with Zerodha how a self-built strategy like this should be tagged before running it live.
