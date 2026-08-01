@@ -76,12 +76,11 @@ public sealed class OrderDispatchHostedService : BackgroundService
     private readonly IExitTriggerRuleStore _exitRuleStore;
     private readonly ISpreadDefinitionStore _spreadStore;
     private readonly IOrderGateway _orderGateway;
-    private readonly IMarginService _marginService;
+    private readonly BasketMarginGate _marginGate;
     private readonly IOrderExecutionSink _executionSink;
     private readonly MarketProtectionService _marketProtection;
     private readonly TriggerInFlightTracker _inFlightTracker;
     private readonly EngineOptions _options;
-    private readonly McxOptions _mcx;
     private readonly ILogger<OrderDispatchHostedService> _logger;
 
     public OrderDispatchHostedService(
@@ -90,12 +89,11 @@ public sealed class OrderDispatchHostedService : BackgroundService
         IExitTriggerRuleStore exitRuleStore,
         ISpreadDefinitionStore spreadStore,
         IOrderGateway orderGateway,
-        IMarginService marginService,
+        BasketMarginGate marginGate,
         IOrderExecutionSink executionSink,
         MarketProtectionService marketProtection,
         TriggerInFlightTracker inFlightTracker,
         IOptions<EngineOptions> options,
-        McxOptions mcx,
         ILogger<OrderDispatchHostedService> logger)
     {
         _triggerChannel = triggerChannel;
@@ -103,12 +101,11 @@ public sealed class OrderDispatchHostedService : BackgroundService
         _exitRuleStore = exitRuleStore;
         _spreadStore = spreadStore;
         _orderGateway = orderGateway;
-        _marginService = marginService;
+        _marginGate = marginGate;
         _executionSink = executionSink;
         _marketProtection = marketProtection;
         _inFlightTracker = inFlightTracker;
         _options = options.Value;
-        _mcx = mcx;
         _logger = logger;
     }
 
@@ -181,7 +178,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         // trips beforehand (Kite's own order entry still enforces margin regardless).
         if (_options.VerifyMarginBeforeDispatch)
         {
-            var blockReason = await CheckMarginAsync(rule.Id, legs, stoppingToken);
+            var blockReason = await _marginGate.CheckAsync(rule.Id, legs, stoppingToken);
             if (blockReason is not null)
             {
                 await PublishBlockedAsync(triggerEvent, spread.Underlying, orderKind, blockReason, stoppingToken);
@@ -425,64 +422,6 @@ public sealed class OrderDispatchHostedService : BackgroundService
         _executionSink.PublishAsync(
             new BasketExecutionEvent(triggerEvent.FireId, triggerEvent.RuleId, triggerEvent.SpreadId, underlying, orderKind, Array.Empty<OrderLegResult>(), MarginBlocked: true, BlockedReason: reason, DateTimeOffset.UtcNow, SpreadValueAtTrigger: triggerEvent.SpreadValueAtTrigger),
             cancellationToken);
-
-    /// <summary>Checks the basket's combined margin requirement (with the near/far hedge
-    /// benefit applied - see IMarginService.GetBasketMarginAsync) against the account's
-    /// actual available margin. Returns null if dispatch should proceed, or a human-readable
-    /// reason if it should be blocked entirely (published to the dashboard via
-    /// PublishBlockedAsync). Only called at all when EngineOptions.VerifyMarginBeforeDispatch is
-    /// true - see DispatchAsync, which skips this (and the two Kite API round trips it makes)
-    /// entirely when that's off. Blocks only when the account genuinely can't cover the basket
-    /// plus EngineOptions.MarginSafetyBufferPercent headroom; either way the basket margin
-    /// figures are logged for visibility. A failed *check* (network error, Kite API hiccup) is
-    /// not treated as fatal - Kite's own order entry will reject a genuinely under-margined
-    /// order regardless, so we'd rather attempt the basket than block it on a flaky diagnostic
-    /// call. A confirmed *insufficient* margin, on the other hand, blocks dispatch entirely,
-    /// since letting one leg place and the other get rejected for lack of margin is exactly the
-    /// naked-position scenario this whole basket approach exists to avoid.</summary>
-    private async Task<string?> CheckMarginAsync(string ruleId, List<OrderLegRequest> legs, CancellationToken cancellationToken)
-    {
-        var margin = await _marginService.GetBasketMarginAsync(legs, cancellationToken);
-        if (!margin.Success)
-        {
-            _logger.LogWarning("Basket margin check failed for rule {RuleId}: {Error} - proceeding anyway", ruleId, margin.ErrorMessage);
-            return null;
-        }
-
-        _logger.LogInformation(
-            "Basket margin for rule {RuleId}: final={Final} (would be {Initial} without the spread hedge benefit)",
-            ruleId, margin.FinalTotal, margin.InitialTotal);
-
-        if (margin.FinalTotal is not { } required)
-            return null;
-
-        // NFO (equity F&O) settles against the "equity" margin segment; MCX commodities against
-        // "commodity". Pick per-basket from the legs' own exchange so an MCX basket's pre-trade
-        // check reads the right pool of available funds. With the MCX add-on off no basket ever
-        // carries an MCX leg, so this always resolves to the original "equity" default.
-        var marginSegment = _mcx.Enabled && legs.Any(l => string.Equals(l.Exchange, _mcx.Exchange, StringComparison.OrdinalIgnoreCase))
-            ? _mcx.MarginSegment
-            : "equity";
-        var available = await _marginService.GetAvailableMarginAsync(marginSegment, cancellationToken);
-        if (!available.Success || available.Net is not { } net)
-        {
-            _logger.LogWarning("Available margin check failed for rule {RuleId}: {Error} - proceeding anyway", ruleId, available.ErrorMessage);
-            return null;
-        }
-
-        var buffered = required * (1 + _options.MarginSafetyBufferPercent / 100m);
-        if (net < buffered)
-        {
-            var reason = $"Insufficient margin: needs {required:F2} (+{_options.MarginSafetyBufferPercent}% safety buffer = {buffered:F2}), only {net:F2} available.";
-            _logger.LogError(
-                "Rule {RuleId} basket NOT placed - {Reason} Placing only some legs would leave a naked, unhedged position, so nothing was sent.",
-                ruleId, reason);
-            return reason;
-        }
-
-        _logger.LogInformation("Margin check passed for rule {RuleId}: {Available:F2} available covers {Required:F2} + buffer.", ruleId, net, required);
-        return null;
-    }
 
     /// <summary>Cancels any leg whose fill status couldn't be confirmed as terminal in time
     /// (Status == "OPEN" - see KiteOrderGateway.PollOrderStatusAsync) so it doesn't sit resting
