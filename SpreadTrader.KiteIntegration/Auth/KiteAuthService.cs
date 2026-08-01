@@ -42,6 +42,10 @@ public sealed class KiteAuthService : IBrokerAuthService
     /// dashboard there is no login flow at all.</summary>
     public bool SupportsInteractiveLogin => true;
 
+    // Irrelevant on Kite - SupportsInteractiveLogin is always true, so the dashboard always shows
+    // the Login button and never consults this at all. True for interface-completeness only.
+    public bool SupportsManualToken => true;
+
     /// <summary>Never actually shown - SupportsInteractiveLogin is always true on Kite, so the
     /// dashboard always renders the login button instead of this text. Implemented anyway so every
     /// IBrokerAuthService gives a real answer rather than an empty string.</summary>
