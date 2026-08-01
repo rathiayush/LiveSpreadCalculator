@@ -86,12 +86,11 @@ internal sealed class DispatchHarness
             ExitRules,
             Spreads,
             Gateway,
-            Margin,
+            new BasketMarginGate(Margin, Microsoft.Extensions.Options.Options.Create(Options), new McxOptions(), NullLogger<BasketMarginGate>.Instance),
             Sink,
             new MarketProtectionService(Ticks, NullLogger<MarketProtectionService>.Instance),
             new TriggerInFlightTracker(),
             Microsoft.Extensions.Options.Options.Create(Options),
-            new McxOptions(),
             NullLogger<OrderDispatchHostedService>.Instance);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
