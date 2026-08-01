@@ -44,10 +44,11 @@ jobs:
       - name: Build & sanity check
         run: dotnet build LiveSpreadCalculator.sln -c Release
 
-      # No test project exists in this repo yet (see ARCHITECTURE.md) - deliberate placeholder,
-      # not a no-op pretending to be a real gate.
+      # Gates the deploy on the engine's unit tests - notably the partial-fill/retry balancing
+      # invariant (SpreadTrader.Engine.Tests.PartialFillBalancingTests), which is what stops a
+      # lopsided basket leaving the account holding an unhedged position.
       - name: Run tests
-        run: echo "No test project exists yet - nothing to run. See ARCHITECTURE.md."
+        run: dotnet test LiveSpreadCalculator.sln -c Release --no-build --verbosity normal
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
