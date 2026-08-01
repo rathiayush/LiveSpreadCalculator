@@ -17,7 +17,6 @@ import {
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
-  ApiOutlined,
 } from '@ant-design/icons'
 import { api } from './api'
 import { useAuth, clearSession } from './auth'
@@ -70,7 +69,12 @@ const NAV_ITEMS = [
   { key: '/positions', label: 'Positions & PNL', icon: <ScissorOutlined />, subtitle: 'Open positions, live PNL, and manual square-off' },
   { key: '/symbols', label: 'Symbols', icon: <CloudSyncOutlined />, subtitle: 'Sync the F&O symbol list and build the tradeable universe', group: 'admin' },
   { key: '/configured-spreads', label: 'Configured Spreads', icon: <UnorderedListOutlined />, subtitle: 'Every spread definition currently streaming', group: 'admin' },
-  { key: '/broker-platform', label: 'Broker Platform', icon: <ApiOutlined />, subtitle: 'Switch which broker the app trades through, instantly - no restart', group: 'admin' },
+  // Broker Platform is deliberately NOT listed here. Each deployment is pinned to one broker
+  // (Production -> Kotak, pradeep-1 -> Dhan, pradeep-2 -> Kite) and switching mid-session clears
+  // every live tick and spread definition and forces a universe rebuild, so it is not something to
+  // offer behind a menu item anyone can click by accident. The page, its route and
+  // POST /api/settings/broker-platform all still work - navigate to /broker-platform directly, or
+  // call the API, when a switch is genuinely intended.
 ]
 
 const ADMIN_GROUP_KEY = 'admin-group'
