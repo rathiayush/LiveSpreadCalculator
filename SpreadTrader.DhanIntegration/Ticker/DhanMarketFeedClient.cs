@@ -584,6 +584,14 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         }
 
         _socket?.Dispose();
-        _sendLock.Dispose();
+
+        // _sendLock is deliberately NOT disposed. This client is a DI singleton that gets
+        // STOPPED AND RESTARTED rather than thrown away: SwitchingMarketDataFeed disposes the
+        // outgoing platform's feed on every broker switch and then calls RunAsync on that same
+        // instance again if the user ever switches back (see its RunAsync loop). Disposing the
+        // semaphore here made that second run throw ObjectDisposedException on its first send,
+        // silently killing the feed for the rest of the process. The socket above is the real
+        // unmanaged resource and is still closed and disposed; ConnectAndSubscribeAsync creates a
+        // fresh one on the next run, so nothing leaks by leaving this alone.
     }
 }

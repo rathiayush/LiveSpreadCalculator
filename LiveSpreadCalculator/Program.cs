@@ -153,6 +153,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<TickIngestionHoste
 // dispatch) - see TriggerInFlightTracker's doc comment.
 builder.Services.AddSingleton<TriggerInFlightTracker>();
 builder.Services.AddHostedService<SpreadCalculationHostedService>();
+// Pre-trade margin decision, split out of OrderDispatchHostedService so that class is left
+// with the order choreography alone - see BasketMarginGate.
+builder.Services.AddSingleton<BasketMarginGate>();
 builder.Services.AddHostedService<OrderDispatchHostedService>();
 builder.Services.AddHostedService<SpreadRankingHostedService>();
 // Hourly (IST :29-mark) snapshot capture into the SQL history DB + monthly expired-leg flush - see

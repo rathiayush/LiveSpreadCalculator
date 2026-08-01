@@ -506,6 +506,10 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
         }
         _orderStreamSocket?.Dispose();
 
-        _sendLock.Dispose();
+        // _sendLock is deliberately NOT disposed - see DhanMarketFeedClient.DisposeAsync for the
+        // full reasoning. In short: this is a DI singleton that SwitchingMarketDataFeed disposes on
+        // every broker switch and re-runs if the user switches back, so disposing the semaphore
+        // here would make that second run throw ObjectDisposedException on its first send. Both
+        // sockets above are the real resources and are still closed and disposed.
     }
 }
