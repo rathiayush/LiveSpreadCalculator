@@ -6,20 +6,24 @@ namespace SpreadTrader.Engine.Tests;
 /// Covers the two pure decisions that determine whether a partially-filled basket can leave the
 /// account holding an UNHEDGED position:
 ///
-///   - <see cref="OrderDispatchHostedService.ComputeRetryTargets"/> - how far each leg is chased
-///     on retry, and
-///   - <see cref="OrderDispatchHostedService.ComputeExcessQuantities"/> - how much of each leg is
-///     unwound afterwards so the basket ends up matched.
+///   - <see cref="OrderDispatchHostedService.ComputeLegTargets"/> - how far each leg is chased as
+///     the basket is filled in (the always-fill policy), and
+///   - <see cref="OrderDispatchHostedService.ComputeExcessQuantities"/> - how much of each leg
+///     would be unwound, used by the opt-in square-off fallback and by the Critical alert that
+///     reports anything the retries could not fill.
 ///
-/// The invariant these exist to guarantee, asserted directly in
-/// <see cref="EveryFillCombination_EndsUpBalanced"/>: after the excess is unwound, every leg of a
-/// multi-leg basket holds the SAME quantity - either a real hedged spread or nothing at all, never
-/// a lopsided position.
+/// Two properties are asserted, one per decision:
+///
+///   - <see cref="ShortIsNeverChasedBeyondTheHedge_ForAnyFillCombination"/>: while filling, the
+///     short's target never exceeds the hedge that actually exists, so the account is never
+///     transiently naked on the way to a complete basket.
+///   - <see cref="EveryFillCombination_EndsUpBalanced"/>: the excess calculation always resolves to
+///     equal quantities across the legs, and never gives back a matched lot.
 ///
 /// The regression these guard is a real one that shipped: a hedge leg filling 1 of 2 lots counted
 /// as "hedge in place" (OrderResult.Success only means at least one lot filled), which released a
 /// FULL-size short against it, and the old cleanup only recognised the all-or-nothing case - so the
-/// leftover naked lot was silently kept. See PartialHedgeFill_* below.
+/// leftover naked lot was silently kept.
 /// </summary>
 public class PartialFillBalancingTests
 {
@@ -69,43 +73,76 @@ public class PartialFillBalancingTests
         Assert.Equal(new[] { 0 }, OrderDispatchHostedService.ComputeExcessQuantities(new[] { 1 }));
     }
 
-    // ---- ComputeRetryTargets: how far each leg is chased ---------------------------------------
+    // ---- ComputeLegTargets: how far each leg is chased (always-fill policy) -------------------
+
+    private static readonly bool[] BuyThenSell = { false, true };
 
     [Fact]
-    public void SingleLeg_IsChasedToItsFullRequestedQuantity()
+    public void HedgeLeg_IsAlwaysChasedToTheFullRequestedQuantity()
     {
-        Assert.Equal(new[] { 2 }, OrderDispatchHostedService.ComputeRetryTargets(new[] { 2 }, new[] { 0 }));
-        Assert.Equal(new[] { 2 }, OrderDispatchHostedService.ComputeRetryTargets(new[] { 2 }, new[] { 1 }));
+        // Always-fill: the aim is to COMPLETE the spread the rule asked for, never to settle for a
+        // smaller one, so the hedge is chased to full size regardless of what the short has done.
+        var targets = OrderDispatchHostedService.ComputeLegTargets(new[] { 2, 2 }, new[] { 1, 0 }, BuyThenSell);
+        Assert.Equal(2, targets[0]);
     }
 
     [Fact]
-    public void RejectedLeg_IsChasedUpToItsFilledPartner()
+    public void ShortLeg_IsCappedAtWhatTheHedgeCurrentlyHolds()
     {
-        // Partner got the full 2, so the rejected leg is chased to 2 - completing the spread is
-        // better than unwinding the leg that did fill.
-        Assert.Equal(new[] { 2, 2 }, OrderDispatchHostedService.ComputeRetryTargets(new[] { 2, 2 }, new[] { 2, 0 }));
+        // Hedge has only 1 of 2 filled so far, so the short may be topped up to 1 - never to 2,
+        // which would overshoot the long protecting it mid-fill.
+        var targets = OrderDispatchHostedService.ComputeLegTargets(new[] { 2, 2 }, new[] { 1, 0 }, BuyThenSell);
+        Assert.Equal(1, targets[1]);
     }
 
     [Fact]
-    public void PartiallyFilledPair_SettlesAtTheMatchedQuantityInsteadOfChasingFullSize()
+    public void ShortLegCapRisesAsTheHedgeFillsIn()
     {
-        // Both at 1 of 2: already balanced. Chasing either back to 2 would just re-open an
-        // imbalance, so both targets are the matched 1 and no retry is triggered.
-        Assert.Equal(new[] { 1, 1 }, OrderDispatchHostedService.ComputeRetryTargets(new[] { 2, 2 }, new[] { 1, 1 }));
+        // Once the hedge reaches full size the cap lifts and the short is chased to full size too -
+        // this is what lets successive retry rounds converge on a complete, matched basket.
+        var targets = OrderDispatchHostedService.ComputeLegTargets(new[] { 2, 2 }, new[] { 2, 1 }, BuyThenSell);
+        Assert.Equal(new[] { 2, 2 }, targets);
     }
 
     [Fact]
-    public void PartialHedgeWithRejectedPartner_ChasesOnlyToTheHedgedQuantity()
+    public void UnfilledHedge_LeavesTheShortCappedAtZero()
     {
-        // Hedge got 1 of 2, partner got nothing: chase the partner to 1 (matching the hedge), NOT
-        // to 2 - which is exactly what would strand a naked lot.
-        Assert.Equal(new[] { 1, 1 }, OrderDispatchHostedService.ComputeRetryTargets(new[] { 2, 2 }, new[] { 1, 0 }));
+        // No hedge at all means no short may be placed - the cap is 0, so nothing is chased.
+        var targets = OrderDispatchHostedService.ComputeLegTargets(new[] { 2, 2 }, new[] { 0, 0 }, BuyThenSell);
+        Assert.Equal(0, targets[1]);
     }
 
     [Fact]
-    public void NothingFilledAnywhere_NothingIsChased()
+    public void SellOnlyRule_HasNoHedgeToCapAgainstAndGoesToFullSize()
     {
-        Assert.Equal(new[] { 0, 0 }, OrderDispatchHostedService.ComputeRetryTargets(new[] { 2, 2 }, new[] { 0, 0 }));
+        var targets = OrderDispatchHostedService.ComputeLegTargets(new[] { 2 }, new[] { 0 }, new[] { true });
+        Assert.Equal(new[] { 2 }, targets);
+    }
+
+    [Fact]
+    public void SingleBuyLeg_IsChasedToItsFullRequestedQuantity()
+    {
+        var targets = OrderDispatchHostedService.ComputeLegTargets(new[] { 2 }, new[] { 1 }, new[] { false });
+        Assert.Equal(new[] { 2 }, targets);
+    }
+
+    [Fact]
+    public void ShortIsNeverChasedBeyondTheHedge_ForAnyFillCombination()
+    {
+        // The safety property of the always-fill policy: at no point during filling may the short's
+        // target exceed the hedge that actually exists, so the account is never transiently naked.
+        for (var hedgeFilled = 0; hedgeFilled <= 5; hedgeFilled++)
+        {
+            for (var shortFilled = 0; shortFilled <= 5; shortFilled++)
+            {
+                var targets = OrderDispatchHostedService.ComputeLegTargets(
+                    new[] { 5, 5 }, new[] { hedgeFilled, shortFilled }, BuyThenSell);
+
+                Assert.Equal(5, targets[0]); // hedge always chased to full size
+                Assert.True(targets[1] <= hedgeFilled,
+                    $"short target {targets[1]} exceeded the hedge's {hedgeFilled} filled lot(s)");
+            }
+        }
     }
 
     // ---- The invariant itself -----------------------------------------------------------------
@@ -135,18 +172,4 @@ public class PartialFillBalancingTests
         }
     }
 
-    [Fact]
-    public void RetryTargetsNeverExceedRequestedQuantity()
-    {
-        // A retry must never chase a leg beyond what the rule actually asked for, whatever the
-        // partner did - otherwise a retry could overfill the basket past the user's intended size.
-        for (var legA = 0; legA <= 5; legA++)
-        {
-            for (var legB = 0; legB <= 5; legB++)
-            {
-                var targets = OrderDispatchHostedService.ComputeRetryTargets(new[] { 3, 3 }, new[] { legA, legB });
-                Assert.All(targets, t => Assert.True(t <= 3, $"target {t} exceeded the requested 3 for fills {legA}/{legB}"));
-            }
-        }
-    }
 }

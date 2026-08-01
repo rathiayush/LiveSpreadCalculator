@@ -41,22 +41,27 @@ public sealed class EngineOptions
     /// VerifyMarginBeforeDispatch is true.</summary>
     public decimal MarginSafetyBufferPercent { get; set; } = 5m;
 
-    /// <summary>If only one leg of a multi-leg basket fills (the other is rejected/fails), the
-    /// account is left holding a naked, unhedged position instead of the intended calendar
-    /// spread - which is both a completely different risk profile and loses the margin benefit
-    /// the basket was placed for. When true, OrderDispatchHostedService immediately fires an
-    /// opposite-side order on the filled leg to flatten it back out (also subject to
-    /// MarketProtectionPercent below, same as any other MARKET-type leg).</summary>
-    public bool AutoSquareOffOnPartialFill { get; set; } = true;
+    /// <summary>OPT-IN FALLBACK, OFF BY DEFAULT. The default policy is ALWAYS-FILL: an incomplete
+    /// basket is driven to completion by RetryUnfilledLegOnPartialFill below, never by unwinding
+    /// the side that already filled - giving a filled leg back throws away the position the rule
+    /// fired for and pays the bid/ask spread twice to end up flat. Set this to true only if you
+    /// would genuinely rather be flat than exposed when a leg cannot be filled: it makes
+    /// OrderDispatchHostedService fire an opposite-side order for whatever quantity is left
+    /// unmatched (also subject to MarketProtectionPercent, same as any other MARKET-type leg).
+    ///
+    /// With this off, a leg the retries could NOT fill is left standing as a real unhedged
+    /// position - logged at Critical (see OrderDispatchHostedService.WarnIfLegsLeftUnmatched)
+    /// rather than silently, but still live and needing manual attention.</summary>
+    public bool AutoSquareOffOnPartialFill { get; set; } = false;
 
-    /// <summary>Only consulted when AutoSquareOffOnPartialFill is true. Before flattening
-    /// whatever leg(s) DID fill in a partial-fill basket, make one more attempt at whichever
-    /// leg(s) were genuinely rejected/cancelled (not the hedge's deliberately-skipped partner -
-    /// see OrderDispatchHostedService.RetryUnfilledLegsAsync), at RetryUnfilledLegSlippageMultiplier
-    /// times the rule's own SlippagePercent - a fill, even at worse pricing, keeps the intended
-    /// hedged spread intact, which is strictly better than ending up with no position at all
-    /// after flattening the leg that did fill. Set to false to go straight to square-off on any
-    /// rejection, as before this option existed.</summary>
+    /// <summary>The always-fill mechanism, and the main thing keeping a basket from ending up
+    /// lopsided. Re-attempts whichever leg(s) still have quantity outstanding at
+    /// RetryUnfilledLegSlippageMultiplier times the rule's own SlippagePercent, each attempt
+    /// re-priced off the current market - see OrderDispatchHostedService.RetryUnfilledLegsAsync.
+    /// Hedge (BUY) legs are chased to the rule's full requested quantity; short (SELL) legs are
+    /// capped at whatever the hedge currently holds, so the position stays hedged at every
+    /// intermediate step while it fills in. Turning this off means an incomplete basket simply
+    /// stays incomplete.</summary>
     public bool RetryUnfilledLegOnPartialFill { get; set; } = true;
 
     /// <summary>How much wider than the rule's own SlippagePercent every retry above is allowed
@@ -66,12 +71,16 @@ public sealed class EngineOptions
     /// attempt, not the band. Only used when RetryUnfilledLegOnPartialFill is true.</summary>
     public decimal RetryUnfilledLegSlippageMultiplier { get; set; } = 3m;
 
-    /// <summary>How many times OrderDispatchHostedService.RetryUnfilledLegsAsync re-attempts a
-    /// still-unfilled leg of a genuine partial fill, each at RetryUnfilledLegSlippageMultiplier's
-    /// wider slippage band and each re-priced off the latest market price, before giving up on
-    /// that leg and falling back to square-off. Only used when RetryUnfilledLegOnPartialFill is
-    /// true.</summary>
-    public int RetryUnfilledLegMaxAttempts { get; set; } = 2;
+    /// <summary>How many rounds OrderDispatchHostedService.RetryUnfilledLegsAsync runs to fill an
+    /// incomplete basket, each at RetryUnfilledLegSlippageMultiplier's wider slippage band and each
+    /// re-priced off the latest market price. Only used when RetryUnfilledLegOnPartialFill is true.
+    ///
+    /// Needs headroom because a round only advances one side at a time: the hedge is topped up
+    /// first, and only the NEXT round can lift the short against the hedge that round just added
+    /// (see ComputeLegTargets). So a basket that needs both sides topped up costs two rounds
+    /// minimum - 4 leaves room for a failed round on either side rather than stopping half-way with
+    /// a leg still outstanding.</summary>
+    public int RetryUnfilledLegMaxAttempts { get; set; } = 4;
 
     /// <summary>Cap on consecutive fires of the same rule that fill nothing at all (blocked on
     /// margin, or every leg rejected/skipped - see OrderDispatchHostedService.
