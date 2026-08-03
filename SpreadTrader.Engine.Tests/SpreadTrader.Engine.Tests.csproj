@@ -22,6 +22,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SpreadTrader.Engine\SpreadTrader.Engine.csproj" />
+    <!-- The host project owns the Postgres persistence layer (EfSpreadHistoryStore), so the
+         SpreadHistoryPersistenceTests below need it. Adds no build cost - `dotnet test` on the
+         solution already builds this project. -->
+    <ProjectReference Include="..\LiveSpreadCalculator\LiveSpreadCalculator.csproj" />
   </ItemGroup>
 
 </Project>
