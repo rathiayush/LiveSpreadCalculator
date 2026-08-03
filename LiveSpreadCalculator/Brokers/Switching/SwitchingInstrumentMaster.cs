@@ -53,4 +53,8 @@ public sealed class SwitchingInstrumentMaster : IBrokerInstrumentMaster
 
     public Task ResolveAsync(InstrumentConfig config, CancellationToken cancellationToken) =>
         Active.ResolveAsync(config, cancellationToken);
+
+    public BrokerInstrument? FindSpot(string underlyingName) => Active.FindSpot(underlyingName);
+
+    public IReadOnlyList<BrokerInstrument> GetAllSpot() => Active.GetAllSpot();
 }
