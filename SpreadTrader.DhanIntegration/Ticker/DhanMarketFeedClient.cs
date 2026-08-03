@@ -333,6 +333,14 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         var lookup = new Dictionary<uint, string>();
         foreach (var instrument in _instrumentMaster.GetAllFutures())
             lookup[instrument.InstrumentToken] = instrument.Segment;
+
+        // Cash/index instruments too, so a spread's spot leg actually streams. Without these a
+        // spot token has no known segment and is dropped by the caller as unsubscribable - the
+        // price would simply never arrive. Added after the futures so a futures token always wins
+        // a (theoretical) id collision, since futures are what actually get traded.
+        foreach (var instrument in _instrumentMaster.GetAllSpot())
+            lookup.TryAdd(instrument.InstrumentToken, instrument.Segment);
+
         return lookup;
     }
 

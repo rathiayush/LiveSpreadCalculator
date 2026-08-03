@@ -40,4 +40,32 @@ public interface IBrokerInstrumentMaster
     /// from the cached dump.</summary>
     /// <exception cref="InvalidOperationException">The symbol isn't in the broker's master.</exception>
     Task ResolveAsync(InstrumentConfig config, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The CASH/INDEX instrument a futures underlying is written on (RELIANCE futures -&gt; the
+    /// RELIANCE equity; NIFTY futures -&gt; the NIFTY 50 index), so the live spot price can be shown
+    /// next to the futures legs - see SpreadSnapshot.SpotPrice/BasisPercent.
+    ///
+    /// Kept separate from the futures lookups above on purpose: those are futures-only by design
+    /// (see the interface doc comment) and the universe builder depends on that, so implementations
+    /// hold spot instruments in their own list rather than mixing them into the futures one.
+    ///
+    /// Returns null when no spot exists or none could be matched - an unlisted underlying, an index
+    /// whose name isn't in SpotSymbology, or an MCX contract, which has no cash equivalent.
+    /// Callers must treat null as "show no spot", never as an error: see SpotSymbology on why
+    /// failing to resolve is much safer than matching the wrong instrument.
+    /// </summary>
+    BrokerInstrument? FindSpot(string underlyingName);
+
+    /// <summary>
+    /// Every cached cash/index instrument. Deliberately NOT merged into GetAllFutures, which stays
+    /// futures-only.
+    ///
+    /// Exists for the feed clients: on Dhan and Kotak a token is only meaningful together with its
+    /// segment, and both build their subscribe payload's token-&gt;segment map from GetAllFutures -
+    /// so without this a spot token would be silently dropped as "unknown segment" and its price
+    /// would never arrive. Kite needs none of this (its instrument_token is globally unique) but
+    /// implements it for symmetry.
+    /// </summary>
+    IReadOnlyList<BrokerInstrument> GetAllSpot();
 }

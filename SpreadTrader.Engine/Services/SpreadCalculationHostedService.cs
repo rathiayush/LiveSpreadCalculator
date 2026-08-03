@@ -181,9 +181,15 @@ public sealed class SpreadCalculationHostedService : BackgroundService
             var buySpreadPercent = nearTick.BestAskPrice == 0 ? 0m : buySpreadValue / nearTick.BestAskPrice * 100m;
             var sellSpreadPercent = nearBidOrAsk == 0 ? 0m : sellSpreadValue / nearBidOrAsk * 100m;
 
+            // The underlying's own live price, and the near future's premium/discount to it.
+            // Both stay 0 whenever spot is unresolved or hasn't ticked - see ComputeBasisPercent.
+            var spotPrice = ReadSpotPrice(spread);
+            var basisPercent = ComputeBasisPercent(NearPriceForBasis(nearTick), spotPrice);
+
             var snapshot = new SpreadSnapshot(
                 spread.Id, spread.Underlying, nearPrice, farPrice, direction, spreadValue, spreadPercent, DateTimeOffset.UtcNow,
-                buySpreadValue, sellSpreadValue, buySpreadPercent, sellSpreadPercent);
+                buySpreadValue, sellSpreadValue, buySpreadPercent, sellSpreadPercent,
+                spotPrice, basisPercent);
 
             // Always kept fresh for the ranking job / GET /api/spreads/snapshot, independent of
             // whether the value actually changed since the last cycle.
@@ -228,6 +234,53 @@ public sealed class SpreadCalculationHostedService : BackgroundService
 
         await CheckDailySpreadAlertsAsync(spreadPercents, stoppingToken);
     }
+
+    /// <summary>The underlying's live cash/index price, or 0 when this spread has no resolved spot
+    /// instrument (see SpreadDefinition.SpotLeg) or its spot hasn't ticked yet.</summary>
+    private decimal ReadSpotPrice(SpreadDefinition spread)
+    {
+        if (spread.SpotLeg is not { InstrumentToken: not 0 } spotLeg) return 0m;
+        if (!_tickStore.TryGet(spotLeg.InstrumentToken, out var spotTick)) return 0m;
+        return SpotPriceFromTick(spotTick);
+    }
+
+    /// <summary>
+    /// Spot is priced off LAST TRADED PRICE, not depth - the one place this app departs from its
+    /// otherwise strict "never LTP, always the executable side of the book" rule (see
+    /// SpreadSnapshot's doc comment). The reason is that an INDEX is not tradeable and therefore
+    /// has no bid or ask at all, so for NIFTY/BANKNIFTY spot there is simply no depth to read;
+    /// LTP is the only price that exists. Equity spot follows the same path for consistency.
+    ///
+    /// That departure is safe precisely because nothing is ever executed against spot - it is a
+    /// reference price for a displayed basis %, not a price anything trades at (see
+    /// SpreadDefinition.SpotLeg, which is explicitly not a tradeable leg).
+    ///
+    /// Falls back to the ask, then the bid, for an equity whose LTP hasn't arrived but whose book
+    /// has.
+    /// </summary>
+    internal static decimal SpotPriceFromTick(Tick tick)
+    {
+        if (tick.LastPrice > 0) return tick.LastPrice;
+        if (tick.BestAskPrice > 0) return tick.BestAskPrice;
+        return tick.BestBidPrice > 0 ? tick.BestBidPrice : 0m;
+    }
+
+    /// <summary>The near future's price used for the basis - LTP for an apples-to-apples comparison
+    /// against spot's LTP, falling back to the ask (which the caller has already confirmed is
+    /// non-zero, so this never returns 0 for a tick that got this far).</summary>
+    internal static decimal NearPriceForBasis(Tick nearTick) =>
+        nearTick.LastPrice > 0 ? nearTick.LastPrice : nearTick.BestAskPrice;
+
+    /// <summary>
+    /// The near future's premium (+) or discount (-) to spot, as a percentage OF SPOT:
+    /// (near - spot) / spot * 100. See SpreadSnapshot.BasisPercent.
+    ///
+    /// Returns 0 unless both inputs are genuinely positive, so a missing or not-yet-ticked spot
+    /// reads as "no basis available" rather than as a real 0% (trading exactly at cash) or, worse,
+    /// a divide-by-zero.
+    /// </summary>
+    internal static decimal ComputeBasisPercent(decimal nearPrice, decimal spotPrice) =>
+        spotPrice <= 0 || nearPrice <= 0 ? 0m : (nearPrice - spotPrice) / spotPrice * 100m;
 
     /// <summary>
     /// Once per configured tier per IST calendar day (see EngineOptions.DailySpreadAlertThresholdsPercent),
