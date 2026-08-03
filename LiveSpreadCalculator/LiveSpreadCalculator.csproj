@@ -20,6 +20,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Lets SpreadHistoryPersistenceTests reach EfSpreadHistoryStore's internal mapping helpers
+         (ToUtc/ToRow) to pin the UTC-normalisation invariant Npgsql requires. -->
+    <InternalsVisibleTo Include="SpreadTrader.Engine.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.11" />
     <PackageReference Include="EFCore.BulkExtensions" Version="8.1.2" />
     <PackageReference Include="Microsoft.VisualStudio.Azure.Containers.Tools.Targets" Version="1.22.1" />

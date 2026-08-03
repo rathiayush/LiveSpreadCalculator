@@ -23,6 +23,13 @@ namespace LiveSpreadCalculator.Persistence;
 ///
 /// A singleton DbContext isn't safe, so this depends on IDbContextFactory and creates a short-lived
 /// context per operation (registered via AddDbContextFactory in Program.cs).
+///
+/// EVERY DateTimeOffset crossing into Postgres is normalised to UTC first - see ToUtc. Npgsql
+/// refuses any other offset outright for a 'timestamp with time zone' column ("Cannot write
+/// DateTimeOffset with Offset=05:30:00 ... only offset 0 (UTC) is supported"), and the capture
+/// service deliberately stamps CapturedAt in IST, so without this EVERY bulk insert threw and no
+/// history was ever persisted. ToUniversalTime only re-expresses the same instant, so nothing about
+/// what a row MEANS changes - timestamptz stores an instant either way.
 /// </summary>
 public sealed class EfSpreadHistoryStore : ISpreadHistoryStore
 {
@@ -169,9 +176,13 @@ CREATE INDEX IF NOT EXISTS ""IX_SpreadHistory_NearExpiry"" ON ""SpreadHistory"" 
         {
             await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
 
+            // Normalised because these two come straight off the ?from=/?to= query string, so a
+            // caller passing an IST-offset instant (e.g. ...T09:29:00+05:30) would otherwise throw
+            // the same offset-0-only error as the write path - and be swallowed by the catch below,
+            // silently showing an EMPTY chart rather than the rows that do exist.
             var query = context.SpreadHistory.AsNoTracking().Where(x => x.SpreadId == spreadId);
-            if (fromUtc.HasValue) query = query.Where(x => x.CapturedAt >= fromUtc.Value);
-            if (toUtc.HasValue) query = query.Where(x => x.CapturedAt <= toUtc.Value);
+            if (fromUtc is { } from) { var f = ToUtc(from); query = query.Where(x => x.CapturedAt >= f); }
+            if (toUtc is { } to) { var t = ToUtc(to); query = query.Where(x => x.CapturedAt <= t); }
 
             var rows = await query.OrderBy(x => x.CapturedAt).ToListAsync(cancellationToken);
             return rows.Select(ToPoint).ToList();
@@ -212,8 +223,9 @@ CREATE INDEX IF NOT EXISTS ""IX_SpreadHistory_NearExpiry"" ON ""SpreadHistory"" 
     public async Task<int> PurgeOlderThanAsync(DateTimeOffset cutoffUtc, CancellationToken cancellationToken = default)
     {
         await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+        var cutoff = ToUtc(cutoffUtc); // already UTC from DailyMaintenanceHostedService - normalised defensively
         var removed = await context.SpreadHistory
-            .Where(x => x.CapturedAt < cutoffUtc)
+            .Where(x => x.CapturedAt < cutoff)
             .ExecuteDeleteAsync(cancellationToken);
 
         if (removed > 0)
@@ -221,7 +233,22 @@ CREATE INDEX IF NOT EXISTS ""IX_SpreadHistory_NearExpiry"" ON ""SpreadHistory"" 
         return removed;
     }
 
-    private static SpreadHistoryRow ToRow(SpreadHistoryPoint p) => new()
+    /// <summary>
+    /// The single conversion every DateTimeOffset must pass through before Postgres sees it.
+    ///
+    /// Npgsql maps DateTimeOffset to 'timestamp with time zone' and hard-rejects any offset other
+    /// than zero, so an IST-stamped value throws ArgumentException at the converter - which is
+    /// exactly what killed every hourly capture (SpreadHistoryCaptureHostedService stamps CapturedAt
+    /// in IST on purpose, for its own scheduling and log output).
+    ///
+    /// ToUniversalTime re-expresses the SAME instant in UTC (14:28:59+05:30 == 08:58:59Z); it does
+    /// not shift, truncate or reinterpret anything, and timestamptz stores an instant regardless of
+    /// the offset it arrived in. A value already at offset 0 passes through untouched. Rows read
+    /// back therefore come out as the same moment, just expressed as UTC.
+    /// </summary>
+    internal static DateTimeOffset ToUtc(DateTimeOffset value) => value.ToUniversalTime();
+
+    internal static SpreadHistoryRow ToRow(SpreadHistoryPoint p) => new()
     {
         SpreadId = p.SpreadId,
         Underlying = p.Underlying,
@@ -229,7 +256,7 @@ CREATE INDEX IF NOT EXISTS ""IX_SpreadHistory_NearExpiry"" ON ""SpreadHistory"" 
         FarSymbol = p.FarSymbol,
         NearExpiry = p.NearExpiry,
         FarExpiry = p.FarExpiry,
-        CapturedAt = p.CapturedAt,
+        CapturedAt = ToUtc(p.CapturedAt),
         NearPrice = p.NearPrice,
         FarPrice = p.FarPrice,
         Direction = p.Direction,
