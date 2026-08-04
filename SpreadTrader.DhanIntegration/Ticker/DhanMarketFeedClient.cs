@@ -78,6 +78,11 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
     private readonly ILogger<DhanMarketFeedClient> _logger;
 
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+
+    /// <summary>Detects a connection that has silently stopped delivering - see WatchForStallAsync.
+    /// Only the market feed gets one; the order socket is legitimately idle for long stretches and
+    /// PositionsCache re-polls on its own timer regardless.</summary>
+    private readonly FeedStallDetector _stallDetector = new();
     private readonly HashSet<uint> _subscribedTokens = new();
     private readonly object _tokensLock = new();
 
@@ -189,14 +194,51 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
     private async Task RunMarketFeedAsync(CancellationToken cancellationToken)
     {
         var backoff = TimeSpan.FromSeconds(1);
+        var loggedAwaitingSession = false;
 
         while (!cancellationToken.IsCancellationRequested)
         {
+            // Waiting for login to finish is NOT a connection failure, and must not be treated as
+            // one. Previously the missing token surfaced as an exception from
+            // ConnectAndSubscribeAsync, which the catch below handled by doubling the backoff - so
+            // by the time login completed the delay had already climbed to its 30s ceiling and the
+            // feed then sat idle for a further half-minute before trying again, with no live prices
+            // the whole time. It happens on every startup, and again on every token renewal.
+            // Polling at a short FIXED interval instead means the feed comes up within about a
+            // second of the token existing.
+            if (!IsSessionReady())
+            {
+                if (!loggedAwaitingSession)
+                {
+                    _logger.LogInformation("Dhan market feed is waiting for login to complete before connecting.");
+                    loggedAwaitingSession = true;
+                }
+
+                if (!await DelayAsync(FeedSocketLiveness.AwaitingSessionPollInterval, cancellationToken)) break;
+                continue;
+            }
+
+            loggedAwaitingSession = false;
+
             try
             {
                 await ConnectAndSubscribeAsync(cancellationToken);
                 backoff = TimeSpan.FromSeconds(1);
-                await ReceiveLoopAsync(cancellationToken);
+
+                // The watchdog runs alongside the receive loop and aborts the socket if the feed
+                // goes silent after having delivered data - see WatchForStallAsync. Aborting makes
+                // the pending ReceiveAsync throw, which lands in the catch below and reconnects.
+                using var stallCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var watchdog = WatchForStallAsync(_socket!, stallCts.Token);
+                try
+                {
+                    await ReceiveLoopAsync(cancellationToken);
+                }
+                finally
+                {
+                    stallCts.Cancel();
+                    await SafeAwaitAsync(watchdog);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -211,10 +253,51 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         }
     }
 
+    /// <summary>Whether a login has produced everything the feed URL needs. Checked before
+    /// connecting so "not logged in yet" is a short fixed wait rather than an escalating
+    /// backoff - see RunMarketFeedAsync.</summary>
+    private bool IsSessionReady() =>
+        !string.IsNullOrWhiteSpace(_session.AccessToken) && !string.IsNullOrWhiteSpace(_session.ClientId);
+
+    /// <summary>
+    /// Aborts the socket if the feed stops delivering after having delivered - the half-open
+    /// connection case that would otherwise leave ReceiveAsync awaiting forever with State still
+    /// Open, silently freezing every spread. See FeedStallDetector for why a connection that has
+    /// never delivered anything is deliberately left alone (a closed market looks identical).
+    ///
+    /// Abort rather than Close: the point is to make the blocked ReceiveAsync throw immediately.
+    /// A graceful CloseAsync would itself wait on a peer that has already stopped responding.
+    /// </summary>
+    private async Task WatchForStallAsync(ClientWebSocket socket, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (!await DelayAsync(FeedSocketLiveness.StallCheckInterval, cancellationToken)) return;
+            if (socket.State != WebSocketState.Open) return;
+            if (!_stallDetector.IsStalled(DateTimeOffset.UtcNow, FeedSocketLiveness.StallTimeout)) continue;
+
+            _logger.LogWarning(
+                "Dhan market feed has sent nothing for over {Seconds}s despite having been live - treating it as a " +
+                "silently dropped connection and reconnecting.", FeedSocketLiveness.StallTimeout.TotalSeconds);
+
+            try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
+            return;
+        }
+    }
+
+    private static async Task SafeAwaitAsync(Task task)
+    {
+        try { await task; }
+        catch (OperationCanceledException) { /* expected when the receive loop ends first */ }
+        catch { /* the watchdog must never be the thing that takes the feed down */ }
+    }
+
     private async Task ConnectAndSubscribeAsync(CancellationToken cancellationToken)
     {
         _socket?.Dispose();
         _socket = new ClientWebSocket();
+        FeedSocketLiveness.Configure(_socket);
+        _stallDetector.OnConnected();
 
         var accessToken = _session.AccessToken
             ?? throw new InvalidOperationException("No Dhan access token available - complete the login flow first.");
@@ -365,6 +448,11 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
             do
             {
                 result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+
+                // Liveness, not usefulness - a frame of any kind proves the connection is still
+                // delivering, which is all the stall watchdog needs to know.
+                _stallDetector.OnMessage(DateTimeOffset.UtcNow);
+
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "server closed", cancellationToken);
@@ -496,6 +584,9 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         }
 
         using var socket = new ClientWebSocket();
+        // Keep-alive only, no stall watchdog: this socket is legitimately silent for long stretches
+        // (no order activity is the normal state), so silence here means nothing is wrong.
+        FeedSocketLiveness.Configure(socket);
         await socket.ConnectAsync(new Uri(_options.OrderUpdateWsUrl), cancellationToken);
 
         var login = JsonSerializer.SerializeToUtf8Bytes(new

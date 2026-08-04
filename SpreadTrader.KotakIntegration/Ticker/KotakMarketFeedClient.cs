@@ -60,6 +60,11 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
     private readonly ILogger<KotakMarketFeedClient> _logger;
 
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+
+    /// <summary>Detects a connection that has silently stopped delivering - see WatchForStallAsync.
+    /// Only the tick socket gets one; the order stream is legitimately idle for long stretches and
+    /// PositionsCache re-polls on its own timer regardless.</summary>
+    private readonly FeedStallDetector _stallDetector = new();
     private readonly HashSet<uint> _subscribedTokens = new();
     private readonly object _tokensLock = new();
     private readonly ConcurrentDictionary<uint, Tick> _lastTick = new();
@@ -121,8 +126,28 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
         _ = RunOrderStreamSupervisorAsync(cancellationToken);
 
         var backoff = TimeSpan.FromSeconds(1);
+        var loggedAwaitingSession = false;
+
         while (!cancellationToken.IsCancellationRequested)
         {
+            // Waiting for login is not a connection failure - polling at a short FIXED interval
+            // keeps it from inflating the reconnect backoff to its 30s ceiling, which would then
+            // leave the feed idle for that long after the session finally arrived. See
+            // FeedSocketLiveness.AwaitingSessionPollInterval.
+            if (string.IsNullOrWhiteSpace(_session.AccessToken) || string.IsNullOrWhiteSpace(_session.Sid))
+            {
+                if (!loggedAwaitingSession)
+                {
+                    _logger.LogInformation("Kotak market feed is waiting for login to complete before connecting.");
+                    loggedAwaitingSession = true;
+                }
+
+                if (!await DelayAsync(FeedSocketLiveness.AwaitingSessionPollInterval, cancellationToken)) break;
+                continue;
+            }
+
+            loggedAwaitingSession = false;
+
             try
             {
                 await ConnectAndSubscribeAsync(cancellationToken);
@@ -130,6 +155,9 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
 
                 using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var heartbeatTask = RunHeartbeatAsync(heartbeatCts.Token);
+                // Watchdog for a silently half-open socket - see WatchForStallAsync. Distinct from
+                // the heartbeat above, which only SENDS; this notices that nothing is coming back.
+                var watchdog = WatchForStallAsync(_socket!, heartbeatCts.Token);
                 try
                 {
                     await ReceiveLoopAsync(cancellationToken);
@@ -138,6 +166,7 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
                 {
                     heartbeatCts.Cancel();
                     await SafeAwaitAsync(heartbeatTask);
+                    await SafeAwaitAsync(watchdog);
                 }
             }
             catch (OperationCanceledException)
@@ -153,10 +182,32 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
         }
     }
 
+    /// <summary>Aborts the socket when the feed goes silent after having been live, so the blocked
+    /// ReceiveAsync throws and the reconnect loop above runs. See FeedStallDetector for why a
+    /// connection that never delivered anything is deliberately never judged stalled.</summary>
+    private async Task WatchForStallAsync(ClientWebSocket socket, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (!await DelayAsync(FeedSocketLiveness.StallCheckInterval, cancellationToken)) return;
+            if (socket.State != WebSocketState.Open) return;
+            if (!_stallDetector.IsStalled(DateTimeOffset.UtcNow, FeedSocketLiveness.StallTimeout)) continue;
+
+            _logger.LogWarning(
+                "Kotak market feed has sent nothing for over {Seconds}s despite having been live - treating it as a " +
+                "silently dropped connection and reconnecting.", FeedSocketLiveness.StallTimeout.TotalSeconds);
+
+            try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
+            return;
+        }
+    }
+
     private async Task ConnectAndSubscribeAsync(CancellationToken cancellationToken)
     {
         _socket?.Dispose();
         _socket = new ClientWebSocket();
+        FeedSocketLiveness.Configure(_socket);
+        _stallDetector.OnConnected();
 
         var accessToken = _session.AccessToken
             ?? throw new InvalidOperationException("No Kotak session available - complete the login flow first.");
@@ -280,6 +331,9 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
 
         _orderStreamSocket?.Dispose();
         var socket = new ClientWebSocket();
+        // Keep-alive only, no stall watchdog: this socket is legitimately silent for long stretches
+        // (no order activity is the normal state), so silence here means nothing is wrong.
+        FeedSocketLiveness.Configure(socket);
         _orderStreamSocket = socket;
 
         var uri = new Uri($"wss://{dataCenter.ToLowerInvariant()}.kotaksecurities.com/realtime");
@@ -362,6 +416,10 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
             do
             {
                 result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+
+                // Liveness, not usefulness - any frame proves the connection is still delivering.
+                _stallDetector.OnMessage(DateTimeOffset.UtcNow);
+
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "server closed", cancellationToken);
