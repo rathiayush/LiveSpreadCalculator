@@ -166,12 +166,21 @@ public sealed class TickIngestionHostedService : BackgroundService
     /// Logged at Debug rather than Warning because on a full universe the misses are the handful of
     /// contracts with genuinely no cash equivalent, and a per-spread warning would be pure noise.
     /// </summary>
-    private void ResolveSpotLeg(SpreadDefinition spread)
+    /// <summary>
+    /// Public because UniverseBuilderService has to call it too. It builds spreads in bulk and
+    /// subscribes their tokens in one batch rather than going through ResolveAndSubscribeAsync
+    /// above, so without calling this the ENTIRE auto-built universe - which is how essentially
+    /// every spread is created - got no spot leg and no spot subscription, and every Spot/Basis
+    /// cell on the grid stayed blank. Only per-spread additions made through the API worked.
+    /// </summary>
+    /// <returns>The resolved spot instrument token, or 0 if this underlying has no spot - which
+    /// callers should treat as "nothing to subscribe", not as a failure.</returns>
+    public uint ResolveSpotLeg(SpreadDefinition spread)
     {
-        if (spread.SpotLeg is { InstrumentToken: not 0 }) return;
+        if (spread.SpotLeg is { InstrumentToken: not 0 } existing) return existing.InstrumentToken;
 
         var underlying = spread.NearLeg.Underlying ?? spread.Underlying;
-        if (string.IsNullOrWhiteSpace(underlying)) return;
+        if (string.IsNullOrWhiteSpace(underlying)) return 0;
 
         try
         {
@@ -179,7 +188,7 @@ public sealed class TickIngestionHostedService : BackgroundService
             if (spot is null)
             {
                 _logger.LogDebug("No spot instrument found for underlying {Underlying} - {SpreadId} will show no spot price.", underlying, spread.Id);
-                return;
+                return 0;
             }
 
             spread.SpotLeg = new InstrumentConfig
@@ -190,10 +199,13 @@ public sealed class TickIngestionHostedService : BackgroundService
                 Underlying = underlying,
                 TickSize = spot.TickSize,
             };
+
+            return spot.InstrumentToken;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to resolve a spot instrument for underlying {Underlying}", underlying);
+            return 0;
         }
     }
 
