@@ -157,6 +157,7 @@ public sealed class UniverseBuilderService
                 builtSpreadIds.Add(spreadId);
                 allTokens.Add(near.InstrumentToken);
                 allTokens.Add(far.InstrumentToken);
+                AddSpotToken(spread, allTokens);
 
                 included.Add(new UniverseBuildRow(
                     symbol, spreadId,
@@ -243,16 +244,18 @@ public sealed class UniverseBuilderService
             if (!seenSpreadIds.Add(spreadId))
                 return; // already built this exact pair in this run
 
-            _spreadStore.Upsert(new SpreadDefinition
+            var spread = new SpreadDefinition
             {
                 Id = spreadId,
                 Underlying = underlying,
                 NearLeg = ToLeg(near, underlying),
                 FarLeg = ToLeg(far, underlying),
                 Enabled = true,
-            });
+            };
+            _spreadStore.Upsert(spread);
             allTokens.Add(near.InstrumentToken);
             allTokens.Add(far.InstrumentToken);
+            AddSpotToken(spread, allTokens);
             included.Add(new UniverseBuildRow(
                 underlying, spreadId,
                 near.TradingSymbol, near.Expiry, near.LotSize,
@@ -403,22 +406,44 @@ public sealed class UniverseBuilderService
             _spreadStore.Remove(previousId);
         }
 
-        _spreadStore.Upsert(new SpreadDefinition
+        var spread = new SpreadDefinition
         {
             Id = spreadId,
             Underlying = symbol,
             NearLeg = ToLeg(near, symbol),
             FarLeg = ToLeg(far, symbol),
             Enabled = true,
-        });
+        };
+        _spreadStore.Upsert(spread);
         _mcxCalendarSpreadIdBySymbol[symbol] = spreadId;
         allTokens.Add(near.InstrumentToken);
         allTokens.Add(far.InstrumentToken);
+        // MCX has no cash equivalent, so this resolves to nothing and adds nothing - kept for
+        // uniformity with the NFO paths rather than as a special case to remember.
+        AddSpotToken(spread, allTokens);
 
         return new UniverseBuildRow(
             symbol, spreadId,
             near.TradingSymbol, near.Expiry, near.LotSize,
             far.TradingSymbol, far.Expiry, far.LotSize);
+    }
+
+    /// <summary>
+    /// Attaches the underlying's cash/index instrument to a freshly built spread and adds its token
+    /// to the batch about to be subscribed - see TickIngestionHostedService.ResolveSpotLeg.
+    ///
+    /// This has to happen here, and not only in ResolveAndSubscribeAsync, because that path is
+    /// never taken for a universe build: spreads are created in bulk and their tokens subscribed in
+    /// one batch. Without this the whole auto-built universe carried no spot leg at all, so every
+    /// Spot and Basis % cell on the grid was blank - which is exactly how it shipped.
+    ///
+    /// A 0 means this underlying simply has no spot (an MCX commodity, or a name with no cash
+    /// listing); nothing is added and the spread is otherwise unaffected.
+    /// </summary>
+    private void AddSpotToken(SpreadDefinition spread, HashSet<uint> allTokens)
+    {
+        var spotToken = _tickIngestion.ResolveSpotLeg(spread);
+        if (spotToken != 0) allTokens.Add(spotToken);
     }
 
     private static InstrumentConfig ToLeg(BrokerInstrument instrument, string underlying) => new()
