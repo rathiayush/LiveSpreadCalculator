@@ -37,6 +37,12 @@ public sealed class InstrumentMasterService : IBrokerInstrumentMaster
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
     private List<BrokerInstrument> _instruments = new();
+
+    /// <summary>Cash equities + index levels from Kite's NSE dump, kept SEPARATE from _instruments
+    /// so every futures lookup above keeps its exact futures-only meaning (the universe builder
+    /// depends on that). Only ever read through FindSpot - see the interface doc comment.</summary>
+    private List<BrokerInstrument> _spotInstruments = new();
+
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
 
     /// <param name="exchanges">Which Kite exchange-scoped instrument dumps to download and merge.
@@ -86,13 +92,107 @@ public sealed class InstrumentMasterService : IBrokerInstrumentMaster
             }
 
             _instruments = merged;
+            _spotInstruments = await LoadSpotInstrumentsAsync(cancellationToken);
             _loadedAt = DateTimeOffset.UtcNow;
-            _logger.LogInformation("Instrument master ready: {Count} futures across [{Exchanges}]", _instruments.Count, string.Join(", ", _exchanges));
+            _logger.LogInformation(
+                "Instrument master ready: {Count} futures across [{Exchanges}], plus {SpotCount} cash/index instruments for spot pricing",
+                _instruments.Count, string.Join(", ", _exchanges), _spotInstruments.Count);
         }
         finally
         {
             _loadLock.Release();
         }
+    }
+
+    /// <summary>
+    /// One extra exchange-scoped download, GET /instruments/NSE, giving both cash equities
+    /// (segment "NSE") and index levels (segment "INDICES") in a single dump - Kite has no
+    /// index-only endpoint, and the NSE dump is a few thousand rows rather than the 100k+ of the
+    /// full multi-exchange one, so it is cheap enough to hold.
+    ///
+    /// Best-effort by design: spot is a display nicety, so a failed download logs and leaves the
+    /// list empty rather than taking down instrument loading and with it every futures lookup the
+    /// app actually trades on.
+    /// </summary>
+    private async Task<List<BrokerInstrument>> LoadSpotInstrumentsAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            _logger.LogInformation("Downloading Kite NSE instrument master (cash + indices) for spot pricing...");
+            using var response = await _httpClient.GetAsync($"{_options.RestBaseUrl}/instruments/NSE", cancellationToken);
+            response.EnsureSuccessStatusCode();
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            return ParseSpotCsv(stream);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not load Kite's NSE instrument master - spot prices and basis % will be unavailable. " +
+                "Futures resolution and trading are unaffected.");
+            return new List<BrokerInstrument>();
+        }
+    }
+
+    /// <summary>Same column layout as ParseCsv, but keeps the rows that one throws away: cash
+    /// equities and index levels (both carry instrument_type "EQ" on Kite; indices are told apart
+    /// by segment "INDICES"). Options and everything else are still discarded.</summary>
+    private static List<BrokerInstrument> ParseSpotCsv(Stream stream)
+    {
+        var result = new List<BrokerInstrument>();
+        using var reader = new StreamReader(stream);
+        _ = reader.ReadLine(); // header
+
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (line.Length == 0) continue;
+            var fields = SplitCsvLine(line);
+            if (fields.Length < 12) continue;
+            if (!string.Equals(fields[9], "EQ", StringComparison.OrdinalIgnoreCase)) continue;
+            if (!uint.TryParse(fields[0], out var token)) continue;
+
+            var tickSize = decimal.TryParse(fields[7], NumberStyles.Number, CultureInfo.InvariantCulture, out var tick) ? tick : 0m;
+
+            // Verified against the live NSE dump: an EQUITY's name is the COMPANY name
+            // ("RELIANCE INDUSTRIES") while its tradingsymbol is the code futures are written on
+            // ("RELIANCE"); an INDEX carries its display name in both ("NIFTY 50"), give or take
+            // wording ("NIFTY MID SELECT" vs "NIFTY MIDCAP SELECT (MIDCPNIFTY)"). So tradingsymbol
+            // is the field that actually matches an underlying for stocks - which is why FindSpot
+            // checks BOTH fields rather than either one alone. Name is kept as-is, falling back to
+            // tradingsymbol only if the dump ever leaves it blank.
+            var name = string.IsNullOrWhiteSpace(fields[3]) ? fields[2] : fields[3];
+
+            result.Add(new BrokerInstrument(
+                InstrumentToken: token,
+                TradingSymbol: fields[2],
+                Name: name,
+                Exchange: fields[11],
+                Segment: fields[10],
+                InstrumentType: fields[9],
+                Expiry: null,
+                LotSize: 0,
+                TickSize: tickSize));
+        }
+
+        return result;
+    }
+
+    /// <summary>Walks SpotSymbology's candidate names in order and takes the first that matches
+    /// either the tradingsymbol or the name - Kite puts an index's display name in tradingsymbol
+    /// and an equity's in both, so checking both fields covers stocks and indices alike.</summary>
+    public IReadOnlyList<BrokerInstrument> GetAllSpot() => _spotInstruments;
+
+    public BrokerInstrument? FindSpot(string underlyingName)
+    {
+        foreach (var candidate in SpotSymbology.CandidateSpotNames(underlyingName))
+        {
+            var match = _spotInstruments.FirstOrDefault(i =>
+                string.Equals(i.TradingSymbol, candidate, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(i.Name, candidate, StringComparison.OrdinalIgnoreCase));
+            if (match is not null) return match;
+        }
+
+        return null;
     }
 
     public BrokerInstrument? Find(string tradingSymbol, string exchange) =>

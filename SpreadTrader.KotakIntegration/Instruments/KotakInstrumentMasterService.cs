@@ -47,6 +47,11 @@ public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
     private List<BrokerInstrument> _instruments = new();
+
+    /// <summary>Cash equities + index levels from Kotak's nse_cm segment file, held separately from
+    /// the futures above so every futures lookup keeps its futures-only meaning. Read only through
+    /// FindSpot - see the IBrokerInstrumentMaster doc comment.</summary>
+    private List<BrokerInstrument> _spotInstruments = new();
     private Dictionary<string, BrokerInstrument> _bySymbol = new(StringComparer.OrdinalIgnoreCase);
     private DateTimeOffset _loadedAt = DateTimeOffset.MinValue;
 
@@ -129,11 +134,12 @@ public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
 
         _instruments = parsed.Select(p => p.Instrument).ToList();
         _bySymbol = BuildSymbolIndex(parsed);
+        _spotInstruments = await LoadSpotInstrumentsAsync(filePaths, cancellationToken);
         _loadedAt = DateTimeOffset.UtcNow;
 
         _logger.LogInformation(
-            "Instrument master ready: {Count} futures across [{Segments}] (options/equities discarded during parse)",
-            _instruments.Count, string.Join(", ", segments));
+            "Instrument master ready: {Count} futures across [{Segments}], plus {SpotCount} cash/index instruments for spot pricing (options discarded during parse)",
+            _instruments.Count, string.Join(", ", segments), _spotInstruments.Count);
 
         if (_instruments.Count == 0)
         {
@@ -141,6 +147,121 @@ public sealed class KotakInstrumentMasterService : IBrokerInstrumentMaster
                 "Kotak scrip master parsed to zero futures contracts - the column layout may not match what ParseCsv expects (see this " +
                 "class's doc comment on column-name candidates being best-effort/unconfirmed).");
         }
+    }
+
+    /// <summary>
+    /// Downloads Kotak's cash segment ("nse_cm") for spot pricing - already present in the same
+    /// file-paths list the futures segments come from, so this needs no extra API call, just one
+    /// extra file.
+    ///
+    /// Best-effort: spot is a display nicety, so any failure here logs and yields an empty list
+    /// rather than propagating and taking down the futures universe the app actually trades on.
+    /// </summary>
+    private async Task<List<BrokerInstrument>> LoadSpotInstrumentsAsync(
+        Dictionary<string, string> filePaths,
+        CancellationToken cancellationToken)
+    {
+        var spotSegment = KotakSymbology.ToKotakSegment("NSE"); // "nse_cm"
+
+        if (!filePaths.TryGetValue(spotSegment, out var url))
+        {
+            _logger.LogWarning(
+                "Kotak's scrip master file-path list had no '{Segment}' entry - spot prices and basis % will be unavailable. " +
+                "Futures resolution and trading are unaffected.", spotSegment);
+            return new List<BrokerInstrument>();
+        }
+
+        try
+        {
+            _logger.LogInformation("Downloading Kotak scrip master for {Segment} (cash + indices) from {Url}...", spotSegment, url);
+            using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            response.EnsureSuccessStatusCode();
+
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            return ParseSpotCsv(stream, spotSegment);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Could not load Kotak's {Segment} scrip master - spot prices and basis % will be unavailable. " +
+                "Futures resolution and trading are unaffected.", spotSegment);
+            return new List<BrokerInstrument>();
+        }
+    }
+
+    /// <summary>Same file layout as ParseCsv but WITHOUT its futures filter - in the cash segment
+    /// every row is already a spot instrument (equity or index), which is exactly what's wanted
+    /// here.</summary>
+    private List<BrokerInstrument> ParseSpotCsv(Stream stream, string kotakSegment)
+    {
+        var result = new List<BrokerInstrument>();
+        using var reader = new StreamReader(stream);
+
+        var headerLine = reader.ReadLine();
+        if (headerLine is null)
+        {
+            _logger.LogWarning("Kotak scrip master for {Segment} was empty - no header row.", kotakSegment);
+            return result;
+        }
+
+        var header = BuildHeaderMap(SplitCsvLine(headerLine));
+        var tokenIndex = Resolve(header, Columns.Token);
+        var symbolIndex = Resolve(header, Columns.TradingSymbol);
+        var underlyingIndex = Resolve(header, Columns.UnderlyingName);
+
+        if (tokenIndex < 0 || symbolIndex < 0)
+        {
+            _logger.LogWarning(
+                "Kotak scrip master for {Segment} is missing an instrument token or trading symbol column - no spot instruments loaded. Header was: {Header}",
+                kotakSegment, headerLine);
+            return result;
+        }
+
+        string? line;
+        while ((line = reader.ReadLine()) is not null)
+        {
+            if (line.Length == 0) continue;
+            var fields = SplitCsvLine(line);
+
+            if (!uint.TryParse(Get(fields, tokenIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var token))
+                continue;
+
+            var tradingSymbol = Get(fields, symbolIndex);
+            if (string.IsNullOrWhiteSpace(tradingSymbol)) continue;
+
+            var name = Get(fields, underlyingIndex);
+            if (string.IsNullOrWhiteSpace(name)) name = tradingSymbol;
+
+            result.Add(new BrokerInstrument(
+                InstrumentToken: token,
+                TradingSymbol: tradingSymbol,
+                Name: name,
+                Exchange: KotakSymbology.ToCanonicalExchange(kotakSegment),
+                Segment: kotakSegment,
+                InstrumentType: "EQ",
+                Expiry: null,
+                LotSize: 0,
+                TickSize: 0m));
+        }
+
+        return result;
+    }
+
+    /// <summary>Matches a futures underlying to its cash/index row - see SpotSymbology. Checks both
+    /// the trading symbol and the name so an index listed under either spelling resolves.</summary>
+    public IReadOnlyList<BrokerInstrument> GetAllSpot() => _spotInstruments;
+
+    public BrokerInstrument? FindSpot(string underlyingName)
+    {
+        foreach (var candidate in SpotSymbology.CandidateSpotNames(underlyingName))
+        {
+            var match = _spotInstruments.FirstOrDefault(i =>
+                string.Equals(i.TradingSymbol, candidate, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(i.Name, candidate, StringComparison.OrdinalIgnoreCase));
+            if (match is not null) return match;
+        }
+
+        return null;
     }
 
     /// <summary>NFO -&gt; Kotak's "nse_fo" segment, dropped entirely for anything with no Kotak

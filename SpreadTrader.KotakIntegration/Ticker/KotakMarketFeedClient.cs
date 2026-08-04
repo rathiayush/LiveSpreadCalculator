@@ -207,6 +207,12 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
         foreach (var instrument in _instrumentMaster.GetAllFutures())
             lookup[instrument.InstrumentToken] = instrument.Segment;
 
+        // Cash/index instruments too, so a spread's spot leg actually streams - without a known
+        // segment a spot token is skipped as "unresolved" below and its price never arrives.
+        // Futures are added first so they always win a (theoretical) id collision.
+        foreach (var instrument in _instrumentMaster.GetAllSpot())
+            lookup.TryAdd(instrument.InstrumentToken, instrument.Segment);
+
         var entries = new List<SubscriptionEntry>(tokens.Count);
         var unresolved = new List<uint>();
 

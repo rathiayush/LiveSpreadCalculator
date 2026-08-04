@@ -56,6 +56,11 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
 
     private List<BrokerInstrument> _instruments = new();
 
+    /// <summary>Cash equities + index levels, parsed from the same download as the futures above
+    /// but held separately so the futures lookups keep their futures-only meaning. Read only
+    /// through FindSpot - see the IBrokerInstrumentMaster doc comment.</summary>
+    private List<BrokerInstrument> _spotInstruments = new();
+
     /// <summary>Both of Dhan's symbol spellings for each contract point at the same instrument, so
     /// a lookup by either resolves. Dhan's own positions/orders responses report the trading
     /// symbol, but which of the two spellings they use is not something to guess at - accepting
@@ -168,10 +173,11 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         {
             using var fileStream = File.OpenRead(_scripMasterCachePath);
             var parsed = ParseCsv(fileStream);
-            if (parsed.Count == 0) return; // nothing usable - let the live check populate it instead
+            if (parsed.Futures.Count == 0) return; // nothing usable - let the live check populate it instead
 
-            _instruments = parsed.Select(p => p.Instrument).ToList();
-            _bySymbol = BuildSymbolIndex(parsed);
+            _instruments = parsed.Futures.Select(p => p.Instrument).ToList();
+            _spotInstruments = parsed.Spot;
+            _bySymbol = BuildSymbolIndex(parsed.Futures);
 
             var age = DateTimeOffset.UtcNow - File.GetLastWriteTimeUtc(_scripMasterCachePath);
             _logger.LogInformation(
@@ -206,13 +212,14 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         using var memoryStream = new MemoryStream(rawCsv, writable: false);
         var parsed = ParseCsv(memoryStream);
 
-        _instruments = parsed.Select(p => p.Instrument).ToList();
-        _bySymbol = BuildSymbolIndex(parsed);
+        _instruments = parsed.Futures.Select(p => p.Instrument).ToList();
+        _spotInstruments = parsed.Spot;
+        _bySymbol = BuildSymbolIndex(parsed.Futures);
         _loadedAt = DateTimeOffset.UtcNow;
 
         _logger.LogInformation(
-            "Instrument master ready: {Count} futures across [{Exchanges}] (options/equities and other exchanges discarded during parse)",
-            _instruments.Count, string.Join(", ", _exchanges));
+            "Instrument master ready: {Count} futures across [{Exchanges}], plus {SpotCount} cash/index instruments for spot pricing (options and other exchanges discarded during parse)",
+            _instruments.Count, string.Join(", ", _exchanges), _spotInstruments.Count);
 
         if (_instruments.Count == 0)
         {
@@ -396,16 +403,17 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
     /// <summary>Streams the CSV, keeping only futures on the configured exchanges. Returns each
     /// contract alongside Dhan's alternate display spelling for it (null when there isn't a
     /// distinct one), which BuildSymbolIndex folds into the lookup index.</summary>
-    private List<(BrokerInstrument Instrument, string? Alias)> ParseCsv(Stream stream)
+    private ParsedMaster ParseCsv(Stream stream)
     {
         var result = new List<(BrokerInstrument Instrument, string? Alias)>();
+        var spot = new List<BrokerInstrument>();
         using var reader = new StreamReader(stream);
 
         var headerLine = reader.ReadLine();
         if (headerLine is null)
         {
             _logger.LogError("Dhan scrip master was empty - no header row.");
-            return result;
+            return new ParsedMaster(result, spot);
         }
 
         var header = BuildHeaderMap(SplitCsvLine(headerLine));
@@ -435,7 +443,7 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
                 "The detailed scrip master (api-scrip-master-detailed.csv) is NOT supported: it has no per-contract trading symbol column. " +
                 "Set Dhan:ScripMasterUrl to the compact list, https://images.dhan.co/api-data/api-scrip-master.csv. Header was: {Header}",
                 _options.ScripMasterUrl, headerLine);
-            return result;
+            return new ParsedMaster(result, spot);
         }
 
         string? line;
@@ -445,7 +453,15 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             var fields = SplitCsvLine(line);
 
             var instrumentName = Get(fields, instrumentNameIndex);
-            if (!DhanSymbology.IsFuture(instrumentName)) continue; // options/equities/indices - the bulk of the file
+            if (!DhanSymbology.IsFuture(instrumentName))
+            {
+                // Options are still discarded here (the bulk of the file), but cash equities and
+                // index levels are kept - this same download already contains them, so spot pricing
+                // costs no extra request. They go into their own list, never into the futures one.
+                if (TryReadSpotRow(fields, instrumentName, securityIdIndex, exchangeIndex, tradingSymbolIndex, underlyingIndex, out var spotInstrument))
+                    spot.Add(spotInstrument);
+                continue;
+            }
 
             var exchangeId = Get(fields, exchangeIndex);
             var canonicalExchange = ToCanonicalExchange(exchangeId, Get(fields, segmentIndex));
@@ -485,7 +501,81 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             result.Add((instrument, alias));
         }
 
-        return result;
+        return new ParsedMaster(result, spot);
+    }
+
+    /// <summary>What one pass over the scrip master yields: the futures universe this app trades,
+    /// and - from the very same rows, at no extra download cost - the cash/index instruments used
+    /// only to price spot. Kept apart so every futures lookup stays futures-only.</summary>
+    private sealed record ParsedMaster(
+        List<(BrokerInstrument Instrument, string? Alias)> Futures,
+        List<BrokerInstrument> Spot);
+
+    /// <summary>
+    /// Recognises the two non-futures row types worth keeping: NSE cash equities (EQUITY) and NSE
+    /// index levels (INDEX). Everything else - options, currency, commodity cash - is left out.
+    ///
+    /// The Dhan segment is set explicitly rather than via ToCanonicalExchange, which is derivatives
+    /// oriented and would map an NSE equity to NFO. Getting it right matters more here than
+    /// elsewhere: a Dhan securityId is only unique WITHIN a segment, so a wrong segment would
+    /// subscribe to a completely different contract that happens to share the id.
+    /// </summary>
+    private static bool TryReadSpotRow(
+        string[] fields,
+        string? instrumentName,
+        int securityIdIndex,
+        int exchangeIndex,
+        int tradingSymbolIndex,
+        int underlyingIndex,
+        out BrokerInstrument instrument)
+    {
+        instrument = null!;
+
+        var isIndex = string.Equals(instrumentName?.Trim(), "INDEX", StringComparison.OrdinalIgnoreCase);
+        var isEquity = string.Equals(instrumentName?.Trim(), "EQUITY", StringComparison.OrdinalIgnoreCase);
+        if (!isIndex && !isEquity) return false;
+
+        // NSE only - this app's futures are all NSE-underlying, and a BSE row would collide on name.
+        if (!string.Equals(Get(fields, exchangeIndex)?.Trim(), "NSE", StringComparison.OrdinalIgnoreCase)) return false;
+
+        if (!uint.TryParse(Get(fields, securityIdIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var securityId))
+            return false;
+
+        var tradingSymbol = Get(fields, tradingSymbolIndex);
+        if (string.IsNullOrWhiteSpace(tradingSymbol)) return false;
+
+        var name = Get(fields, underlyingIndex);
+        if (string.IsNullOrWhiteSpace(name)) name = tradingSymbol;
+
+        instrument = new BrokerInstrument(
+            InstrumentToken: securityId,
+            TradingSymbol: tradingSymbol,
+            Name: name,
+            Exchange: isIndex ? "IDX" : "NSE",
+            Segment: isIndex ? "IDX_I" : "NSE_EQ",
+            InstrumentType: isIndex ? "INDEX" : "EQ",
+            Expiry: null,
+            LotSize: 0,
+            TickSize: 0m);
+
+        return true;
+    }
+
+    /// <summary>Matches a futures underlying to its cash/index row - see SpotSymbology. Checks both
+    /// the trading symbol and the name so an index listed under either spelling resolves.</summary>
+    public IReadOnlyList<BrokerInstrument> GetAllSpot() => _spotInstruments;
+
+    public BrokerInstrument? FindSpot(string underlyingName)
+    {
+        foreach (var candidate in SpotSymbology.CandidateSpotNames(underlyingName))
+        {
+            var match = _spotInstruments.FirstOrDefault(i =>
+                string.Equals(i.TradingSymbol, candidate, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(i.Name, candidate, StringComparison.OrdinalIgnoreCase));
+            if (match is not null) return match;
+        }
+
+        return null;
     }
 
     /// <summary>
