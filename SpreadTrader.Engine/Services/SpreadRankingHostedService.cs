@@ -122,7 +122,9 @@ public sealed class SpreadRankingHostedService : BackgroundService
                 Direction: s.Direction,
                 SpreadValue: s.SpreadValue,
                 SpreadPercent: s.SpreadPercent,
-                UpdatedAt: s.UpdatedAt))
+                UpdatedAt: s.UpdatedAt,
+                SpotPrice: s.SpotPrice,
+                BasisPercent: s.BasisPercent))
             .ToArray();
 
         _rankingStore.Set(ranked);

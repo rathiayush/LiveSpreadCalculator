@@ -31,6 +31,35 @@ don't have a bid/ask at all. Full mode costs more bandwidth/CPU than quote mode 
 ~100-200 instruments, worth knowing if you scale up a lot further. The spread shown and
 evaluated is `FarLeg.AskPrice - NearLeg.AskPrice`.
 
+## Spot price and basis %
+
+Alongside the two futures legs, the Live Spreads grid and the Dashboard ranking also show the
+**underlying's own live price** (the cash equity for a stock, the index level for NIFTY/BANKNIFTY)
+and the near future's **basis %** against it:
+
+```
+basis % = (near future - spot) / spot * 100
+```
+
+Positive means the future trades above cash - the normal state, given cost of carry (contango);
+negative means backwardation. It is deliberately **independent of the trade direction** the Spread
+columns show: unlike the spread, this is a market observation, not a price anything executes at.
+
+Two things follow from that, and they are intentional:
+
+- **Spot is priced off last traded price, not depth** - the one place this app departs from the
+  ask-price rule above. An index isn't tradeable and has no bid/ask at all, so for NIFTY/BANKNIFTY
+  spot LTP is the only price that exists. Safe precisely because nothing is ever ordered against
+  spot.
+- **A dash means no spot**, not zero. The underlying either has no cash instrument the broker's
+  master could be matched to, or its spot hasn't ticked yet. Basis stays blank rather than showing
+  a misleading `0.00%`.
+
+Spot instruments are loaded per broker alongside the futures master (Kite: an extra
+`/instruments/NSE` download; Dhan: already in the same scrip master, previously discarded; Kotak:
+the `nse_cm` segment file), and index underlyings are matched to their NSE display names via
+`SpotSymbology`. MCX contracts have no cash equivalent and so never show a spot.
+
 ## Prerequisites
 
 - .NET 8 SDK

@@ -78,6 +78,24 @@ export default function RankingPanel({ ranking, limit }) {
         </FlashValue>
       ),
     },
+    {
+      // The underlying's own live price - cash for a stock, index level for NIFTY/BANKNIFTY.
+      // A dash means no spot is available for this underlying (see SpreadSnapshot.SpotPrice).
+      title: 'Spot',
+      dataIndex: 'spotPrice',
+      key: 'spotPrice',
+      render: (v) => v ? <FlashValue value={v}>{v.toFixed(2)}</FlashValue> : '—',
+    },
+    {
+      // Not colored by sign, unlike Spread %: a future above cash is the normal state (cost of
+      // carry), not a good/bad signal - see the matching column in SpreadGrid.
+      title: 'Basis %',
+      dataIndex: 'basisPercent',
+      key: 'basisPercent',
+      render: (v, r) => r.spotPrice
+        ? <FlashValue value={v}><span style={{ fontWeight: 600 }}>{`${v >= 0 ? '+' : ''}${v.toFixed(2)}%`}</span></FlashValue>
+        : '—',
+    },
     { title: 'Direction', dataIndex: 'direction', key: 'direction', render: (v) => <DirectionTag direction={v} /> },
     { title: 'Updated', dataIndex: 'updatedAt', key: 'updatedAt', render: (v) => new Date(v).toLocaleTimeString() },
   ]

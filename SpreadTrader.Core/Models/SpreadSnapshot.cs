@@ -52,7 +52,22 @@ public readonly record struct SpreadSnapshot(
     /// <summary>SellSpreadValue expressed as a percentage of the near leg's bid (or ask, if bid
     /// hasn't arrived yet - the price actually received in this direction) - the Sell-near/Buy-far
     /// counterpart to SpreadPercent.</summary>
-    decimal SellSpreadPercent = 0m);
+    decimal SellSpreadPercent = 0m,
+    /// <summary>Live price of the UNDERLYING itself (the cash/index instrument this contract is
+    /// written on), not of either futures leg - see SpotSymbology for how a futures underlying is
+    /// matched to its spot instrument. 0 when no spot is available: the underlying's spot could not
+    /// be resolved in the broker's master, or it resolved but no tick has arrived yet. The UI shows
+    /// a dash rather than a zero in that case.</summary>
+    decimal SpotPrice = 0m,
+    /// <summary>The near future's premium (or discount) to spot, as a percentage of spot:
+    /// (near - spot) / spot * 100. Positive means the future trades ABOVE cash (contango, the
+    /// normal state given cost of carry); negative means below (backwardation). 0 whenever
+    /// SpotPrice is 0, so an absent spot never reads as "trading exactly at cash".
+    ///
+    /// Deliberately independent of Direction: unlike SpreadValue this is a market observation
+    /// rather than a price anything is executed at, so it does not switch sides with whichever
+    /// leg is currently richer.</summary>
+    decimal BasisPercent = 0m);
 
 /// <summary>
 /// A spread's snapshot with its rank (1 = biggest absolute spread %) among all currently
@@ -69,4 +84,9 @@ public readonly record struct SpreadRanking(
     string Direction,
     decimal SpreadValue,
     decimal SpreadPercent,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    /// <summary>Carried through from the snapshot this ranking row was built from, so the Dashboard
+    /// can show spot/basis without subscribing to the full per-spread live feed - see
+    /// SpreadSnapshot.SpotPrice/BasisPercent for the semantics (0 = unavailable).</summary>
+    decimal SpotPrice = 0m,
+    decimal BasisPercent = 0m);
