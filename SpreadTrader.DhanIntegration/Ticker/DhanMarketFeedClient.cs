@@ -342,14 +342,45 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         {
             if (!await DelayAsync(FeedSocketLiveness.StallCheckInterval, cancellationToken)) return;
             if (socket.State != WebSocketState.Open) return;
-            if (!_stallDetector.IsStalled(DateTimeOffset.UtcNow, FeedSocketLiveness.StallTimeout)) continue;
 
-            _logger.LogWarning(
-                "Dhan market feed has sent nothing for over {Seconds}s despite having been live - treating it as a " +
-                "silently dropped connection and reconnecting.", FeedSocketLiveness.StallTimeout.TotalSeconds);
+            uint[] tokens;
+            lock (_tokensLock) { tokens = _subscribedTokens.ToArray(); }
 
-            try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
-            return;
+            switch (_stallDetector.Decide(DateTimeOffset.UtcNow, FeedSocketLiveness.StallTimeout, FeedSocketLiveness.InitialDataTimeout, tokens.Length > 0))
+            {
+                case FeedRecoveryAction.Resubscribe:
+                    // Cheap, opens no new socket, and repairs the likeliest cause: a subscription
+                    // the broker never acted on. On Dhan that is a real scenario - authorisation
+                    // completes asynchronously AFTER connect, so subscriptions sent immediately can
+                    // land before the socket is authorised and simply be ignored, leaving a feed
+                    // that looks connected and authenticated but never sends a tick.
+                    _logger.LogWarning(
+                        "Dhan market feed has sent nothing for over {Seconds}s with {Count} instrument(s) subscribed - " +
+                        "re-sending the subscriptions on the same connection.",
+                        FeedSocketLiveness.StallTimeout.TotalSeconds, tokens.Length);
+
+                    try
+                    {
+                        await SendSubscriptionAsync(tokens, SubscribeRequestCode, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        // A send failure here IS the diagnosis - the socket is gone. Let the
+                        // receive loop notice it rather than tearing things down from this task.
+                        _logger.LogWarning(ex, "Dhan market feed re-subscribe failed - the connection is no longer usable.");
+                        try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
+                        return;
+                    }
+                    break;
+
+                case FeedRecoveryAction.Reconnect:
+                    _logger.LogWarning(
+                        "Dhan market feed still silent after a re-subscribe, having previously been live - treating it " +
+                        "as a silently dropped connection and reconnecting.");
+
+                    try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
+                    return;
+            }
         }
     }
 
@@ -365,7 +396,7 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         _socket?.Dispose();
         _socket = new ClientWebSocket();
         FeedSocketLiveness.Configure(_socket);
-        _stallDetector.OnConnected();
+        _stallDetector.OnConnected(DateTimeOffset.UtcNow);
 
         var accessToken = _session.AccessToken
             ?? throw new InvalidOperationException("No Dhan access token available - complete the login flow first.");
@@ -531,7 +562,16 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
 
                 // Liveness, not usefulness - a frame of any kind proves the connection is still
                 // delivering, which is all the stall watchdog needs to know.
-                _stallDetector.OnMessage(DateTimeOffset.UtcNow);
+                if (_stallDetector.OnMessage(DateTimeOffset.UtcNow))
+                {
+                    // First frame on this connection. Logged once because its ABSENCE is the single
+                    // most useful fact when a feed looks stuck: if this line never appears, the
+                    // socket is connected but delivering nothing, and the problem is the
+                    // subscription or the broker - not anything downstream of here.
+                    _logger.LogInformation(
+                        "Dhan market feed delivered its first data {Seconds:F1}s after connecting.",
+                        _stallDetector.TimeSinceConnected(DateTimeOffset.UtcNow).TotalSeconds);
+                }
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
