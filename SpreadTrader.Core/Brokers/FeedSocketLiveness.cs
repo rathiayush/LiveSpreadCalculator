@@ -40,6 +40,18 @@ public static class FeedSocketLiveness
     /// <summary>How often to test for a stall. Cheap - it is one timestamp comparison.</summary>
     public static readonly TimeSpan StallCheckInterval = TimeSpan.FromSeconds(15);
 
+    /// <summary>
+    /// How long a connection must survive before it counts as "healthy", allowing the reconnect
+    /// backoff to reset to its floor.
+    ///
+    /// Without this the backoff reset the instant a connect SUCCEEDED, which is not the same thing
+    /// as the connection working: a server that accepts and then immediately closes would be
+    /// retried every second forever, hammering the broker and inviting a rate-limit block that
+    /// turns a blip into a sustained outage. Escalating on a flap and resetting only on a
+    /// connection that actually held is the difference between backing off and busy-waiting.
+    /// </summary>
+    public static readonly TimeSpan StableConnectionThreshold = TimeSpan.FromSeconds(60);
+
     /// <summary>How long to wait between checks while the broker login hasn't completed yet.
     ///
     /// Deliberately short and FIXED, never exponential: waiting for a token is a normal startup (and

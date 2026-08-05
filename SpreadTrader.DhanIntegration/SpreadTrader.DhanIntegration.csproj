@@ -12,6 +12,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Lets FeedStallDetectorTests pin DhanMarketFeedClient.NextBackoff, the rule that stops a
+         connect/close flap becoming a busy reconnect loop. -->
+    <InternalsVisibleTo Include="SpreadTrader.Engine.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.2" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
