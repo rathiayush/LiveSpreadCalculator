@@ -141,20 +141,38 @@ public sealed class KiteTickerClient : IMarketDataFeed
             try
             {
                 await ConnectAndSubscribeAsync(cancellationToken);
-                backoff = TimeSpan.FromSeconds(1);
+                var connectedAt = DateTimeOffset.UtcNow;
 
                 // Watchdog for a silently half-open socket - see WatchForStallAsync.
                 using var stallCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var watchdog = WatchForStallAsync(_socket!, stallCts.Token);
+                string endedReason;
                 try
                 {
-                    await ReceiveLoopAsync(cancellationToken);
+                    endedReason = await ReceiveLoopAsync(cancellationToken);
                 }
                 finally
                 {
                     stallCts.Cancel();
                     await SafeAwaitAsync(watchdog);
                 }
+
+                // The receive loop ended without throwing - a close frame, or the socket no longer
+                // Open. This used to fall through and reconnect silently: no log, no delay. See
+                // DhanMarketFeedClient.RunMarketFeedAsync for the full reasoning; the shape is the
+                // same here.
+                var uptime = DateTimeOffset.UtcNow - connectedAt;
+                _logger.LogWarning(
+                    "Kite ticker disconnected after {Uptime} - {Reason}. Reconnecting in {Seconds}s.",
+                    uptime.TotalSeconds < 90 ? $"{uptime.TotalSeconds:F0}s" : $"{uptime.TotalMinutes:F1}m",
+                    endedReason, backoff.TotalSeconds);
+
+                backoff = uptime >= FeedSocketLiveness.StableConnectionThreshold
+                    ? TimeSpan.FromSeconds(1)
+                    : TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 30));
+
+                try { await Task.Delay(backoff, cancellationToken); }
+                catch (OperationCanceledException) { break; }
             }
             catch (OperationCanceledException)
             {
@@ -251,7 +269,10 @@ public sealed class KiteTickerClient : IMarketDataFeed
         }
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
+    /// <summary>Receives until the connection ends, and reports why - both exits here are ordinary
+    /// returns rather than exceptions, so the caller has no other way to tell a server close from a
+    /// socket that quietly stopped being Open.</summary>
+    private async Task<string> ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         var buffer = new byte[8192];
         using var messageStream = new MemoryStream();
@@ -271,8 +292,13 @@ public sealed class KiteTickerClient : IMarketDataFeed
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
+                    var status = result.CloseStatus?.ToString() ?? "no status";
+                    var description = string.IsNullOrWhiteSpace(result.CloseStatusDescription)
+                        ? "no description"
+                        : result.CloseStatusDescription;
+
                     await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "server closed", cancellationToken);
-                    return;
+                    return $"the server closed the connection ({status}: {description})";
                 }
                 messageStream.Write(buffer, 0, result.Count);
             } while (!result.EndOfMessage);
@@ -293,6 +319,10 @@ public sealed class KiteTickerClient : IMarketDataFeed
             foreach (var tick in ticks)
                 TickReceived.Invoke(tick);
         }
+
+        return cancellationToken.IsCancellationRequested
+            ? "shutting down"
+            : $"the socket stopped being open (state {_socket!.State})";
     }
 
     /// <summary>Parses a text frame for `{"type":"order",...}` (see OrderUpdateReceived's doc

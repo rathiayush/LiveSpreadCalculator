@@ -117,6 +117,97 @@ public class FeedStallDetectorTests
         Assert.False(detector.IsStalled(T0.AddSeconds(123), Timeout));
     }
 
+    // ---- Reconnect backoff after a disconnect --------------------------------------------------
+
+    [Fact]
+    public void AConnectionThatHeldResetsTheBackoffToTheFloor()
+    {
+        // The feed ran fine for an hour and then dropped - that is a blip on a healthy endpoint,
+        // so the next attempt should be immediate rather than inheriting an old penalty.
+        var next = DhanBackoff(TimeSpan.FromSeconds(16), uptime: TimeSpan.FromHours(1));
+
+        Assert.Equal(TimeSpan.FromSeconds(1), next);
+    }
+
+    [Fact]
+    public void AConnectionThatDroppedImmediatelyEscalatesInstead()
+    {
+        // Connect, closed straight away, repeat. Resetting here would reconnect every second
+        // forever - hammering the broker and inviting a rate-limit block that turns a blip into a
+        // sustained outage.
+        var next = DhanBackoff(TimeSpan.FromSeconds(2), uptime: TimeSpan.FromSeconds(1));
+
+        Assert.Equal(TimeSpan.FromSeconds(4), next);
+    }
+
+    [Fact]
+    public void EscalationIsCappedSoAFlapNeverBacksOffForever()
+    {
+        var next = DhanBackoff(TimeSpan.FromSeconds(30), uptime: TimeSpan.FromSeconds(1));
+
+        Assert.Equal(TimeSpan.FromSeconds(30), next);
+    }
+
+    [Fact]
+    public void RepeatedFlappingClimbsToTheCapAndStops()
+    {
+        // The whole point is that a connect/close loop cannot busy-wait. Walk it and check it
+        // settles at the ceiling rather than oscillating back to the floor.
+        var backoff = TimeSpan.FromSeconds(1);
+        for (var i = 0; i < 12; i++)
+            backoff = DhanBackoff(backoff, uptime: TimeSpan.FromSeconds(2));
+
+        Assert.Equal(TimeSpan.FromSeconds(30), backoff);
+
+        // ...and one healthy connection is enough to release it again.
+        Assert.Equal(TimeSpan.FromSeconds(1), DhanBackoff(backoff, uptime: TimeSpan.FromMinutes(5)));
+    }
+
+    // ---- Dhan disconnect-code cooldowns --------------------------------------------------------
+
+    [Fact]
+    public void TooManyConnectionsGetsALongCooldownNotAFastRetry()
+    {
+        // 805 is Dhan's "too many requests or connections. Further requests may result in the user
+        // being blocked". Reconnecting promptly into that is what escalates a temporary refusal
+        // into an account-level block, so it must wait far longer than the ordinary backoff ceiling.
+        var cooldown = SpreadTrader.DhanIntegration.Ticker.DhanMarketFeedClient.CooldownFor(805);
+
+        Assert.NotNull(cooldown);
+        Assert.True(cooldown > TimeSpan.FromSeconds(30), "805 must outwait the ordinary 30s backoff ceiling");
+    }
+
+    [Fact]
+    public void AnOversizedSubscriptionAlsoWaitsRatherThanRetryingIdentically()
+    {
+        // 804 - retrying the exact same oversized subscription immediately cannot succeed.
+        Assert.NotNull(SpreadTrader.DhanIntegration.Ticker.DhanMarketFeedClient.CooldownFor(804));
+    }
+
+    [Theory]
+    [InlineData(0)]    // no disconnect packet was seen at all
+    [InlineData(800)]  // transient server-side error
+    [InlineData(807)]  // expired token - handled by the auth failure path, not by waiting
+    public void OrdinaryDisconnectReasonsUseTheNormalBackoff(int code)
+    {
+        // Only the codes that specifically punish fast retries get a cooldown; everything else must
+        // keep the fast-recovery behaviour, or a routine blip would cost minutes of missing prices.
+        Assert.Null(SpreadTrader.DhanIntegration.Ticker.DhanMarketFeedClient.CooldownFor(code));
+    }
+
+    [Fact]
+    public void TheStabilityThresholdIsLongerThanAnOrdinaryReconnectCycle()
+    {
+        // If "stable" were shorter than the longest backoff, a connection could be judged healthy
+        // purely because the previous wait was long - which would defeat the escalation entirely.
+        Assert.True(FeedSocketLiveness.StableConnectionThreshold >= TimeSpan.FromSeconds(30));
+    }
+
+    /// <summary>The real backoff rule from DhanMarketFeedClient - Kite and Kotak inline the same
+    /// expression, so pinning it once pins the behaviour all three rely on.</summary>
+    private static TimeSpan DhanBackoff(TimeSpan current, TimeSpan uptime) =>
+        SpreadTrader.DhanIntegration.Ticker.DhanMarketFeedClient.NextBackoff(current, uptime);
+
     [Fact]
     public void TheConfiguredDefaultsAreSaneRelativeToEachOther()
     {
