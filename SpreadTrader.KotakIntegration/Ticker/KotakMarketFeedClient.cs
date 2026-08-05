@@ -151,16 +151,17 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
             try
             {
                 await ConnectAndSubscribeAsync(cancellationToken);
-                backoff = TimeSpan.FromSeconds(1);
+                var connectedAt = DateTimeOffset.UtcNow;
 
                 using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var heartbeatTask = RunHeartbeatAsync(heartbeatCts.Token);
                 // Watchdog for a silently half-open socket - see WatchForStallAsync. Distinct from
                 // the heartbeat above, which only SENDS; this notices that nothing is coming back.
                 var watchdog = WatchForStallAsync(_socket!, heartbeatCts.Token);
+                string endedReason;
                 try
                 {
-                    await ReceiveLoopAsync(cancellationToken);
+                    endedReason = await ReceiveLoopAsync(cancellationToken);
                 }
                 finally
                 {
@@ -168,6 +169,21 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
                     await SafeAwaitAsync(heartbeatTask);
                     await SafeAwaitAsync(watchdog);
                 }
+
+                // The receive loop ended without throwing - a close frame, or the socket no longer
+                // Open. This used to fall through and reconnect silently: no log, no delay. See
+                // DhanMarketFeedClient.RunMarketFeedAsync for the full reasoning.
+                var uptime = DateTimeOffset.UtcNow - connectedAt;
+                _logger.LogWarning(
+                    "Kotak market feed disconnected after {Uptime} - {Reason}. Reconnecting in {Seconds}s.",
+                    uptime.TotalSeconds < 90 ? $"{uptime.TotalSeconds:F0}s" : $"{uptime.TotalMinutes:F1}m",
+                    endedReason, backoff.TotalSeconds);
+
+                backoff = uptime >= FeedSocketLiveness.StableConnectionThreshold
+                    ? TimeSpan.FromSeconds(1)
+                    : TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 30));
+
+                if (!await DelayAsync(backoff, cancellationToken)) break;
             }
             catch (OperationCanceledException)
             {
@@ -409,7 +425,10 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
         finally { _sendLock.Release(); }
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
+    /// <summary>Receives until the connection ends, and reports why - both exits here are ordinary
+    /// returns rather than exceptions, so the caller has no other way to tell a server close from a
+    /// socket that quietly stopped being Open.</summary>
+    private async Task<string> ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         var buffer = new byte[16 * 1024];
         using var messageStream = new MemoryStream();
@@ -428,8 +447,13 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
+                    var status = result.CloseStatus?.ToString() ?? "no status";
+                    var description = string.IsNullOrWhiteSpace(result.CloseStatusDescription)
+                        ? "no description"
+                        : result.CloseStatusDescription;
+
                     await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "server closed", cancellationToken);
-                    return;
+                    return $"the server closed the connection ({status}: {description})";
                 }
                 messageStream.Write(buffer, 0, result.Count);
             } while (!result.EndOfMessage);
@@ -438,6 +462,10 @@ public sealed class KotakMarketFeedClient : IMarketDataFeed
 
             HandleMessage(messageStream.GetBuffer().AsSpan(0, (int)messageStream.Length));
         }
+
+        return cancellationToken.IsCancellationRequested
+            ? "shutting down"
+            : $"the socket stopped being open (state {_socket!.State})";
     }
 
     private void HandleMessage(ReadOnlySpan<byte> bytes)
