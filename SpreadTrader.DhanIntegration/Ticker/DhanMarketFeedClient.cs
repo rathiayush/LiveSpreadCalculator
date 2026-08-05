@@ -223,22 +223,38 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
             try
             {
                 await ConnectAndSubscribeAsync(cancellationToken);
-                backoff = TimeSpan.FromSeconds(1);
+                var connectedAt = DateTimeOffset.UtcNow;
 
                 // The watchdog runs alongside the receive loop and aborts the socket if the feed
                 // goes silent after having delivered data - see WatchForStallAsync. Aborting makes
                 // the pending ReceiveAsync throw, which lands in the catch below and reconnects.
                 using var stallCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 var watchdog = WatchForStallAsync(_socket!, stallCts.Token);
+                string endedReason;
                 try
                 {
-                    await ReceiveLoopAsync(cancellationToken);
+                    endedReason = await ReceiveLoopAsync(cancellationToken);
                 }
                 finally
                 {
                     stallCts.Cancel();
                     await SafeAwaitAsync(watchdog);
                 }
+
+                // Reaching here means the receive loop ended WITHOUT throwing - the server sent a
+                // close frame, or the socket stopped being Open. That used to fall straight out of
+                // the try and round the while loop again: no log line, no delay, just a silent
+                // reconnect. So a server that kept closing the connection produced an invisible
+                // hot reconnect loop - the feed "stopping on its own" with nothing whatsoever in
+                // the logs to say why, and enough connect churn to risk being rate-limited, which
+                // would turn a blip into a sustained outage.
+                var uptime = DateTimeOffset.UtcNow - connectedAt;
+                _logger.LogWarning(
+                    "Dhan market feed disconnected after {Uptime} - {Reason}. Reconnecting in {Seconds}s.",
+                    FormatUptime(uptime), endedReason, backoff.TotalSeconds);
+
+                backoff = NextBackoff(backoff, uptime);
+                if (!await DelayAsync(backoff, cancellationToken)) break;
             }
             catch (OperationCanceledException)
             {
@@ -258,6 +274,23 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
     /// backoff - see RunMarketFeedAsync.</summary>
     private bool IsSessionReady() =>
         !string.IsNullOrWhiteSpace(_session.AccessToken) && !string.IsNullOrWhiteSpace(_session.ClientId);
+
+    /// <summary>
+    /// The next reconnect delay, given how long the connection that just ended actually lasted.
+    ///
+    /// A connection that HELD is evidence the endpoint is healthy, so the next attempt starts from
+    /// the floor. A connection that dropped almost immediately is a flap, and resetting there would
+    /// mean reconnecting every second indefinitely - hammering the broker and risking a rate-limit
+    /// block that makes the outage worse and self-sustaining. See
+    /// FeedSocketLiveness.StableConnectionThreshold.
+    /// </summary>
+    internal static TimeSpan NextBackoff(TimeSpan current, TimeSpan uptime) =>
+        uptime >= FeedSocketLiveness.StableConnectionThreshold
+            ? TimeSpan.FromSeconds(1)
+            : TimeSpan.FromSeconds(Math.Min(current.TotalSeconds * 2, 30));
+
+    private static string FormatUptime(TimeSpan uptime) =>
+        uptime.TotalSeconds < 90 ? $"{uptime.TotalSeconds:F0}s" : $"{uptime.TotalMinutes:F1}m";
 
     /// <summary>
     /// Aborts the socket if the feed stops delivering after having delivered - the half-open
@@ -443,7 +476,11 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         }
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
+    /// <summary>Receives until the connection ends, and REPORTS WHY. The reason is the whole point:
+    /// both ways out of here are ordinary returns rather than exceptions, so without it the caller
+    /// cannot tell a server-initiated close from a socket that quietly stopped being Open - and
+    /// used to log neither.</summary>
+    private async Task<string> ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         var buffer = new byte[16 * 1024];
         using var messageStream = new MemoryStream();
@@ -463,8 +500,16 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
 
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
+                    // Dhan's own close status and description, which usually say exactly why -
+                    // carried out to the caller so the log line names the cause instead of just
+                    // reporting that the feed went away.
+                    var status = result.CloseStatus?.ToString() ?? "no status";
+                    var description = string.IsNullOrWhiteSpace(result.CloseStatusDescription)
+                        ? "no description"
+                        : result.CloseStatusDescription;
+
                     await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "server closed", cancellationToken);
-                    return;
+                    return $"the server closed the connection ({status}: {description})";
                 }
                 messageStream.Write(buffer, 0, result.Count);
             } while (!result.EndOfMessage);
@@ -478,6 +523,10 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
             foreach (var packet in packets)
                 await HandlePacketAsync(packet, cancellationToken);
         }
+
+        return cancellationToken.IsCancellationRequested
+            ? "shutting down"
+            : $"the socket stopped being open (state {_socket!.State})";
     }
 
     private async Task HandlePacketAsync(DhanPacket packet, CancellationToken cancellationToken)
