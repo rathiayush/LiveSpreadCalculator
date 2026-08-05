@@ -3,118 +3,164 @@ using SpreadTrader.Core.Brokers;
 namespace SpreadTrader.Engine.Tests;
 
 /// <summary>
-/// Pins the rule that decides whether a live market-data socket has silently died.
+/// Pins what a live market-data socket does when it goes quiet.
 ///
 /// Both directions of getting this wrong are costly, which is why it is tested rather than
 /// eyeballed:
 ///  - too eager, and a healthy but quiet connection is torn down and the whole universe
 ///    re-subscribed, potentially in a loop all night against the broker's rate limits;
-///  - too reluctant, and a half-open socket sits there forever with prices frozen while the app
-///    looks perfectly healthy - the failure this class exists to end.
+///  - too reluctant, and a connection sits there forever delivering nothing while the app looks
+///    perfectly healthy - connected, authenticated, no errors, prices frozen. That is the failure
+///    that actually shipped, and the reason a re-subscribe now happens before any reconnect.
 /// </summary>
 public class FeedStallDetectorTests
 {
     private static readonly DateTimeOffset T0 = new(2026, 8, 4, 10, 0, 0, TimeSpan.Zero);
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(120);
+    private static readonly TimeSpan Quiet = TimeSpan.FromSeconds(120);
+    private static readonly TimeSpan Initial = TimeSpan.FromSeconds(30);
+
+    private static FeedRecoveryAction Decide(FeedStallDetector d, DateTimeOffset now, bool subscribed = true) =>
+        d.Decide(now, Quiet, Initial, subscribed);
+
+    private static FeedStallDetector Connected()
+    {
+        var d = new FeedStallDetector();
+        d.OnConnected(T0);
+        return d;
+    }
+
+    // ---- A connection that never delivers ------------------------------------------------------
 
     [Fact]
-    public void AConnectionThatHasNeverDeliveredIsNeverJudgedStalled()
+    public void AConnectionThatNeverDeliversIsResubscribedNotReconnected()
     {
-        // THE off-hours guard. Overnight a healthy feed sends nothing at all, and that is
-        // indistinguishable from a dead one - so the safe answer is to leave it alone rather than
-        // reconnect on a loop until morning.
-        var detector = new FeedStallDetector();
-        detector.OnConnected();
+        // THE bug this fixes. A socket whose subscription never took effect - on Dhan, because
+        // authorisation completes asynchronously after connect - sat connected and silent forever,
+        // because "never delivered" was deliberately unjudgeable. Re-subscribing repairs exactly
+        // that, and unlike a reconnect it opens no new socket.
+        var d = Connected();
 
-        Assert.False(detector.IsStalled(T0.AddHours(9), Timeout));
+        Assert.Equal(FeedRecoveryAction.Resubscribe, Decide(d, T0.Add(Initial).AddSeconds(1)));
     }
 
     [Fact]
-    public void SilenceAfterDataHasFlowedIsAStall()
+    public void ItNeverEscalatesToAReconnectWhileNothingHasEverArrived()
     {
-        // Data was flowing a moment ago and has now stopped dead - the half-open socket case.
-        var detector = new FeedStallDetector();
-        detector.OnConnected();
-        detector.OnMessage(T0);
+        // The off-hours guard, preserved. Overnight a healthy feed delivers nothing all night, and
+        // reconnecting on a loop until morning - re-subscribing the whole universe each time, into
+        // the very connection limits that get an account blocked - would be far worse than the
+        // problem. So this case re-subscribes indefinitely and never tears anything down.
+        var d = Connected();
+        var now = T0;
 
-        Assert.True(detector.IsStalled(T0.Add(Timeout).AddSeconds(1), Timeout));
+        for (var i = 0; i < 40; i++)
+        {
+            now = now.AddSeconds(200);
+            Assert.NotEqual(FeedRecoveryAction.Reconnect, Decide(d, now));
+        }
     }
 
     [Fact]
-    public void AGapShorterThanTheTimeoutIsNotAStall()
+    public void TheFirstAttemptIsEagerAndLaterOnesAreNot()
     {
-        // An illiquid contract going quiet for a minute mid-session must not cost a reconnect.
-        var detector = new FeedStallDetector();
-        detector.OnConnected();
-        detector.OnMessage(T0);
+        // Fast recovery when a subscription was simply missed, without chattering all night.
+        var d = Connected();
 
-        Assert.False(detector.IsStalled(T0.AddSeconds(119), Timeout));
+        Assert.Equal(FeedRecoveryAction.None, Decide(d, T0.AddSeconds(29)));
+        Assert.Equal(FeedRecoveryAction.Resubscribe, Decide(d, T0.AddSeconds(31)));
+
+        // Second attempt waits the full quiet window, not another 30s.
+        Assert.Equal(FeedRecoveryAction.None, Decide(d, T0.AddSeconds(31 + 119)));
+        Assert.Equal(FeedRecoveryAction.Resubscribe, Decide(d, T0.AddSeconds(31 + 121)));
+    }
+
+    // ---- A connection that delivered and then stopped ------------------------------------------
+
+    [Fact]
+    public void SilenceAfterDataHasFlowedResubscribesFirstThenReconnects()
+    {
+        // A re-subscribe is tried first because it is cheap; if the feed is still silent after it
+        // has had a full window to take effect, the connection itself is the problem.
+        var d = Connected();
+        d.OnMessage(T0);
+
+        Assert.Equal(FeedRecoveryAction.Resubscribe, Decide(d, T0.Add(Quiet).AddSeconds(1)));
+        Assert.Equal(FeedRecoveryAction.Reconnect, Decide(d, T0.Add(Quiet).Add(Quiet).AddSeconds(2)));
     }
 
     [Fact]
-    public void TheTimeoutBoundaryItselfIsNotYetAStall()
+    public void DataResumingCancelsTheEscalation()
     {
-        var detector = new FeedStallDetector();
-        detector.OnConnected();
-        detector.OnMessage(T0);
+        // If the re-subscribe worked, nothing should be torn down.
+        var d = Connected();
+        d.OnMessage(T0);
+        Assert.Equal(FeedRecoveryAction.Resubscribe, Decide(d, T0.Add(Quiet).AddSeconds(1)));
 
-        Assert.False(detector.IsStalled(T0.Add(Timeout), Timeout));
+        d.OnMessage(T0.Add(Quiet).AddSeconds(5));
+
+        Assert.Equal(FeedRecoveryAction.None, Decide(d, T0.Add(Quiet).AddSeconds(10)));
+    }
+
+    [Fact]
+    public void AGapShorterThanTheTimeoutIsNotActedOn()
+    {
+        // An illiquid contract going quiet for a minute mid-session must not cost anything.
+        var d = Connected();
+        d.OnMessage(T0);
+
+        Assert.Equal(FeedRecoveryAction.None, Decide(d, T0.AddSeconds(119)));
     }
 
     [Fact]
     public void EveryMessageResetsTheClock()
     {
-        // A steadily ticking feed must never be judged stalled, however long it stays connected.
-        var detector = new FeedStallDetector();
-        detector.OnConnected();
-
+        var d = Connected();
         var now = T0;
+
         for (var i = 0; i < 50; i++)
         {
             now = now.AddSeconds(60);
-            detector.OnMessage(now);
-            Assert.False(detector.IsStalled(now.AddSeconds(30), Timeout));
+            d.OnMessage(now);
+            Assert.Equal(FeedRecoveryAction.None, Decide(d, now.AddSeconds(30)));
         }
+    }
+
+    // ---- Guards --------------------------------------------------------------------------------
+
+    [Fact]
+    public void NothingHappensWhenNothingIsSubscribed()
+    {
+        // With no subscriptions there is no data to expect, so silence means nothing at all.
+        var d = Connected();
+
+        Assert.Equal(FeedRecoveryAction.None, Decide(d, T0.AddHours(9), subscribed: false));
     }
 
     [Fact]
     public void ReconnectingClearsTheEvidenceFromThePreviousConnection()
     {
-        // Without this a fresh socket would inherit the old timestamp and be declared stalled
-        // immediately - reconnect, instantly "stall", reconnect again, forever.
-        var detector = new FeedStallDetector();
-        detector.OnConnected();
-        detector.OnMessage(T0);
+        // Without this a fresh socket would inherit the old state and be judged immediately.
+        var d = Connected();
+        d.OnMessage(T0);
+        Assert.Equal(FeedRecoveryAction.Resubscribe, Decide(d, T0.Add(Quiet).AddSeconds(1)));
 
-        detector.OnConnected();
+        d.OnConnected(T0.AddHours(1));
 
-        Assert.False(detector.IsStalled(T0.AddHours(1), Timeout));
+        Assert.Equal(FeedRecoveryAction.None, Decide(d, T0.AddHours(1).AddSeconds(10)));
     }
 
     [Fact]
-    public void AStalledConnectionStaysStalledUntilItReconnects()
+    public void TheFirstMessageIsReportedOnlyOnce()
     {
-        // The watchdog polls, so the verdict must be stable between checks rather than one-shot.
-        var detector = new FeedStallDetector();
-        detector.OnConnected();
-        detector.OnMessage(T0);
+        // The caller logs on this, and one line per connection is the point - not one per tick.
+        var d = Connected();
 
-        Assert.True(detector.IsStalled(T0.AddSeconds(121), Timeout));
-        Assert.True(detector.IsStalled(T0.AddSeconds(200), Timeout));
-    }
+        Assert.True(d.OnMessage(T0));
+        Assert.False(d.OnMessage(T0.AddSeconds(1)));
+        Assert.False(d.OnMessage(T0.AddSeconds(2)));
 
-    [Fact]
-    public void DataResumingClearsTheStall()
-    {
-        // If a late frame arrives before the watchdog's next poll, nothing should be torn down.
-        var detector = new FeedStallDetector();
-        detector.OnConnected();
-        detector.OnMessage(T0);
-        Assert.True(detector.IsStalled(T0.AddSeconds(121), Timeout));
-
-        detector.OnMessage(T0.AddSeconds(122));
-
-        Assert.False(detector.IsStalled(T0.AddSeconds(123), Timeout));
+        d.OnConnected(T0.AddMinutes(5));
+        Assert.True(d.OnMessage(T0.AddMinutes(6)));
     }
 
     // ---- Reconnect backoff after a disconnect --------------------------------------------------
