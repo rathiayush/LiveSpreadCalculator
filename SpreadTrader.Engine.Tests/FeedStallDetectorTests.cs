@@ -163,6 +163,38 @@ public class FeedStallDetectorTests
         Assert.Equal(TimeSpan.FromSeconds(1), DhanBackoff(backoff, uptime: TimeSpan.FromMinutes(5)));
     }
 
+    // ---- Dhan disconnect-code cooldowns --------------------------------------------------------
+
+    [Fact]
+    public void TooManyConnectionsGetsALongCooldownNotAFastRetry()
+    {
+        // 805 is Dhan's "too many requests or connections. Further requests may result in the user
+        // being blocked". Reconnecting promptly into that is what escalates a temporary refusal
+        // into an account-level block, so it must wait far longer than the ordinary backoff ceiling.
+        var cooldown = SpreadTrader.DhanIntegration.Ticker.DhanMarketFeedClient.CooldownFor(805);
+
+        Assert.NotNull(cooldown);
+        Assert.True(cooldown > TimeSpan.FromSeconds(30), "805 must outwait the ordinary 30s backoff ceiling");
+    }
+
+    [Fact]
+    public void AnOversizedSubscriptionAlsoWaitsRatherThanRetryingIdentically()
+    {
+        // 804 - retrying the exact same oversized subscription immediately cannot succeed.
+        Assert.NotNull(SpreadTrader.DhanIntegration.Ticker.DhanMarketFeedClient.CooldownFor(804));
+    }
+
+    [Theory]
+    [InlineData(0)]    // no disconnect packet was seen at all
+    [InlineData(800)]  // transient server-side error
+    [InlineData(807)]  // expired token - handled by the auth failure path, not by waiting
+    public void OrdinaryDisconnectReasonsUseTheNormalBackoff(int code)
+    {
+        // Only the codes that specifically punish fast retries get a cooldown; everything else must
+        // keep the fast-recovery behaviour, or a routine blip would cost minutes of missing prices.
+        Assert.Null(SpreadTrader.DhanIntegration.Ticker.DhanMarketFeedClient.CooldownFor(code));
+    }
+
     [Fact]
     public void TheStabilityThresholdIsLongerThanAnOrdinaryReconnectCycle()
     {

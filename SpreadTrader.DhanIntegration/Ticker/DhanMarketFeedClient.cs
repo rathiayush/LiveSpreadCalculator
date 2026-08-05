@@ -83,6 +83,11 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
     /// Only the market feed gets one; the order socket is legitimately idle for long stretches and
     /// PositionsCache re-polls on its own timer regardless.</summary>
     private readonly FeedStallDetector _stallDetector = new();
+
+    /// <summary>The reason code from the last disconnect packet Dhan sent, consumed (and reset) by
+    /// the reconnect loop so it can pick an appropriate cooldown - see CooldownFor. Written from
+    /// the receive loop and read from the run loop, hence Interlocked rather than a plain field.</summary>
+    private int _lastDisconnectCode;
     private readonly HashSet<uint> _subscribedTokens = new();
     private readonly object _tokensLock = new();
 
@@ -249,11 +254,17 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
                 // the logs to say why, and enough connect churn to risk being rate-limited, which
                 // would turn a blip into a sustained outage.
                 var uptime = DateTimeOffset.UtcNow - connectedAt;
-                _logger.LogWarning(
-                    "Dhan market feed disconnected after {Uptime} - {Reason}. Reconnecting in {Seconds}s.",
-                    FormatUptime(uptime), endedReason, backoff.TotalSeconds);
 
-                backoff = NextBackoff(backoff, uptime);
+                // A disconnect packet arriving just before the close tells us WHY, and for some
+                // codes the right response is to wait considerably longer - see CooldownFor.
+                var cooldown = CooldownFor(Interlocked.Exchange(ref _lastDisconnectCode, 0));
+                backoff = cooldown ?? NextBackoff(backoff, uptime);
+
+                _logger.LogWarning(
+                    "Dhan market feed disconnected after {Uptime} - {Reason}. Reconnecting in {Seconds}s{Cooldown}.",
+                    FormatUptime(uptime), endedReason, backoff.TotalSeconds,
+                    cooldown is null ? "" : " (extended cooldown - reconnecting sooner would make this worse)");
+
                 if (!await DelayAsync(backoff, cancellationToken)) break;
             }
             catch (OperationCanceledException)
@@ -288,6 +299,30 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         uptime >= FeedSocketLiveness.StableConnectionThreshold
             ? TimeSpan.FromSeconds(1)
             : TimeSpan.FromSeconds(Math.Min(current.TotalSeconds * 2, 30));
+
+    /// <summary>
+    /// A hard cooldown for the disconnect reasons where reconnecting promptly makes things WORSE,
+    /// overriding the ordinary backoff.
+    ///
+    /// 805 is the one that matters. Dhan's docs are explicit that it means "too many requests or
+    /// connections. Further requests may result in the user being blocked", and that with more than
+    /// five sockets open "the first socket will be disconnected with 805 with every additional
+    /// connection". Reconnecting straight into that is precisely the behaviour that escalates a
+    /// temporary refusal into an account-level block - so this backs off long enough for the old
+    /// connections to age out server-side instead of racing them.
+    ///
+    /// 804 (subscription larger than the connection allows) is not a connection-count problem, but
+    /// retrying the identical oversized subscription immediately cannot succeed either, so it gets
+    /// the same treatment rather than a tight retry.
+    ///
+    /// Returns null when the code carries no special instruction and the ordinary backoff applies.
+    /// </summary>
+    internal static TimeSpan? CooldownFor(int disconnectCode) => disconnectCode switch
+    {
+        805 => TimeSpan.FromMinutes(2),
+        804 => TimeSpan.FromMinutes(1),
+        _ => null,
+    };
 
     private static string FormatUptime(TimeSpan uptime) =>
         uptime.TotalSeconds < 90 ? $"{uptime.TotalSeconds:F0}s" : $"{uptime.TotalMinutes:F1}m";
@@ -533,6 +568,9 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
     {
         if (packet.Kind == DhanPacketKind.Disconnect)
         {
+            // Remembered so the reconnect can react to WHY Dhan hung up - notably 805, where
+            // retrying quickly is actively harmful. See CooldownFor.
+            _lastDisconnectCode = packet.DisconnectCode;
             LogDisconnect(packet.DisconnectCode);
             await _authFailureHandler.HandleIfFeedTokenExpiredAsync(packet.DisconnectCode, cancellationToken);
             return;
