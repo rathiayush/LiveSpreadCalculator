@@ -236,7 +236,16 @@ public sealed class DhanOptionsInstrumentSource : IOptionsInstrumentSource
             if (!string.Equals(Get(fields, iInstrument), IndexOptionInstrumentType, StringComparison.OrdinalIgnoreCase))
                 continue;
 
+            // SM_SYMBOL_NAME is blank on some rows in Dhan's scrip master - DhanInstrumentMasterService
+            // hit the exact same thing for futures (see its DeriveUnderlying) and falls back to the
+            // leading segment of the trading symbol ("UNDERLYING-MonYYYY-FUT..."), which uses the
+            // same underlying-first, dash-delimited convention for options. Without this fallback,
+            // every OPTIDX row with a blank symbol name column was silently dropped here - the chain
+            // would parse to zero contracts and the page would sit on "waiting for the first update"
+            // forever, with nothing in the logs to say why.
             var underlying = Get(fields, iUnderlying);
+            if (string.IsNullOrWhiteSpace(underlying))
+                underlying = DeriveUnderlying(Get(fields, iSymbol));
             if (string.IsNullOrWhiteSpace(underlying) || !wanted.Contains(underlying)) continue;
 
             var rightText = Get(fields, iRight);
@@ -277,6 +286,16 @@ public sealed class DhanOptionsInstrumentSource : IOptionsInstrumentSource
         }
 
         return chains;
+    }
+
+    /// <summary>Same fallback DhanInstrumentMasterService.DeriveUnderlying uses for futures: Dhan's
+    /// trading symbols are underlying-first and dash-delimited ("NIFTY-Nov2026-24000-CE" and
+    /// similar), so the leading segment before the first dash is the underlying.</summary>
+    private static string? DeriveUnderlying(string? tradingSymbol)
+    {
+        if (string.IsNullOrWhiteSpace(tradingSymbol)) return null;
+        var dash = tradingSymbol.IndexOf('-');
+        return dash > 0 ? tradingSymbol[..dash] : tradingSymbol;
     }
 
     private static DateOnly? ParseExpiry(string? raw)
