@@ -39,7 +39,9 @@ public static class DhanSymbology
     /// 3 of every binary market-data packet. Mapped straight to the canonical exchange code.</summary>
     private static readonly Dictionary<byte, string> FeedSegmentToCanonical = new()
     {
-        [0] = "IDX",  // IDX_I  - index, not tradeable; never subscribed by this app
+        [0] = "IDX",  // IDX_I  - index, not tradeable directly; subscribed for spot pricing since the
+                      // Options Flow / spot-price features - see IndexSegmentTokenFlag below for why
+                      // that made this segment's ids no longer safe to key a tick store by alone.
         [1] = "NSE",  // NSE_EQ
         [2] = "NFO",  // NSE_FNO
         [3] = "CDS",  // NSE_CURRENCY
@@ -189,6 +191,42 @@ public static class DhanSymbology
     /// hide the actual cause behind a login prompt that cannot fix it.
     /// </summary>
     public static bool IsSessionInvalidCode(int code) => code is 807 or 808 or 809 or 810;
+
+    // ---- Cross-segment token disambiguation -----------------------------------------------------
+    /// <summary>
+    /// Dhan's securityId is only unique WITHIN one exchange segment - the comment this table used to
+    /// carry on feed segment 0 ("IDX_I - index, not tradeable; never subscribed by this app") was
+    /// true when it was written, but stopped being true the moment the Options Flow / spot-price
+    /// features started subscribing NIFTY/BANKNIFTY's index-segment spot tokens alongside every
+    /// other futures/equity/option token on the SAME connection. ITickStore, DhanMarketFeedClient's
+    /// _lastTick, and _subscribedTokens all key purely by a bare uint InstrumentToken with no segment
+    /// component - so if an index token's raw numeric id happens to collide with some other actively
+    /// subscribed contract's id in a different segment (NSE_FNO, NSE_EQ, ...), their ticks silently
+    /// overwrite each other. That is exactly what produced a plausible-looking but wrong ATM for
+    /// NIFTY/BANKNIFTY in production: the "spot" price being read was really some other instrument's.
+    ///
+    /// Rather than widen every consumer's key to (segment, id) - a change that would ripple through
+    /// every hosted service, the SignalR/Dashboard contract, and every already-resolved token in a
+    /// running process - this reserves one otherwise-unused high bit of the uint token space for
+    /// index-segment (IDX_I) instruments only, which is the sole segment this app subscribes that was
+    /// never accounted for when the shared token space was designed. Every real Dhan security id is
+    /// documented to fit comfortably under 2^24, so this bit can never collide with a genuine id.
+    ///
+    /// Used at exactly two boundaries, which must agree: DhanInstrumentMasterService tags an index
+    /// row's token the moment it is constructed from the scrip master, and DhanTickPacketParser tags
+    /// a packet's SecurityId the moment it is decoded off the wire (based on the packet's own
+    /// ExchangeSegment byte) - after that, every C#-side consumer (subscribe, tick store, reconcile)
+    /// sees one consistent, collision-free token. The tag is stripped back off in exactly one place,
+    /// DhanMarketFeedClient.ResolveSubscriptionEntries, which is the one spot the RAW numeric id must
+    /// go back out onto the wire in Dhan's own subscribe payload.
+    /// </summary>
+    private const uint IndexSegmentTokenFlag = 0x4000_0000;
+
+    public static uint TagIndexToken(uint rawSecurityId) => rawSecurityId | IndexSegmentTokenFlag;
+
+    public static uint UntagIndexToken(uint token) => token & ~IndexSegmentTokenFlag;
+
+    public static bool IsIndexToken(uint token) => (token & IndexSegmentTokenFlag) != 0;
 
     // ---- Instrument types ----------------------------------------------------------------------
     /// <summary>Dhan splits futures by underlying asset class (FUTSTK stock, FUTIDX index, FUTCOM

@@ -548,7 +548,11 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         if (string.IsNullOrWhiteSpace(name)) name = tradingSymbol;
 
         instrument = new BrokerInstrument(
-            InstrumentToken: securityId,
+            // Index rows get a tagged token so this id can never collide with a same-numbered
+            // NSE_FNO/NSE_EQ contract sharing the same tick store - see
+            // DhanSymbology.IndexSegmentTokenFlag. Equity rows are untouched: a stock's own cash id
+            // colliding with its own future/option id has never been the observed problem.
+            InstrumentToken: isIndex ? DhanSymbology.TagIndexToken(securityId) : securityId,
             TradingSymbol: tradingSymbol,
             Name: name,
             Exchange: isIndex ? "IDX" : "NSE",

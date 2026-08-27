@@ -489,7 +489,13 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
         foreach (var token in tokens)
         {
             if (segments.TryGetValue(token, out var segment) || _segmentRegistry.TryGet(token, out segment))
-                entries.Add(new SubscriptionEntry(segment, token.ToString()));
+            {
+                // An index token carries a disambiguating tag on the C# side only (see
+                // DhanSymbology.IndexSegmentTokenFlag) - Dhan's actual subscribe payload needs the
+                // raw numeric security id it originally issued.
+                var wireSecurityId = DhanSymbology.IsIndexToken(token) ? DhanSymbology.UntagIndexToken(token) : token;
+                entries.Add(new SubscriptionEntry(segment, wireSecurityId.ToString()));
+            }
             else
                 unresolved.Add(token);
         }

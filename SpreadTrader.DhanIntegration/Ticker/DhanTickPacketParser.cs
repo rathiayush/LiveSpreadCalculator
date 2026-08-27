@@ -164,6 +164,16 @@ public static class DhanTickPacketParser
 
         var exchangeSegment = packet[3];
         var securityId = BinaryPrimitives.ReadUInt32LittleEndian(packet.Slice(4, 4));
+
+        // IDX_I ids are only unique within that one segment, same as every other Dhan segment - but
+        // this is the one segment this app subscribes whose ids were never disambiguated from the
+        // rest before the spot-price features started subscribing it too. Tag it here, at the wire
+        // boundary, so every downstream consumer (ITickStore, _lastTick, _subscribedTokens) sees a
+        // token that cannot collide with a same-numbered NSE_FNO/NSE_EQ contract. See
+        // DhanSymbology.IndexSegmentTokenFlag for the full explanation.
+        if (DhanSymbology.FeedSegmentToExchange(exchangeSegment) == "IDX")
+            securityId = DhanSymbology.TagIndexToken(securityId);
+
         var now = DateTimeOffset.UtcNow;
 
         switch (kind)
