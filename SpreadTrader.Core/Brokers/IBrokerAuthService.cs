@@ -44,19 +44,32 @@ public interface IBrokerAuthService
 
     /// <summary>False when this platform is configured in a way that has no browser login flow at
     /// all - specifically Dhan with a static access token from the web portal and no app
-    /// id/secret. The dashboard uses this to hide the login button and explain that the token
-    /// comes from configuration instead of leaving a button that can only ever fail.</summary>
+    /// id/secret, or Kotak (which NEVER has a browser flow - see KotakAuthService). The dashboard
+    /// uses this to hide the login button and explain that the token comes from configuration
+    /// instead of leaving a button that can only ever fail.</summary>
     bool SupportsInteractiveLogin { get; }
+
+    /// <summary>False when there is no externally-obtainable token a human could even paste in, no
+    /// matter how badly one might want to - specifically Kotak, whose "access token" is an internal
+    /// edit-token minted only by completing the full TOTP+MPIN handshake server-side; no Kotak
+    /// portal ever hands one to a user the way Dhan's does. True for every other case, including
+    /// Dhan's TOTP mode, where a manual paste is a legitimate fallback even though it isn't the
+    /// primary flow (an operator really can generate a fresh token in Dhan's portal and paste it
+    /// over a stuck auto-renewal). The dashboard uses this - together with
+    /// <see cref="SupportsInteractiveLogin"/> - to decide whether to show a Login button, an Enter-
+    /// token button, or (only for Kotak today) neither, since a button whose only possible outcome
+    /// is "paste something that can't possibly work" is worse than no button at all.</summary>
+    bool SupportsManualToken { get; }
 
     /// <summary>What the dashboard should tell the operator while <c>isAuthenticated</c> is false
     /// and <see cref="SupportsInteractiveLogin"/> is also false - i.e. there is no login button to
     /// click, so simply saying "not logged in" leaves no indication of what to actually do. This
     /// differs by HOW the token is meant to arrive, which the dashboard has no way to know on its
-    /// own: a static token needs a human to paste one in; Dhan's TOTP mode is expected to
-    /// authenticate itself within seconds with no action needed, and "not logged in" persisting
-    /// past that means something is actually wrong. Surfaced via GET /api/auth/broker. Ignored
-    /// (never shown) when SupportsInteractiveLogin is true, since the login button's own action is
-    /// self-explanatory there.</summary>
+    /// own: a static token needs a human to paste one in; Dhan's TOTP mode and Kotak are expected
+    /// to authenticate themselves within seconds with no action needed, and "not logged in"
+    /// persisting past that means something is actually wrong. Surfaced via GET /api/auth/broker.
+    /// Ignored (never shown) when SupportsInteractiveLogin is true, since the login button's own
+    /// action is self-explanatory there.</summary>
     string NotAuthenticatedGuidance { get; }
 
     /// <summary>Builds the URL the browser should be sent to in order to log in. Async because

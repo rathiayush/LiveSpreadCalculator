@@ -65,8 +65,10 @@ public sealed class TickIngestionHostedService : BackgroundService
             {
                 await ResolveLegAsync(spread.NearLeg, stoppingToken);
                 await ResolveLegAsync(spread.FarLeg, stoppingToken);
+                ResolveSpotLeg(spread);
                 if (spread.NearLeg.InstrumentToken != 0) tokens.Add(spread.NearLeg.InstrumentToken);
                 if (spread.FarLeg.InstrumentToken != 0) tokens.Add(spread.FarLeg.InstrumentToken);
+                if (spread.SpotLeg is { InstrumentToken: not 0 } spot) tokens.Add(spot.InstrumentToken);
             }
 
             if (tokens.Count == 0)
@@ -118,6 +120,10 @@ public sealed class TickIngestionHostedService : BackgroundService
         {
             if (spread.NearLeg.InstrumentToken != 0) needed.Add(spread.NearLeg.InstrumentToken);
             if (spread.FarLeg.InstrumentToken != 0) needed.Add(spread.FarLeg.InstrumentToken);
+            // Spot counts as needed too - it is what the basis % is computed against. Leaving it
+            // out here would have this loop unsubscribe every spot token within five minutes of
+            // startup as "used by nothing", silently emptying the spot column again.
+            if (spread.SpotLeg is { InstrumentToken: not 0 } spot) needed.Add(spot.InstrumentToken);
         }
         foreach (var token in _positionsCache.GetAnchoredTokens()) needed.Add(token);
 
@@ -139,13 +145,68 @@ public sealed class TickIngestionHostedService : BackgroundService
     {
         await ResolveLegAsync(spread.NearLeg, cancellationToken);
         await ResolveLegAsync(spread.FarLeg, cancellationToken);
+        ResolveSpotLeg(spread);
 
         var tokens = new List<uint>();
         if (spread.NearLeg.InstrumentToken != 0) tokens.Add(spread.NearLeg.InstrumentToken);
         if (spread.FarLeg.InstrumentToken != 0) tokens.Add(spread.FarLeg.InstrumentToken);
+        if (spread.SpotLeg is { InstrumentToken: not 0 } spot) tokens.Add(spot.InstrumentToken);
 
         if (tokens.Count > 0)
             await _tickerClient.SubscribeAsync(tokens, cancellationToken);
+    }
+
+    /// <summary>
+    /// Attaches the underlying's cash/index instrument to a spread so its spot price can stream -
+    /// see SpreadDefinition.SpotLeg. The underlying name is taken from the near leg once it has
+    /// resolved (the instrument master fills it in), falling back to the spread's own Underlying.
+    ///
+    /// Best-effort and non-fatal by design: an underlying with no matching spot instrument just
+    /// leaves SpotLeg null and shows no spot, which is the safe way to fail - see SpotSymbology.
+    /// Logged at Debug rather than Warning because on a full universe the misses are the handful of
+    /// contracts with genuinely no cash equivalent, and a per-spread warning would be pure noise.
+    /// </summary>
+    /// <summary>
+    /// Public because UniverseBuilderService has to call it too. It builds spreads in bulk and
+    /// subscribes their tokens in one batch rather than going through ResolveAndSubscribeAsync
+    /// above, so without calling this the ENTIRE auto-built universe - which is how essentially
+    /// every spread is created - got no spot leg and no spot subscription, and every Spot/Basis
+    /// cell on the grid stayed blank. Only per-spread additions made through the API worked.
+    /// </summary>
+    /// <returns>The resolved spot instrument token, or 0 if this underlying has no spot - which
+    /// callers should treat as "nothing to subscribe", not as a failure.</returns>
+    public uint ResolveSpotLeg(SpreadDefinition spread)
+    {
+        if (spread.SpotLeg is { InstrumentToken: not 0 } existing) return existing.InstrumentToken;
+
+        var underlying = spread.NearLeg.Underlying ?? spread.Underlying;
+        if (string.IsNullOrWhiteSpace(underlying)) return 0;
+
+        try
+        {
+            var spot = _instrumentMaster.FindSpot(underlying);
+            if (spot is null)
+            {
+                _logger.LogDebug("No spot instrument found for underlying {Underlying} - {SpreadId} will show no spot price.", underlying, spread.Id);
+                return 0;
+            }
+
+            spread.SpotLeg = new InstrumentConfig
+            {
+                TradingSymbol = spot.TradingSymbol,
+                Exchange = spot.Exchange,
+                InstrumentToken = spot.InstrumentToken,
+                Underlying = underlying,
+                TickSize = spot.TickSize,
+            };
+
+            return spot.InstrumentToken;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to resolve a spot instrument for underlying {Underlying}", underlying);
+            return 0;
+        }
     }
 
     /// <summary>Subscribes the running ticker to a batch of already-resolved instrument tokens

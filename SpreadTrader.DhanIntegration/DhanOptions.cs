@@ -36,11 +36,21 @@ public sealed class DhanOptions
 {
     public const string SectionName = "Dhan";
 
-    /// <summary>Which of the two automatic login methods seeds/renews the session:
-    /// "Static" (default - a token you paste in, valid 24h, no code runs on your behalf) or
-    /// "Totp" (fully automatic - see <see cref="UseTotpAuth"/>). Case-insensitive. An unrecognised
-    /// value is treated as "Static" rather than failing startup, so a typo degrades to "you'll need
-    /// to paste a token" instead of refusing to boot.</summary>
+    /// <summary>Which login method this deployment is meant to use:
+    /// "Static" (default - a token you paste in, valid 24h, no code runs on your behalf),
+    /// "Totp" (fully automatic - see <see cref="UseTotpAuth"/>), or
+    /// "Consent" (browser OAuth-style login via <see cref="AppId"/>/<see cref="AppSecret"/> - see
+    /// <see cref="UseConsentAuth"/> and DhanAuthService's consent flow). Case-insensitive. An
+    /// unrecognised value is treated as "Static" rather than failing startup, so a typo degrades to
+    /// "you'll need to paste a token" instead of refusing to boot.
+    ///
+    /// Setting this to "Consent" is purely declarative/self-documenting - the login button is
+    /// actually gated on <see cref="HasConsentCredentials"/> regardless of this value (so an
+    /// existing deployment that already has AppId/AppSecret set keeps working unchanged even if
+    /// AuthMode is still "Static" or "Totp"). What changes when AuthMode IS "Consent" is the
+    /// guidance text shown while AppId/AppSecret are missing - see
+    /// DhanAuthService.NotAuthenticatedGuidance - so a misconfigured Consent deployment points you
+    /// at the right fix instead of the Static-mode message.</summary>
     public string AuthMode { get; set; } = "Static";
 
     /// <summary>The Dhan account id (a numeric string, e.g. "1100123456"). Sent as the
@@ -129,6 +139,13 @@ public sealed class DhanOptions
 
     /// <summary>True when AuthMode selects the TOTP auto-login path.</summary>
     public bool UseTotpAuth => string.Equals(AuthMode, "Totp", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True when AuthMode explicitly declares intent to use the browser Consent/OAuth
+    /// flow. Does NOT gate whether the login button actually appears - see
+    /// <see cref="HasConsentCredentials"/> for that, which still works standalone (AppId/AppSecret
+    /// set with AuthMode left at "Static"/"Totp") for backward compatibility. This flag only drives
+    /// which guidance message DhanAuthService shows when consent credentials are absent.</summary>
+    public bool UseConsentAuth => string.Equals(AuthMode, "Consent", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>True when everything TOTP auto-login needs is actually configured. Checked before
     /// DhanTotpAutoRenewalHostedService does anything, rather than failing partway through with a

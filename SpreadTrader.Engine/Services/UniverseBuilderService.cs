@@ -82,8 +82,18 @@ public sealed class UniverseBuilderService
     /// full NFO futures list) to build. Null/omitted = every stock currently listed for futures
     /// on NFO - roughly 200-220 as of mid-2026, since that's the entire exchange's F&O universe,
     /// not an artificial limit in this code.</param>
-    public async Task<UniverseBuildResult> BuildAsync(int? maxSymbols, CancellationToken cancellationToken)
+    /// <param name="expiryOffset">Which pair of listed expiries to use as near/far, 0-indexed from
+    /// the soonest currently-listed contract. 0 (default) is the normal case: the two nearest
+    /// expiries (e.g. Jul/Aug). 1 skips to the NEXT pair (e.g. Aug/Sep) - useful right around a
+    /// month's expiry to preview/trade the upcoming spread cycle before the front month actually
+    /// rolls off. Symbols that don't have expiryOffset + 2 contracts currently listed are skipped
+    /// (reported in UniverseBuildResult.Skipped) rather than falling back to a different pair -
+    /// silently substituting a different offset would be more confusing than just skipping.</param>
+    public async Task<UniverseBuildResult> BuildAsync(int? maxSymbols, CancellationToken cancellationToken, int expiryOffset = 0)
     {
+        if (expiryOffset < 0)
+            throw new ArgumentOutOfRangeException(nameof(expiryOffset), "expiryOffset cannot be negative.");
+
         await _buildLock.WaitAsync(cancellationToken);
         try
         {
@@ -104,14 +114,16 @@ public sealed class UniverseBuilderService
             foreach (var symbol in symbols)
             {
                 var contracts = _instrumentMaster.FindFutures(symbol, "NFO");
-                if (contracts.Count < 2)
+                if (contracts.Count < expiryOffset + 2)
                 {
-                    skipped.Add($"{symbol} (only {contracts.Count} futures contract(s) currently listed - needs a near and a far month)");
+                    skipped.Add(expiryOffset == 0
+                        ? $"{symbol} (only {contracts.Count} futures contract(s) currently listed - needs a near and a far month)"
+                        : $"{symbol} (only {contracts.Count} futures contract(s) currently listed - expiryOffset {expiryOffset} needs at least {expiryOffset + 2})");
                     continue;
                 }
 
-                var near = contracts[0];
-                var far = contracts[1];
+                var near = contracts[expiryOffset];
+                var far = contracts[expiryOffset + 1];
 
                 var spreadId = $"{symbol}-{MonthAbbrev(near.Expiry)}-{MonthAbbrev(far.Expiry)}";
                 var spread = new SpreadDefinition
@@ -145,6 +157,7 @@ public sealed class UniverseBuilderService
                 builtSpreadIds.Add(spreadId);
                 allTokens.Add(near.InstrumentToken);
                 allTokens.Add(far.InstrumentToken);
+                AddSpotToken(spread, allTokens);
 
                 included.Add(new UniverseBuildRow(
                     symbol, spreadId,
@@ -231,16 +244,18 @@ public sealed class UniverseBuilderService
             if (!seenSpreadIds.Add(spreadId))
                 return; // already built this exact pair in this run
 
-            _spreadStore.Upsert(new SpreadDefinition
+            var spread = new SpreadDefinition
             {
                 Id = spreadId,
                 Underlying = underlying,
                 NearLeg = ToLeg(near, underlying),
                 FarLeg = ToLeg(far, underlying),
                 Enabled = true,
-            });
+            };
+            _spreadStore.Upsert(spread);
             allTokens.Add(near.InstrumentToken);
             allTokens.Add(far.InstrumentToken);
+            AddSpotToken(spread, allTokens);
             included.Add(new UniverseBuildRow(
                 underlying, spreadId,
                 near.TradingSymbol, near.Expiry, near.LotSize,
@@ -391,22 +406,44 @@ public sealed class UniverseBuilderService
             _spreadStore.Remove(previousId);
         }
 
-        _spreadStore.Upsert(new SpreadDefinition
+        var spread = new SpreadDefinition
         {
             Id = spreadId,
             Underlying = symbol,
             NearLeg = ToLeg(near, symbol),
             FarLeg = ToLeg(far, symbol),
             Enabled = true,
-        });
+        };
+        _spreadStore.Upsert(spread);
         _mcxCalendarSpreadIdBySymbol[symbol] = spreadId;
         allTokens.Add(near.InstrumentToken);
         allTokens.Add(far.InstrumentToken);
+        // MCX has no cash equivalent, so this resolves to nothing and adds nothing - kept for
+        // uniformity with the NFO paths rather than as a special case to remember.
+        AddSpotToken(spread, allTokens);
 
         return new UniverseBuildRow(
             symbol, spreadId,
             near.TradingSymbol, near.Expiry, near.LotSize,
             far.TradingSymbol, far.Expiry, far.LotSize);
+    }
+
+    /// <summary>
+    /// Attaches the underlying's cash/index instrument to a freshly built spread and adds its token
+    /// to the batch about to be subscribed - see TickIngestionHostedService.ResolveSpotLeg.
+    ///
+    /// This has to happen here, and not only in ResolveAndSubscribeAsync, because that path is
+    /// never taken for a universe build: spreads are created in bulk and their tokens subscribed in
+    /// one batch. Without this the whole auto-built universe carried no spot leg at all, so every
+    /// Spot and Basis % cell on the grid was blank - which is exactly how it shipped.
+    ///
+    /// A 0 means this underlying simply has no spot (an MCX commodity, or a name with no cash
+    /// listing); nothing is added and the spread is otherwise unaffected.
+    /// </summary>
+    private void AddSpotToken(SpreadDefinition spread, HashSet<uint> allTokens)
+    {
+        var spotToken = _tickIngestion.ResolveSpotLeg(spread);
+        if (spotToken != 0) allTokens.Add(spotToken);
     }
 
     private static InstrumentConfig ToLeg(BrokerInstrument instrument, string underlying) => new()

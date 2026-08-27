@@ -17,7 +17,6 @@ import {
   SettingOutlined,
   LogoutOutlined,
   UserOutlined,
-  ApiOutlined,
 } from '@ant-design/icons'
 import { api } from './api'
 import { useAuth, clearSession } from './auth'
@@ -70,7 +69,12 @@ const NAV_ITEMS = [
   { key: '/positions', label: 'Positions & PNL', icon: <ScissorOutlined />, subtitle: 'Open positions, live PNL, and manual square-off' },
   { key: '/symbols', label: 'Symbols', icon: <CloudSyncOutlined />, subtitle: 'Sync the F&O symbol list and build the tradeable universe', group: 'admin' },
   { key: '/configured-spreads', label: 'Configured Spreads', icon: <UnorderedListOutlined />, subtitle: 'Every spread definition currently streaming', group: 'admin' },
-  { key: '/broker-platform', label: 'Broker Platform', icon: <ApiOutlined />, subtitle: 'Switch which broker the app trades through, instantly - no restart', group: 'admin' },
+  // Broker Platform is deliberately NOT listed here. Each deployment is pinned to one broker
+  // (Production -> Kotak, pradeep-1 -> Dhan, pradeep-2 -> Kite) and switching mid-session clears
+  // every live tick and spread definition and forces a universe rebuild, so it is not something to
+  // offer behind a menu item anyone can click by accident. The page, its route and
+  // POST /api/settings/broker-platform all still work - navigate to /broker-platform directly, or
+  // call the API, when a switch is genuinely intended.
 ]
 
 const ADMIN_GROUP_KEY = 'admin-group'
@@ -208,7 +212,7 @@ function MobileNavDrawer({ open, onClose }) {
   )
 }
 
-function TopBar({ authStatus, brokerName, supportsInteractiveLogin, onLogin, onEnterToken, mode, onToggleMode, onMenuClick, showMenuButton, userEmail, onLogout, onProfile }) {
+function TopBar({ authStatus, brokerName, supportsInteractiveLogin, supportsManualToken, onLogin, onEnterToken, mode, onToggleMode, onMenuClick, showMenuButton, userEmail, onLogout, onProfile }) {
   const active = useActiveNavItem()
   const isLight = mode === 'light'
   // Only this hook re-renders on connection state flips (rare - connect/reconnect/disconnect),
@@ -291,15 +295,17 @@ function TopBar({ authStatus, brokerName, supportsInteractiveLogin, onLogin, onE
             {brokerName}: {authStatus?.isAuthenticated ? 'authenticated' : 'not logged in'}
           </Tag>
         )}
-        {/* Two different auth models, so two different actions. Kite has a mandatory browser
-            login; Dhan on a portal-generated token has none at all, so instead of a button that
-            could only ever fail it offers a place to paste a freshly generated token. */}
+        {/* Three auth models, so up to three actions. Kite has a mandatory browser login; Dhan on
+            a portal-generated token has none, so instead of a button that could only ever fail it
+            offers a place to paste a freshly generated token; Kotak has neither - its token is
+            minted automatically server-side and no portal ever hands one to a human to paste - so
+            no button at all, just the status pill above (already showing "not logged in"). */}
         {authStatus && !authStatus.isAuthenticated && (
           supportsInteractiveLogin ? (
             <Button size="small" type="primary" onClick={onLogin}>Login to {brokerName}</Button>
-          ) : (
+          ) : supportsManualToken ? (
             <Button size="small" type="primary" onClick={onEnterToken}>Enter {brokerName} token</Button>
-          )
+          ) : null
         )}
         <Button
           size="small"
@@ -336,7 +342,7 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
   const [authStatus, setAuthStatus] = useState(null)
   // Which broker this backend is wired to - see GET /api/auth/broker. Seeded with a neutral label
   // so the header never names the wrong platform in the moment before the real value lands.
-  const [brokerInfo, setBrokerInfo] = useState({ platform: 'Broker', supportsInteractiveLogin: true, notAuthenticatedGuidance: '' })
+  const [brokerInfo, setBrokerInfo] = useState({ platform: 'Broker', supportsInteractiveLogin: true, supportsManualToken: true, notAuthenticatedGuidance: '' })
   // Manual access-token entry - only reachable on a platform with no browser login flow, see
   // handleSubmitToken and AuthController.SetBrokerToken.
   const [tokenModalOpen, setTokenModalOpen] = useState(false)
@@ -372,6 +378,7 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
       .then((info) => setBrokerInfo({
         platform: info.platform || 'Broker',
         supportsInteractiveLogin: info.supportsInteractiveLogin !== false,
+        supportsManualToken: info.supportsManualToken !== false,
         notAuthenticatedGuidance: info.notAuthenticatedGuidance || '',
       }))
       .catch((err) => console.error('Failed to load broker info:', err))
@@ -513,6 +520,7 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
           authStatus={authStatus}
           brokerName={brokerInfo.platform}
           supportsInteractiveLogin={brokerInfo.supportsInteractiveLogin}
+          supportsManualToken={brokerInfo.supportsManualToken}
           onLogin={handleLogin}
           onEnterToken={() => setTokenModalOpen(true)}
           mode={mode}

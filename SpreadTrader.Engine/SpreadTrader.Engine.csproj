@@ -16,4 +16,10 @@
     <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lets SpreadTrader.Engine.Tests exercise the pure partial-fill/retry decision helpers on
+         OrderDispatchHostedService directly, without having to make them part of the public API. -->
+    <InternalsVisibleTo Include="SpreadTrader.Engine.Tests" />
+  </ItemGroup>
+
 </Project>

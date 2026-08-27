@@ -18,10 +18,10 @@ namespace SpreadTrader.Core.Store;
 /// </summary>
 public class CsvTriggerRuleStore : ITriggerRuleStore
 {
-    // ThresholdIsPercent, SlippagePercent, and MaxFireCount/FireCount were all added after the
-    // first version of this file shipped, so they're appended at the end and ParseLine treats
-    // them as optional (defaulting to false / 0.10 / 0 / 0 respectively, matching the model
-    // defaults) - older CSVs without those columns still load fine.
+    // ThresholdIsPercent, SlippagePercent, MaxFireCount/FireCount, and UnfilledAttempts were all
+    // added after the first version of this file shipped, so they're appended at the end and
+    // ParseLine treats them as optional (defaulting to false / 0.10 / 0 / 0 / 0 respectively,
+    // matching the model defaults) - older CSVs without those columns still load fine.
     //
     // This class is also instantiated a second time (as CsvExitTriggerRuleStore, a thin
     // unsealed-subclass wrapper - see that file) pointed at a completely separate CSV file for
@@ -41,7 +41,7 @@ public class CsvTriggerRuleStore : ITriggerRuleStore
     // deploy (see deploy.ps1) and its actual current contents generally can't be verified from
     // this repo.
     private const string Header =
-        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,Enabled,IsArmed,LastFiredAt,ThresholdIsPercent,SlippagePercent,MaxFireCount,FireCount";
+        "Id,SpreadId,Operator,Threshold,NearLegAction,FarLegAction,Quantity,Product,OrderType,OneShot,Enabled,IsArmed,LastFiredAt,ThresholdIsPercent,SlippagePercent,MaxFireCount,FireCount,UnfilledAttempts";
 
     private readonly string _filePath;
     private readonly object _fileLock = new();
@@ -222,7 +222,8 @@ public class CsvTriggerRuleStore : ITriggerRuleStore
         r.ThresholdIsPercent,
         r.SlippagePercent.ToString(CultureInfo.InvariantCulture),
         r.MaxFireCount.ToString(CultureInfo.InvariantCulture),
-        r.FireCount.ToString(CultureInfo.InvariantCulture));
+        r.FireCount.ToString(CultureInfo.InvariantCulture),
+        r.UnfilledAttempts.ToString(CultureInfo.InvariantCulture));
 
     private TriggerRule? ParseLine(string line)
     {
@@ -264,6 +265,9 @@ public class CsvTriggerRuleStore : ITriggerRuleStore
                     : 0,
                 FireCount = fields.Length > 16 && !string.IsNullOrEmpty(fields[16])
                     ? int.Parse(fields[16], CultureInfo.InvariantCulture)
+                    : 0,
+                UnfilledAttempts = fields.Length > 17 && !string.IsNullOrEmpty(fields[17])
+                    ? int.Parse(fields[17], CultureInfo.InvariantCulture)
                     : 0,
             };
         }

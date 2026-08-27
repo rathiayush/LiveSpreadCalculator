@@ -1,5 +1,10 @@
 # Deploying SpreadTrader to Azure
 
+> Deploying to a Linux VPS with Dokploy instead? See **LINUX_VPS_DEPLOYMENT.md** - that path also
+> moves the hourly spread-history store from SQL Server to PostgreSQL, ships images through GitHub
+> Actions to GHCR, and covers Dokploy's Traefik-managed domains/SSL instead of the sidecar setup
+> below.
+
 This guide deploys the app as it's actually built: two containers behind one public endpoint -
 `web` (nginx + the built React app, reverse-proxying `/api` and `/hubs` to the API) and `api`
 (the `LiveSpreadCalculator` project - REST endpoints, SignalR hub, and the background engine that

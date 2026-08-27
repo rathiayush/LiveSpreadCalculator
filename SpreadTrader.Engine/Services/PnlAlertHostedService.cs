@@ -78,7 +78,10 @@ public sealed class PnlAlertHostedService : BackgroundService
         var rules = _alertStore.GetAll().Where(r => r.Enabled).ToList();
         if (rules.Count == 0)
         {
-            _logger.LogInformation("PnlAlertHostedService: no enabled alerts - nothing to evaluate this cycle.");
+            // Deliberately NOT logged. Having no PNL alerts configured is the normal state, and
+            // this runs every 20 seconds - at Information it emitted ~4,300 identical lines a day,
+            // which buried the feed/order lines that actually matter when something is wrong. The
+            // "nothing configured" case is visible from the alerts page, not worth a log line.
             return; // nothing to check - skip reading the cache entirely
         }
 

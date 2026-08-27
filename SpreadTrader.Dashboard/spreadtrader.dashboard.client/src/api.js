@@ -118,8 +118,15 @@ export const api = {
   // them in one call. See UniverseBuilderService. maxSymbols caps the build to the first N
   // symbols (alphabetically); omit it to build every futures-listed symbol on the exchange
   // (roughly 200-220 as of mid-2026 - that's the whole exchange, not a limit in this code).
-  buildUniverse: (maxSymbols) =>
-    authFetch(`/api/universe/build${maxSymbols ? `?maxSymbols=${encodeURIComponent(maxSymbols)}` : ''}`, { method: 'POST' }).then(handle),
+  // expiryOffset: 0 (default) = nearest two listed expiries (e.g. Jul/Aug); 1 = skip to the next
+  // pair (Aug/Sep), etc. - see UniverseController.Build.
+  buildUniverse: (maxSymbols, expiryOffset) => {
+    const params = new URLSearchParams()
+    if (maxSymbols) params.set('maxSymbols', maxSymbols)
+    if (expiryOffset) params.set('expiryOffset', expiryOffset)
+    const qs = params.toString()
+    return authFetch(`/api/universe/build${qs ? `?${qs}` : ''}`, { method: 'POST' }).then(handle)
+  },
 
   // Builds the MCX commodity arbitrage universe (silver/gold/crude/natgas calendar + cross-
   // contract spreads like SILVER vs SILVERM) from Kite's live MCX instrument master - see

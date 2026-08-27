@@ -28,6 +28,9 @@ public sealed class KiteTickerClient : IMarketDataFeed
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly HashSet<uint> _subscribedTokens = new();
     private readonly object _tokensLock = new();
+
+    /// <summary>Detects a connection that has silently stopped delivering - see WatchForStallAsync.</summary>
+    private readonly FeedStallDetector _stallDetector = new();
     private ClientWebSocket? _socket;
 
     public event Action<Tick>? TickReceived;
@@ -112,14 +115,64 @@ public sealed class KiteTickerClient : IMarketDataFeed
         }
 
         var backoff = TimeSpan.FromSeconds(1);
+        var loggedAwaitingSession = false;
 
         while (!cancellationToken.IsCancellationRequested)
         {
+            // Waiting for login is not a connection failure - polling at a short FIXED interval
+            // keeps it from inflating the reconnect backoff to its 30s ceiling, which would then
+            // leave the ticker idle for that long after the token finally arrived. See
+            // FeedSocketLiveness.AwaitingSessionPollInterval.
+            if (string.IsNullOrWhiteSpace(_session.AccessToken))
+            {
+                if (!loggedAwaitingSession)
+                {
+                    _logger.LogInformation("Kite ticker is waiting for login to complete before connecting.");
+                    loggedAwaitingSession = true;
+                }
+
+                try { await Task.Delay(FeedSocketLiveness.AwaitingSessionPollInterval, cancellationToken); }
+                catch (OperationCanceledException) { break; }
+                continue;
+            }
+
+            loggedAwaitingSession = false;
+
             try
             {
                 await ConnectAndSubscribeAsync(cancellationToken);
-                backoff = TimeSpan.FromSeconds(1);
-                await ReceiveLoopAsync(cancellationToken);
+                var connectedAt = DateTimeOffset.UtcNow;
+
+                // Watchdog for a silently half-open socket - see WatchForStallAsync.
+                using var stallCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var watchdog = WatchForStallAsync(_socket!, stallCts.Token);
+                string endedReason;
+                try
+                {
+                    endedReason = await ReceiveLoopAsync(cancellationToken);
+                }
+                finally
+                {
+                    stallCts.Cancel();
+                    await SafeAwaitAsync(watchdog);
+                }
+
+                // The receive loop ended without throwing - a close frame, or the socket no longer
+                // Open. This used to fall through and reconnect silently: no log, no delay. See
+                // DhanMarketFeedClient.RunMarketFeedAsync for the full reasoning; the shape is the
+                // same here.
+                var uptime = DateTimeOffset.UtcNow - connectedAt;
+                _logger.LogWarning(
+                    "Kite ticker disconnected after {Uptime} - {Reason}. Reconnecting in {Seconds}s.",
+                    uptime.TotalSeconds < 90 ? $"{uptime.TotalSeconds:F0}s" : $"{uptime.TotalMinutes:F1}m",
+                    endedReason, backoff.TotalSeconds);
+
+                backoff = uptime >= FeedSocketLiveness.StableConnectionThreshold
+                    ? TimeSpan.FromSeconds(1)
+                    : TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 30));
+
+                try { await Task.Delay(backoff, cancellationToken); }
+                catch (OperationCanceledException) { break; }
             }
             catch (OperationCanceledException)
             {
@@ -141,10 +194,66 @@ public sealed class KiteTickerClient : IMarketDataFeed
         }
     }
 
+    /// <summary>Aborts the socket when the feed goes silent after having been live, so the blocked
+    /// ReceiveAsync throws and the reconnect loop above runs. See FeedStallDetector for why a
+    /// connection that never delivered anything is deliberately never judged stalled.</summary>
+    private async Task WatchForStallAsync(ClientWebSocket socket, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try { await Task.Delay(FeedSocketLiveness.StallCheckInterval, cancellationToken); }
+            catch (OperationCanceledException) { return; }
+
+            if (socket.State != WebSocketState.Open) return;
+
+            uint[] tokens;
+            lock (_tokensLock) { tokens = _subscribedTokens.ToArray(); }
+
+            switch (_stallDetector.Decide(DateTimeOffset.UtcNow, FeedSocketLiveness.StallTimeout, FeedSocketLiveness.InitialDataTimeout, tokens.Length > 0))
+            {
+                case FeedRecoveryAction.Resubscribe:
+                    _logger.LogWarning(
+                        "Kite ticker has sent nothing for over {Seconds}s with {Count} instrument(s) subscribed - " +
+                        "re-sending the subscriptions on the same connection.",
+                        FeedSocketLiveness.StallTimeout.TotalSeconds, tokens.Length);
+
+                    try
+                    {
+                        await SendAsync(new { a = "subscribe", v = tokens }, cancellationToken);
+                        await SendAsync(new { a = "mode", v = new object[] { _options.TickerMode, tokens } }, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Kite ticker re-subscribe failed - the connection is no longer usable.");
+                        try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
+                        return;
+                    }
+                    break;
+
+                case FeedRecoveryAction.Reconnect:
+                    _logger.LogWarning(
+                        "Kite ticker still silent after a re-subscribe, having previously been live - treating it as a " +
+                        "silently dropped connection and reconnecting.");
+
+                    try { socket.Abort(); } catch { /* the receive loop's exception is what matters */ }
+                    return;
+            }
+        }
+    }
+
+    private static async Task SafeAwaitAsync(Task task)
+    {
+        try { await task; }
+        catch (OperationCanceledException) { /* expected when the receive loop ends first */ }
+        catch { /* the watchdog must never be the thing that takes the feed down */ }
+    }
+
     private async Task ConnectAndSubscribeAsync(CancellationToken cancellationToken)
     {
         _socket?.Dispose();
         _socket = new ClientWebSocket();
+        FeedSocketLiveness.Configure(_socket);
+        _stallDetector.OnConnected(DateTimeOffset.UtcNow);
 
         var accessToken = _session.AccessToken
             ?? throw new InvalidOperationException("No Kite access token available - complete the login flow first.");
@@ -185,7 +294,10 @@ public sealed class KiteTickerClient : IMarketDataFeed
         }
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
+    /// <summary>Receives until the connection ends, and reports why - both exits here are ordinary
+    /// returns rather than exceptions, so the caller has no other way to tell a server close from a
+    /// socket that quietly stopped being Open.</summary>
+    private async Task<string> ReceiveLoopAsync(CancellationToken cancellationToken)
     {
         var buffer = new byte[8192];
         using var messageStream = new MemoryStream();
@@ -198,10 +310,29 @@ public sealed class KiteTickerClient : IMarketDataFeed
             do
             {
                 result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+
+                // Liveness, not usefulness - Kite's own periodic heartbeat frame counts just as
+                // much as a tick, since either proves the connection is still delivering.
+                if (_stallDetector.OnMessage(DateTimeOffset.UtcNow))
+                {
+                    // First frame on this connection. Logged once because its ABSENCE is the single
+                    // most useful fact when a feed looks stuck: if this line never appears, the
+                    // socket is connected but delivering nothing, and the problem is the
+                    // subscription or the broker - not anything downstream of here.
+                    _logger.LogInformation(
+                        "Kite ticker delivered its first data {Seconds:F1}s after connecting.",
+                        _stallDetector.TimeSinceConnected(DateTimeOffset.UtcNow).TotalSeconds);
+                }
+
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
+                    var status = result.CloseStatus?.ToString() ?? "no status";
+                    var description = string.IsNullOrWhiteSpace(result.CloseStatusDescription)
+                        ? "no description"
+                        : result.CloseStatusDescription;
+
                     await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "server closed", cancellationToken);
-                    return;
+                    return $"the server closed the connection ({status}: {description})";
                 }
                 messageStream.Write(buffer, 0, result.Count);
             } while (!result.EndOfMessage);
@@ -222,6 +353,10 @@ public sealed class KiteTickerClient : IMarketDataFeed
             foreach (var tick in ticks)
                 TickReceived.Invoke(tick);
         }
+
+        return cancellationToken.IsCancellationRequested
+            ? "shutting down"
+            : $"the socket stopped being open (state {_socket!.State})";
     }
 
     /// <summary>Parses a text frame for `{"type":"order",...}` (see OrderUpdateReceived's doc

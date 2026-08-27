@@ -3,6 +3,7 @@ using SpreadTrader.Core.Brokers;
 using SpreadTrader.Core.Models;
 using SpreadTrader.DhanIntegration.Orders;
 using SpreadTrader.KiteIntegration.Orders;
+using SpreadTrader.KotakIntegration.Orders;
 
 namespace LiveSpreadCalculator.Brokers.Switching;
 
@@ -15,15 +16,22 @@ public sealed class SwitchingOrderGateway : IOrderGateway
     private readonly BrokerSwitchState _state;
     private readonly KiteOrderGateway _kite;
     private readonly DhanOrderGateway _dhan;
+    private readonly KotakOrderGateway _kotak;
 
-    public SwitchingOrderGateway(BrokerSwitchState state, KiteOrderGateway kite, DhanOrderGateway dhan)
+    public SwitchingOrderGateway(BrokerSwitchState state, KiteOrderGateway kite, DhanOrderGateway dhan, KotakOrderGateway kotak)
     {
         _state = state;
         _kite = kite;
         _dhan = dhan;
+        _kotak = kotak;
     }
 
-    private IOrderGateway Active => _state.Current == BrokerPlatform.Kite ? _kite : _dhan;
+    private IOrderGateway Active => _state.Current switch
+    {
+        BrokerPlatform.Kite => _kite,
+        BrokerPlatform.Dhan => _dhan,
+        _ => _kotak,
+    };
 
     public Task<OrderResult> PlaceOrderAsync(OrderLegRequest leg, CancellationToken cancellationToken) =>
         Active.PlaceOrderAsync(leg, cancellationToken);

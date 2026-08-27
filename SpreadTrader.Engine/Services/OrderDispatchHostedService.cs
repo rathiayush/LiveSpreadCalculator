@@ -41,10 +41,21 @@ namespace SpreadTrader.Engine.Services;
 ///     remainder right away instead of resting, so its outcome is known almost instantly rather than
 ///     staying ambiguous for a long time.
 ///  c. KiteOrderGateway.PlaceOrderAsync polls the order's real status after placement instead of
-///     trusting mere placement-acceptance as "success" - if a leg is confirmed filled while
-///     another wasn't, the filled one is immediately flattened (SquareOffPartialFillAsync); if a
-///     leg's status couldn't be confirmed as terminal in time, it's actively cancelled rather
-///     than left resting and unmanaged (CancelStrayOpenOrdersAsync).
+///     trusting mere placement-acceptance as "success" - if a leg's status couldn't be confirmed
+///     as terminal in time, it's actively cancelled rather than left resting and unmanaged
+///     (CancelStrayOpenOrdersAsync).
+///  d. ALWAYS-FILL: an incomplete basket is completed, never unwound. A short is never released
+///     bigger than the hedge that actually filled (PlaceHedgeFirstAsync sizes it to the hedge's
+///     real fill, not to what was requested), and RetryUnfilledLegsAsync then drives BOTH sides up
+///     to the rule's full requested quantity - hedge first, with the short capped each round at
+///     whatever the hedge currently holds (ComputeLegTargets), so the position is hedged at every
+///     intermediate step rather than only at the end. Giving a filled leg back is deliberately NOT
+///     the fallback: it discards the position the rule fired for and pays the spread twice to end
+///     up flat. Unwinding remains available as an explicit opt-in
+///     (EngineOptions.AutoSquareOffOnPartialFill, off by default); with it off, anything the
+///     retries could not fill is left live and logged at Critical (WarnIfLegsLeftUnmatched) rather
+///     than silently. The invariant the sizing/capping maintains - the short never exceeds the
+///     hedge - is asserted in SpreadTrader.Engine.Tests.PartialFillBalancingTests.
 ///
 /// Any leg configured (or, for square-off, hardcoded) as OrderType=MARKET is converted to a
 /// protected LIMIT order before it's sent - see MarketProtectionService.Protect (shared with
@@ -65,12 +76,11 @@ public sealed class OrderDispatchHostedService : BackgroundService
     private readonly IExitTriggerRuleStore _exitRuleStore;
     private readonly ISpreadDefinitionStore _spreadStore;
     private readonly IOrderGateway _orderGateway;
-    private readonly IMarginService _marginService;
+    private readonly BasketMarginGate _marginGate;
     private readonly IOrderExecutionSink _executionSink;
     private readonly MarketProtectionService _marketProtection;
     private readonly TriggerInFlightTracker _inFlightTracker;
     private readonly EngineOptions _options;
-    private readonly McxOptions _mcx;
     private readonly ILogger<OrderDispatchHostedService> _logger;
 
     public OrderDispatchHostedService(
@@ -79,12 +89,11 @@ public sealed class OrderDispatchHostedService : BackgroundService
         IExitTriggerRuleStore exitRuleStore,
         ISpreadDefinitionStore spreadStore,
         IOrderGateway orderGateway,
-        IMarginService marginService,
+        BasketMarginGate marginGate,
         IOrderExecutionSink executionSink,
         MarketProtectionService marketProtection,
         TriggerInFlightTracker inFlightTracker,
         IOptions<EngineOptions> options,
-        McxOptions mcx,
         ILogger<OrderDispatchHostedService> logger)
     {
         _triggerChannel = triggerChannel;
@@ -92,12 +101,11 @@ public sealed class OrderDispatchHostedService : BackgroundService
         _exitRuleStore = exitRuleStore;
         _spreadStore = spreadStore;
         _orderGateway = orderGateway;
-        _marginService = marginService;
+        _marginGate = marginGate;
         _executionSink = executionSink;
         _marketProtection = marketProtection;
         _inFlightTracker = inFlightTracker;
         _options = options.Value;
-        _mcx = mcx;
         _logger = logger;
     }
 
@@ -170,7 +178,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
         // trips beforehand (Kite's own order entry still enforces margin regardless).
         if (_options.VerifyMarginBeforeDispatch)
         {
-            var blockReason = await CheckMarginAsync(rule.Id, legs, stoppingToken);
+            var blockReason = await _marginGate.CheckAsync(rule.Id, legs, stoppingToken);
             if (blockReason is not null)
             {
                 await PublishBlockedAsync(triggerEvent, spread.Underlying, orderKind, blockReason, stoppingToken);
@@ -185,7 +193,10 @@ public sealed class OrderDispatchHostedService : BackgroundService
         // as a naked short, and keeps the brief between-legs window on the safe (long) side.
         var placements = await PlaceHedgeFirstAsync(legs, rule.Id, stoppingToken);
 
-        if (_options.AutoSquareOffOnPartialFill)
+        // Deliberately NOT gated behind AutoSquareOffOnPartialFill any more. Cancelling a stray
+        // resting order and driving an incomplete basket to completion are what keep the account
+        // safe under the always-fill policy - they are the primary mechanism now, not a
+        // sub-step of the square-off fallback they used to be nested inside.
         {
             // A leg whose fill status came back "OPEN" (the post-placement poll gave up before
             // Kite reached a terminal status - see KiteOrderGateway.PollOrderStatusAsync) is
@@ -198,11 +209,12 @@ public sealed class OrderDispatchHostedService : BackgroundService
             // risk placing two live orders for the same leg at once.
             await CancelStrayOpenOrdersAsync(rule.Id, legs, placements, stoppingToken);
 
-            // One more shot at whichever leg(s) came back genuinely rejected/cancelled (NOT the
-            // hedge's deliberately-skipped partner - see RetryUnfilledLegsAsync) at a wider
-            // slippage band, before falling back to unwinding whatever else already filled.
-            // Mutates legs/placements in place, so legResults below and the square-off after it
-            // both see the retried outcome rather than the original rejection.
+            // Up to EngineOptions.RetryUnfilledLegMaxAttempts more shots at whichever leg(s) still
+            // have quantity outstanding, each re-priced fresh off the current market, for just the
+            // outstanding quantity, at the same wider slippage band - driving the basket to the
+            // full size the rule asked for rather than settling or unwinding. Mutates legs/
+            // placements in place, so legResults below sees the final cumulative outcome rather
+            // than the original rejection.
             if (_options.RetryUnfilledLegOnPartialFill)
                 await RetryUnfilledLegsAsync(rule, legPlans, legs, placements, stoppingToken);
         }
@@ -230,11 +242,30 @@ public sealed class OrderDispatchHostedService : BackgroundService
         // legitimately counts and the rule stays fired/consumed.
         var anyLegFilled = legResults.Any(r => r.FilledQuantity > 0);
 
-        if (_options.AutoSquareOffOnPartialFill && legPlans.Count > 1)
-            legResults.AddRange(await SquareOffPartialFillAsync(rule, legPlans, placements, stoppingToken));
+        if (legPlans.Count > 1)
+        {
+            // Default policy is ALWAYS-FILL: an incomplete basket is completed by the retries
+            // above, never by unwinding the side that did fill - giving back a filled leg throws
+            // away the position the rule fired for and pays the spread twice. Unwinding is kept
+            // only as an explicit opt-in (EngineOptions.AutoSquareOffOnPartialFill, off by
+            // default) for anyone who would rather be flat than exposed.
+            if (_options.AutoSquareOffOnPartialFill)
+                legResults.AddRange(await SquareOffPartialFillAsync(rule, legPlans, placements, stoppingToken));
+            else
+                WarnIfLegsLeftUnmatched(rule.Id, legPlans, placements);
+        }
 
         if (!anyLegFilled)
+        {
             RestoreRuleIfNothingFilled(ruleStore, rule.Id); // fully rejected/unfilled - don't burn a shot on this
+        }
+        else if (rule.UnfilledAttempts > 0)
+        {
+            // A genuine fill breaks the consecutive-miss streak that counts toward
+            // EngineOptions.MaxUnfilledDispatchAttempts - see RestoreRuleIfNothingFilled.
+            rule.UnfilledAttempts = 0;
+            ruleStore.Upsert(rule);
+        }
 
         await _executionSink.PublishAsync(
             new BasketExecutionEvent(triggerEvent.FireId, rule.Id, spread.Id, spread.Underlying, orderKind, legResults, MarginBlocked: false, BlockedReason: null, DateTimeOffset.UtcNow, SpreadValueAtTrigger: triggerEvent.SpreadValueAtTrigger),
@@ -253,24 +284,43 @@ public sealed class OrderDispatchHostedService : BackgroundService
     /// anything. Deliberately NOT called for a genuine partial fill that gets auto-squared-off -
     /// see the anyLegFilled comment in DispatchAsync. LastFiredAt is deliberately left untouched
     /// so EngineOptions.MinFireIntervalPerRuleMs still throttles an immediate retry (e.g. against
-    /// a persistently-insufficient-margin condition that won't resolve instantly).</summary>
+    /// a persistently-insufficient-margin condition that won't resolve instantly).
+    ///
+    /// This is also the only place TriggerRule.UnfilledAttempts is incremented. Re-arming this
+    /// rule unconditionally forever would mean a condition that can NEVER fill (chronic
+    /// insufficient margin, a frozen/delisted instrument, a persistently rejected order) re-fires
+    /// every single time the spread re-crosses the threshold, indefinitely. Once UnfilledAttempts
+    /// reaches EngineOptions.MaxUnfilledDispatchAttempts, this disarms AND disables the rule
+    /// instead of giving it another shot - it stays that way until a human re-enables it (see
+    /// TriggerRuleControllerBase.Enable, which also resets UnfilledAttempts back to 0). A fill on
+    /// any later attempt resets the counter too - see the anyLegFilled branch in DispatchAsync -
+    /// so an occasional reject on an otherwise-healthy rule never counts toward the cap.</summary>
     private void RestoreRuleIfNothingFilled(ITriggerRuleStore ruleStore, string ruleId)
     {
         var rule = ruleStore.Get(ruleId);
         if (rule is null) return; // deleted since it fired - nothing to restore
 
-        var changed = false;
-        if (!rule.IsArmed) { rule.IsArmed = true; changed = true; }
-        if (!rule.Enabled) { rule.Enabled = true; changed = true; }
-        if (!rule.OneShot && rule.MaxFireCount > 0 && rule.FireCount > 0) { rule.FireCount--; changed = true; }
+        rule.UnfilledAttempts++;
 
-        if (changed)
+        if (rule.UnfilledAttempts >= _options.MaxUnfilledDispatchAttempts)
         {
+            rule.IsArmed = false;
+            rule.Enabled = false;
             ruleStore.Upsert(rule);
-            _logger.LogInformation(
-                "Rule {RuleId}: nothing filled on this fire (blocked or fully rejected) - re-armed/re-enabled so it can try again.",
-                ruleId);
+            _logger.LogError(
+                "Rule {RuleId}: {Attempts} consecutive fire(s) with nothing filled (blocked or fully rejected) - disarming instead of retrying forever. Re-enable it manually once the underlying issue (margin, instrument status, etc.) is resolved.",
+                ruleId, rule.UnfilledAttempts);
+            return;
         }
+
+        if (!rule.IsArmed) rule.IsArmed = true;
+        if (!rule.Enabled) rule.Enabled = true;
+        if (!rule.OneShot && rule.MaxFireCount > 0 && rule.FireCount > 0) rule.FireCount--;
+        ruleStore.Upsert(rule);
+
+        _logger.LogInformation(
+            "Rule {RuleId}: nothing filled on this fire (blocked or fully rejected, {Attempts}/{Max} consecutive) - re-armed/re-enabled so it can try again.",
+            ruleId, rule.UnfilledAttempts, _options.MaxUnfilledDispatchAttempts);
     }
 
     /// <summary>Places the basket hedge-first: all BUY (long/hedge) legs go in first and only once
@@ -310,17 +360,16 @@ public sealed class OrderDispatchHostedService : BackgroundService
         if (sellIndices.Count == 0)
             return results;
 
-        // 2. Short (SELL) legs only once every hedge leg is confirmed filled (OrderResult.Success
-        //    is true only on a real fill - see OrderResult). No buy legs at all (a sell-only rule)
-        //    trivially passes: there's no hedge to wait for.
-        var hedgeInPlace = buyIndices.Count == 0 || buyIndices.All(i => results[i].Success);
-        if (hedgeInPlace)
-        {
-            var sellResults = await Task.WhenAll(sellIndices.Select(i => _orderGateway.PlaceOrderAsync(legs[i], cancellationToken)));
-            for (var k = 0; k < sellIndices.Count; k++)
-                results[sellIndices[k]] = sellResults[k];
-        }
-        else
+        // 2. Short (SELL) legs, sized to the hedge that ACTUALLY filled - not to what was
+        //    requested. OrderResult.Success only means "at least one lot filled", so a hedge that
+        //    filled 1 of 2 lots used to release the full 2-lot short: the account ends up short 2
+        //    against a 1-lot hedge, i.e. genuinely naked on the difference, for as long as it takes
+        //    the cleanup below to notice. Sizing the short to min(filled across the hedge legs)
+        //    means the exposure released can never exceed the hedge protecting it. A sell-only rule
+        //    (no buy legs at all) has no hedge to size against and goes out as requested.
+        var hedgeQuantity = buyIndices.Count == 0 ? int.MaxValue : buyIndices.Min(i => results[i].FilledQuantity);
+
+        if (hedgeQuantity <= 0)
         {
             _logger.LogError(
                 "Rule {RuleId}: hedge (BUY) leg did not fill - NOT placing the SELL leg(s) to avoid opening a naked short. Any hedge that did fill will be squared off.",
@@ -333,7 +382,26 @@ public sealed class OrderDispatchHostedService : BackgroundService
                     Status = "SKIPPED",
                     ErrorMessage = "Skipped: hedge (BUY) leg did not fill, so the SELL leg was not placed (would have been a naked short).",
                 };
+            return results;
         }
+
+        var sellRequests = sellIndices
+            .Select(i => hedgeQuantity < legs[i].Quantity ? WithQuantity(legs[i], hedgeQuantity) : legs[i])
+            .ToList();
+
+        for (var k = 0; k < sellIndices.Count; k++)
+        {
+            if (sellRequests[k].Quantity < legs[sellIndices[k]].Quantity)
+            {
+                _logger.LogWarning(
+                    "Rule {RuleId}: hedge (BUY) only filled {HedgeFilled} of {Requested} lot(s), so {Symbol} SELL is being sized down to {SellQty} lot(s) to stay fully hedged rather than opening a naked short on the difference.",
+                    ruleId, hedgeQuantity, legs[sellIndices[k]].Quantity, legs[sellIndices[k]].TradingSymbol, sellRequests[k].Quantity);
+            }
+        }
+
+        var sellResults = await Task.WhenAll(sellRequests.Select(r => _orderGateway.PlaceOrderAsync(r, cancellationToken)));
+        for (var k = 0; k < sellIndices.Count; k++)
+            results[sellIndices[k]] = sellResults[k];
 
         return results;
     }
@@ -354,64 +422,6 @@ public sealed class OrderDispatchHostedService : BackgroundService
         _executionSink.PublishAsync(
             new BasketExecutionEvent(triggerEvent.FireId, triggerEvent.RuleId, triggerEvent.SpreadId, underlying, orderKind, Array.Empty<OrderLegResult>(), MarginBlocked: true, BlockedReason: reason, DateTimeOffset.UtcNow, SpreadValueAtTrigger: triggerEvent.SpreadValueAtTrigger),
             cancellationToken);
-
-    /// <summary>Checks the basket's combined margin requirement (with the near/far hedge
-    /// benefit applied - see IMarginService.GetBasketMarginAsync) against the account's
-    /// actual available margin. Returns null if dispatch should proceed, or a human-readable
-    /// reason if it should be blocked entirely (published to the dashboard via
-    /// PublishBlockedAsync). Only called at all when EngineOptions.VerifyMarginBeforeDispatch is
-    /// true - see DispatchAsync, which skips this (and the two Kite API round trips it makes)
-    /// entirely when that's off. Blocks only when the account genuinely can't cover the basket
-    /// plus EngineOptions.MarginSafetyBufferPercent headroom; either way the basket margin
-    /// figures are logged for visibility. A failed *check* (network error, Kite API hiccup) is
-    /// not treated as fatal - Kite's own order entry will reject a genuinely under-margined
-    /// order regardless, so we'd rather attempt the basket than block it on a flaky diagnostic
-    /// call. A confirmed *insufficient* margin, on the other hand, blocks dispatch entirely,
-    /// since letting one leg place and the other get rejected for lack of margin is exactly the
-    /// naked-position scenario this whole basket approach exists to avoid.</summary>
-    private async Task<string?> CheckMarginAsync(string ruleId, List<OrderLegRequest> legs, CancellationToken cancellationToken)
-    {
-        var margin = await _marginService.GetBasketMarginAsync(legs, cancellationToken);
-        if (!margin.Success)
-        {
-            _logger.LogWarning("Basket margin check failed for rule {RuleId}: {Error} - proceeding anyway", ruleId, margin.ErrorMessage);
-            return null;
-        }
-
-        _logger.LogInformation(
-            "Basket margin for rule {RuleId}: final={Final} (would be {Initial} without the spread hedge benefit)",
-            ruleId, margin.FinalTotal, margin.InitialTotal);
-
-        if (margin.FinalTotal is not { } required)
-            return null;
-
-        // NFO (equity F&O) settles against the "equity" margin segment; MCX commodities against
-        // "commodity". Pick per-basket from the legs' own exchange so an MCX basket's pre-trade
-        // check reads the right pool of available funds. With the MCX add-on off no basket ever
-        // carries an MCX leg, so this always resolves to the original "equity" default.
-        var marginSegment = _mcx.Enabled && legs.Any(l => string.Equals(l.Exchange, _mcx.Exchange, StringComparison.OrdinalIgnoreCase))
-            ? _mcx.MarginSegment
-            : "equity";
-        var available = await _marginService.GetAvailableMarginAsync(marginSegment, cancellationToken);
-        if (!available.Success || available.Net is not { } net)
-        {
-            _logger.LogWarning("Available margin check failed for rule {RuleId}: {Error} - proceeding anyway", ruleId, available.ErrorMessage);
-            return null;
-        }
-
-        var buffered = required * (1 + _options.MarginSafetyBufferPercent / 100m);
-        if (net < buffered)
-        {
-            var reason = $"Insufficient margin: needs {required:F2} (+{_options.MarginSafetyBufferPercent}% safety buffer = {buffered:F2}), only {net:F2} available.";
-            _logger.LogError(
-                "Rule {RuleId} basket NOT placed - {Reason} Placing only some legs would leave a naked, unhedged position, so nothing was sent.",
-                ruleId, reason);
-            return reason;
-        }
-
-        _logger.LogInformation("Margin check passed for rule {RuleId}: {Available:F2} available covers {Required:F2} + buffer.", ruleId, net, required);
-        return null;
-    }
 
     /// <summary>Cancels any leg whose fill status couldn't be confirmed as terminal in time
     /// (Status == "OPEN" - see KiteOrderGateway.PollOrderStatusAsync) so it doesn't sit resting
@@ -447,75 +457,284 @@ public sealed class OrderDispatchHostedService : BackgroundService
         }
     }
 
-    /// <summary>One more attempt, at a wider slippage band, for whichever leg(s) of a genuinely
-    /// partial fill came back rejected/cancelled - tried BEFORE SquareOffPartialFillAsync
-    /// unwinds whatever else already filled, since a fill (even at worse pricing) keeps the
-    /// intended hedged spread intact, which is strictly better than flattening a leg that DID
-    /// fill and ending the attempt with no position at all. Only fires for a genuine partial
-    /// fill (at least one leg already filled - nothing to protect otherwise) and only retries
-    /// legs that are actually safe to retry:
+    /// <summary>Up to EngineOptions.RetryUnfilledLegMaxAttempts attempts, each at the same wider
+    /// slippage band and each re-priced fresh off the latest market price, for whichever leg(s)
+    /// of a genuinely partial fill still have quantity outstanding - either a leg that was fully
+    /// rejected/cancelled (0 filled) OR one that itself only PARTIALLY filled (e.g. 1 of 2 lots,
+    /// the IOC protection filled what it could and cancelled the rest) - tried BEFORE
+    /// SquareOffPartialFillAsync unwinds whatever else already filled, since a fill (even at
+    /// worse pricing) keeps the intended hedged spread intact, which is strictly better than
+    /// flattening a leg that DID fill and ending the attempt with no position at all. Only fires
+    /// for a genuine partial fill (at least one leg already has some fill - nothing to protect
+    /// otherwise) and only retries legs that are actually safe to retry:
     ///  - NOT "SKIPPED" (the hedge's sell/buy partner deliberately never sent because the hedge
     ///    leg itself didn't fill - see PlaceHedgeFirstAsync). Retrying that would defeat the
     ///    entire point of hedge-first sequencing: it would risk placing a naked short/long
     ///    exactly like PlaceHedgeFirstAsync exists to avoid.
-    ///  - NOT "OPEN" (CancelStrayOpenOrdersAsync, which runs immediately before this, couldn't
-    ///    confirm the original order was actually cancelled) - retrying that risks the original
-    ///    order ALSO filling later, double-executing this leg.
-    /// Mutates <paramref name="legs"/>/<paramref name="placements"/> in place at the retried
-    /// index/indices so every caller downstream (legResults, SquareOffPartialFillAsync) sees the
-    /// retry's outcome instead of the original rejection.</summary>
+    ///  - NOT "OPEN" - either the original order (CancelStrayOpenOrdersAsync, which runs
+    ///    immediately before this, couldn't confirm it was actually cancelled) or a PRIOR retry
+    ///    attempt within this same call that itself came back unconfirmed. Retrying either risks
+    ///    that still-maybe-live order ALSO filling later, double-executing this leg - so once a
+    ///    leg lands on "OPEN" it's left alone for the rest of this call rather than retried again.
+    /// Each retry only asks for the OUTSTANDING quantity (requested minus however much has
+    /// already filled across the original attempt and any earlier retries this call), not the
+    /// full original quantity again - a leg that already got 1 of 2 lots is retried for the
+    /// remaining 1, not re-sent for 2. Fills accumulate: FilledQuantity and AverageFillPrice on
+    /// the leg's OrderResult become the running total/weighted-average across every attempt, so a
+    /// leg that fills 1 lot on the original attempt and 1 more on retry #1 reports FilledQuantity
+    /// = 2, not 1. Every attempt reuses the SAME wider slippage (rule.SlippagePercent *
+    /// RetryUnfilledLegSlippageMultiplier, e.g. 3x) rather than widening further each round - only
+    /// the reference price and the outstanding quantity are refreshed each attempt, not the band
+    /// itself. After RetryUnfilledLegMaxAttempts attempts a leg still has quantity outstanding,
+    /// this gives up on the remainder and lets the caller's balancing pass take over, which unwinds
+    /// whatever ended up unmatched - including the case where the legs finish at genuinely
+    /// different filled quantities (leg A at 2, leg B at 1), which is now reduced to the matched
+    /// quantity rather than left standing. Mutates <paramref name="legs"/>/<paramref name="placements"/> in place
+    /// at the retried index/indices so every caller downstream (legResults,
+    /// SquareOffPartialFillAsync) sees the final cumulative outcome instead of the original
+    /// rejection.</summary>
     private async Task RetryUnfilledLegsAsync(TriggerRule rule, List<LegPlan> legPlans, List<OrderLegRequest> legs, OrderResult[] placements, CancellationToken cancellationToken)
     {
-        var filledCount = 0;
-        var retryIndices = new List<int>();
-        for (var i = 0; i < placements.Length; i++)
-        {
-            if (placements[i].Success && placements[i].FilledQuantity > 0) { filledCount++; continue; }
-            if (string.Equals(placements[i].Status, "SKIPPED", StringComparison.OrdinalIgnoreCase)) continue;
-            if (string.Equals(placements[i].Status, "OPEN", StringComparison.OrdinalIgnoreCase)) continue;
-            retryIndices.Add(i);
-        }
-
-        if (filledCount == 0 || retryIndices.Count == 0)
-            return; // nothing filled yet to protect, or nothing eligible to retry
+        var anythingFilled = placements.Any(p => p.FilledQuantity > 0);
+        if (!anythingFilled)
+            return; // nothing filled at all - no exposure to complete; the rule is re-armed and gets a fresh attempt on the next crossing
 
         var widerSlippage = rule.SlippagePercent * _options.RetryUnfilledLegSlippageMultiplier;
+        var maxAttempts = Math.Max(1, _options.RetryUnfilledLegMaxAttempts);
 
-        foreach (var i in retryIndices)
+        var isSell = legPlans
+            .Select(p => !string.Equals(p.Request.TransactionType, "BUY", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            var plan = legPlans[i];
-            _logger.LogWarning(
-                "Rule {RuleId}: {Symbol} {Side} did not fill at {OriginalSlippage}% slippage ({Status}) - retrying once at {WiderSlippage}% before falling back to square-off.",
-                rule.Id, plan.Request.TradingSymbol, plan.Request.TransactionType, rule.SlippagePercent, placements[i].Status, widerSlippage);
+            // Each round re-derives what every leg is allowed to reach for RIGHT NOW, because the
+            // hedge may have grown since the last round. Buys are always chased to the full
+            // requested quantity - the aim is to COMPLETE the spread, not to settle for a smaller
+            // one. Sells are capped at whatever the hedge currently holds, so topping up the short
+            // can never overshoot the long protecting it even mid-way through filling. Buys are
+            // therefore processed before sells within each round, exactly like the initial
+            // placement - see ComputeLegTargets.
+            var targets = ComputeLegTargets(
+                legPlans.Select(p => p.Request.Quantity).ToArray(),
+                placements.Select(p => p.FilledQuantity).ToArray(),
+                isSell);
 
-            // Re-priced fresh off whatever the tick store has right now (Protect reads it at
-            // call time) rather than reusing the original attempt's stale reference - the whole
-            // point of a wider band is to reach a price the market may have since moved to/past.
-            var retryLeg = _marketProtection.Protect(plan.Request, plan.InstrumentToken, plan.TickSize, $"Rule {rule.Id} retry", widerSlippage);
-            var retryResult = await _orderGateway.PlaceOrderAsync(retryLeg, cancellationToken);
-
-            legs[i] = retryLeg;
-            placements[i] = retryResult;
-
-            if (retryResult.Success)
+            var pending = new List<int>();
+            for (var i = 0; i < placements.Length; i++)
             {
-                _logger.LogInformation(
-                    "Rule {RuleId}: retry filled {Symbol} {Side} at {WiderSlippage}% slippage -> order {OrderId}",
-                    rule.Id, plan.Request.TradingSymbol, plan.Request.TransactionType, widerSlippage, retryResult.OrderId);
+                if (placements[i].FilledQuantity >= targets[i]) continue; // already at target - nothing outstanding
+                // "OPEN" means the original order (or an earlier retry) could not be confirmed
+                // cancelled, so it may still be live - placing another would risk double-executing
+                // this leg. Left alone for the rest of this call.
+                if (string.Equals(placements[i].Status, "OPEN", StringComparison.OrdinalIgnoreCase)) continue;
+                pending.Add(i);
             }
-            else
+
+            // Buys first, then sells - so a sell is only ever topped up against a hedge that
+            // already exists in this same round.
+            pending.Sort((a, b) => isSell[a].CompareTo(isSell[b]));
+
+            if (pending.Count == 0)
+                break; // every leg has reached its target - the basket is complete and matched
+
+            foreach (var i in pending)
             {
+                var plan = legPlans[i];
+                var already = placements[i];
+                var outstandingQty = targets[i] - already.FilledQuantity;
+
                 _logger.LogWarning(
-                    "Rule {RuleId}: retry at {WiderSlippage}% still did not fill {Symbol} {Side} - {Error}. Falling back to square-off.",
-                    rule.Id, widerSlippage, plan.Request.TradingSymbol, plan.Request.TransactionType, retryResult.ErrorMessage);
+                    "Rule {RuleId}: {Symbol} {Side} has {Outstanding}/{Target} lot(s) outstanding at {OriginalSlippage}% slippage ({Status}) - retry {Attempt}/{MaxAttempts} at {WiderSlippage}%.",
+                    rule.Id, plan.Request.TradingSymbol, plan.Request.TransactionType, outstandingQty, targets[i], rule.SlippagePercent, already.Status, attempt, maxAttempts, widerSlippage);
+
+                // Re-priced fresh off whatever the tick store has right now (Protect reads it at
+                // call time) rather than reusing a stale reference from the original attempt or an
+                // earlier retry - the whole point of a wider band is to reach a price the market
+                // may have since moved to/past. Only the OUTSTANDING quantity is requested, not
+                // the full original quantity again.
+                var outstandingRequest = WithQuantity(plan.Request, outstandingQty);
+                var retryLeg = _marketProtection.Protect(outstandingRequest, plan.InstrumentToken, plan.TickSize, $"Rule {rule.Id} retry {attempt}", widerSlippage);
+                var retryResult = await _orderGateway.PlaceOrderAsync(retryLeg, cancellationToken);
+
+                var combinedFilled = already.FilledQuantity + retryResult.FilledQuantity;
+                var combinedAvgPrice = CombineAverageFillPrice(already.FilledQuantity, already.AverageFillPrice, retryResult.FilledQuantity, retryResult.AverageFillPrice);
+
+                // Report the leg's ORIGINAL total requested quantity (not just this attempt's
+                // outstanding remainder) so legResults/the dashboard still show "requested 2,
+                // filled 1", not "requested 1, filled 1".
+                legs[i] = WithQuantity(retryLeg, plan.Request.Quantity);
+                placements[i] = new OrderResult
+                {
+                    Success = combinedFilled > 0,
+                    OrderId = retryResult.OrderId ?? already.OrderId,
+                    ErrorMessage = retryResult.ErrorMessage,
+                    FilledQuantity = combinedFilled,
+                    Status = retryResult.Status,
+                    AverageFillPrice = combinedAvgPrice,
+                };
+
+                if (combinedFilled >= targets[i])
+                {
+                    _logger.LogInformation(
+                        "Rule {RuleId}: retry {Attempt}/{MaxAttempts} completed {Symbol} {Side} - {Filled}/{Target} lot(s) now filled at {WiderSlippage}% slippage -> order {OrderId}",
+                        rule.Id, attempt, maxAttempts, plan.Request.TradingSymbol, plan.Request.TransactionType, combinedFilled, targets[i], widerSlippage, retryResult.OrderId);
+                }
+                else if (string.Equals(retryResult.Status, "OPEN", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning(
+                        "Rule {RuleId}: retry {Attempt}/{MaxAttempts} for {Symbol} {Side} came back OPEN/unconfirmed - leaving it as-is rather than risking a further retry double-placing it.",
+                        rule.Id, attempt, maxAttempts, plan.Request.TradingSymbol, plan.Request.TransactionType);
+                }
+                else
+                {
+                    var lastAttempt = attempt == maxAttempts;
+                    _logger.LogWarning(
+                        "Rule {RuleId}: retry {Attempt}/{MaxAttempts} at {WiderSlippage}% still leaves {Symbol} {Side} at {Filled}/{Target} lot(s) - {Error}.{Next}",
+                        rule.Id, attempt, maxAttempts, widerSlippage, plan.Request.TradingSymbol, plan.Request.TransactionType, combinedFilled, targets[i], retryResult.ErrorMessage,
+                        lastAttempt ? " No retries left." : " Trying again for the remainder.");
+                }
             }
         }
     }
 
-    /// <summary>Flattens whichever leg(s) actually filled if the basket only partially went
-    /// through, since a lone near or far month future is a completely different (and far more
-    /// margin-expensive) risk than the intended hedged spread - see EngineOptions.
-    /// AutoSquareOffOnPartialFill. Fires an opposite-direction order for each filled leg
+    /// <summary>
+    /// What each leg is allowed to hold right now, given how much has filled so far.
+    ///
+    /// BUY (hedge) legs are always chased to their full requested quantity: the objective is to
+    /// COMPLETE the spread the rule asked for, never to settle for a smaller one or to unwind back
+    /// out of it.
+    ///
+    /// SELL (short) legs are capped at whatever the hedge currently holds - min(requested, hedge
+    /// filled). That cap is what keeps the position hedged at every intermediate step while the
+    /// basket is still being filled in: the short can only ever grow as fast as the long protecting
+    /// it, so there is no moment where topping up the short overshoots the hedge. As the hedge
+    /// fills across retry rounds, the cap rises with it and the short is topped up to follow, until
+    /// both sides reach the requested quantity. A sell-only rule has no hedge to cap against and
+    /// simply goes to its requested quantity.
+    ///
+    /// Pure/static and separated from the I/O around it so the rule that decides whether the
+    /// account can end up unhedged is unit-testable on its own.
+    /// </summary>
+    internal static int[] ComputeLegTargets(IReadOnlyList<int> requestedQuantities, IReadOnlyList<int> filledQuantities, IReadOnlyList<bool> isSell)
+    {
+        var targets = new int[requestedQuantities.Count];
+
+        var hedgeFilled = int.MaxValue;
+        for (var i = 0; i < isSell.Count; i++)
+            if (!isSell[i]) hedgeFilled = Math.Min(hedgeFilled, filledQuantities[i]);
+
+        for (var i = 0; i < requestedQuantities.Count; i++)
+        {
+            targets[i] = isSell[i] && hedgeFilled != int.MaxValue
+                ? Math.Min(requestedQuantities[i], hedgeFilled)
+                : requestedQuantities[i];
+        }
+
+        return targets;
+    }
+
+    /// <summary>
+    /// How many lots of each leg have to be given back for the basket to end up balanced. The
+    /// matched quantity a multi-leg basket actually achieved is the MINIMUM filled across its legs;
+    /// anything a leg holds above that minimum is unhedged and has to be unwound.
+    ///
+    /// This generalises the old "if any leg didn't fill, flatten every leg that did" rule, which
+    /// only ever recognised the all-or-nothing case and silently accepted the far more common
+    /// lopsided one. Both now fall out of the same arithmetic:
+    ///   - one leg filled, the other rejected -> min is 0 -> the whole filled leg is unwound
+    ///     (identical to the previous behaviour), and
+    ///   - legs filled 2 and 1 -> min is 1 -> exactly the 1 excess lot is unwound, leaving a real
+    ///     1-lot hedged spread instead of a 1-lot naked position nothing ever noticed.
+    ///
+    /// Pure/static for the same testability reason as <see cref="ComputeRetryTargets"/>.
+    /// </summary>
+    internal static int[] ComputeExcessQuantities(IReadOnlyList<int> filledQuantities)
+    {
+        var excess = new int[filledQuantities.Count];
+        if (filledQuantities.Count < 2) return excess; // a single leg has no partner to be unbalanced against
+
+        var matched = int.MaxValue;
+        for (var i = 0; i < filledQuantities.Count; i++)
+            matched = Math.Min(matched, filledQuantities[i]);
+
+        for (var i = 0; i < filledQuantities.Count; i++)
+            excess[i] = filledQuantities[i] - matched;
+
+        return excess;
+    }
+
+    /// <summary>Clones <paramref name="source"/> with a different Quantity - used by
+    /// RetryUnfilledLegsAsync both to build a retry request for just the outstanding remainder of
+    /// a partially-filled leg, and to restore the ORIGINAL total quantity on the leg reported back
+    /// to the caller (legResults/dashboard should show "requested 2", not "requested 1" just
+    /// because the last retry only asked for the 1 remaining lot).</summary>
+    private static OrderLegRequest WithQuantity(OrderLegRequest source, int quantity) => new()
+    {
+        TradingSymbol = source.TradingSymbol,
+        Exchange = source.Exchange,
+        InstrumentToken = source.InstrumentToken,
+        TransactionType = source.TransactionType,
+        Quantity = quantity,
+        Product = source.Product,
+        OrderType = source.OrderType,
+        Price = source.Price,
+        PriceReference = source.PriceReference,
+        Validity = source.Validity,
+        Variety = source.Variety,
+        Tag = source.Tag,
+    };
+
+    /// <summary>Fill-weighted average price across two fills of the same leg (e.g. 1 lot at the
+    /// original attempt's price plus 1 more lot at a retry's wider-slippage price) - used by
+    /// RetryUnfilledLegsAsync to keep OrderResult.AverageFillPrice a true average of everything
+    /// that's actually filled for the leg so far, not just the most recent attempt's price.
+    /// Falls back to whichever side has a fill when the other side has none (nothing to
+    /// average against), and to null when neither side has filled anything yet.</summary>
+    private static decimal? CombineAverageFillPrice(int qtyA, decimal? avgA, int qtyB, decimal? avgB)
+    {
+        if (qtyA > 0 && avgA is { } priceA && qtyB > 0 && avgB is { } priceB)
+            return (priceA * qtyA + priceB * qtyB) / (qtyA + qtyB);
+        if (qtyB > 0 && avgB is { } onlyB)
+            return onlyB;
+        if (qtyA > 0 && avgA is { } onlyA)
+            return onlyA;
+        return null;
+    }
+
+    /// <summary>
+    /// Under the always-fill policy nothing is unwound, so an imbalance the retries could not close
+    /// (the market simply would not fill that leg within EngineOptions.RetryUnfilledLegMaxAttempts)
+    /// is left standing as a real, unhedged position. That must never pass silently: this logs it
+    /// at Critical with the exact leftover quantity, so it shows up as an alert rather than being
+    /// something only a later look at the position book would reveal. Logged per leg holding more
+    /// than the matched quantity - see ComputeExcessQuantities for how that is derived.
+    /// </summary>
+    private void WarnIfLegsLeftUnmatched(string ruleId, List<LegPlan> legPlans, OrderResult[] results)
+    {
+        var excess = ComputeExcessQuantities(results.Select(r => r.FilledQuantity).ToArray());
+        if (excess.Sum() == 0) return; // basket completed matched - nothing to flag
+
+        for (var i = 0; i < legPlans.Count; i++)
+        {
+            if (excess[i] <= 0) continue;
+            _logger.LogCritical(
+                "Rule {RuleId}: {Symbol} {Side} is left with {Excess} UNHEDGED lot(s) that retries could not fill against ({Fills} across the basket). " +
+                "Nothing was unwound (always-fill policy - AutoSquareOffOnPartialFill is off), so this position is live and needs manual attention.",
+                ruleId, legPlans[i].Request.TradingSymbol, legPlans[i].Request.TransactionType, excess[i],
+                string.Join("/", results.Select(r => r.FilledQuantity)));
+        }
+    }
+
+    /// <summary>Brings the basket back to a MATCHED position by unwinding whatever quantity ended
+    /// up unhedged, since a lone (or merely oversized) near/far month future is a completely
+    /// different - and far more margin-expensive - risk than the intended hedged spread. See
+    /// EngineOptions.AutoSquareOffOnPartialFill and ComputeExcessQuantities, which decides the
+    /// amount: the matched quantity is the minimum filled across the legs, and anything a leg holds
+    /// above that is given back. That covers both the all-or-nothing case (one leg filled, the
+    /// other rejected -> the whole filled leg is unwound) and the lopsided one (legs at 2 and 1 ->
+    /// just the 1 excess lot is unwound, keeping a real 1-lot spread) with the same arithmetic.
+    /// Fires an opposite-direction order for each excess amount
     /// immediately (also passed through MarketProtectionService, same as any other MARKET leg -
     /// this is cleanup, not a rate-sensitive trade, but Kite still rejects a raw MARKET order
     /// here too); if even the square-off fails, that's logged as Critical since it means the
@@ -529,30 +748,34 @@ public sealed class OrderDispatchHostedService : BackgroundService
     {
         var ruleId = rule.Id;
         var squareOffResults = new List<OrderLegResult>();
-        // Paired with the actually-confirmed filled quantity (OrderResult.FilledQuantity, now
-        // that PlaceOrderAsync verifies a real fill instead of just placement acceptance) -
-        // flattening must match what's genuinely in the position, not the originally requested
-        // quantity, in case only part of a leg filled before Kite cancelled the rest (IOC).
-        var filled = new List<(LegPlan Plan, int FilledQuantity)>();
-        var anyRejected = false;
-        for (var i = 0; i < legPlans.Count; i++)
+
+        // Unwind exactly the UNMATCHED quantity on each leg - see ComputeExcessQuantities. Driven
+        // off OrderResult.FilledQuantity (what genuinely filled) rather than what was requested, so
+        // an IOC leg that only partly filled before the rest was cancelled is unwound for the real
+        // amount.
+        var excess = ComputeExcessQuantities(results.Select(r => r.FilledQuantity).ToArray());
+        var totalExcess = excess.Sum();
+        if (totalExcess == 0) return squareOffResults; // legs are already matched (or all empty) - nothing unhedged to unwind
+
+        var matchedQuantity = results.Min(r => r.FilledQuantity);
+        if (matchedQuantity > 0)
         {
-            if (results[i].Success && results[i].FilledQuantity > 0)
-                filled.Add((legPlans[i], results[i].FilledQuantity));
-            else
-                anyRejected = true;
+            _logger.LogError(
+                "Rule {RuleId} basket filled UNEVENLY ({Fills}) - keeping the matched {Matched} lot(s) as a hedged spread and unwinding the {Excess} unmatched lot(s), which would otherwise sit naked.",
+                ruleId, string.Join("/", results.Select(r => r.FilledQuantity)), matchedQuantity, totalExcess);
+        }
+        else
+        {
+            _logger.LogError(
+                "Rule {RuleId} basket PARTIALLY FILLED - {FilledCount}/{TotalCount} leg(s) actually filled, leaving a naked, unhedged position. Auto-squaring off the filled leg(s) now.",
+                ruleId, results.Count(r => r.FilledQuantity > 0), legPlans.Count);
         }
 
-        // Either everything filled (the hedge is intact, nothing to unwind) or nothing filled
-        // (nothing to unwind either) - only a genuine partial fill needs cleanup.
-        if (!anyRejected || filled.Count == 0) return squareOffResults;
-
-        _logger.LogError(
-            "Rule {RuleId} basket PARTIALLY FILLED - {FilledCount}/{TotalCount} leg(s) actually filled, leaving a naked, unhedged position. Auto-squaring off the filled leg(s) now.",
-            ruleId, filled.Count, legPlans.Count);
-
-        foreach (var (plan, filledQuantity) in filled)
+        for (var i = 0; i < legPlans.Count; i++)
         {
+            if (excess[i] <= 0) continue;
+
+            var plan = legPlans[i];
             var leg = plan.Request;
             var flattenLeg = new OrderLegRequest
             {
@@ -560,7 +783,7 @@ public sealed class OrderDispatchHostedService : BackgroundService
                 Exchange = leg.Exchange,
                 InstrumentToken = leg.InstrumentToken,
                 TransactionType = leg.TransactionType == "BUY" ? "SELL" : "BUY",
-                Quantity = filledQuantity, // flatten exactly what filled, not the original requested quantity
+                Quantity = excess[i], // only the unmatched remainder, so a genuinely hedged portion is never flattened along with it
                 Product = leg.Product,
                 OrderType = "MARKET", // this is risk cleanup, not a rate-sensitive trade - MarketProtectionService still converts it to a protected LIMIT before it's sent
                 Tag = leg.Tag,

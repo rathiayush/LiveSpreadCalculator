@@ -28,10 +28,11 @@
         "ASPNETCORE_ENVIRONMENT": "Development"
       }
     },
-    "Local (SQL)": {
-      // Local dev against a LOCAL SQL Server / LocalDB (see appsettings.Local.json) instead of the
-      // shared Azure SQL - no firewall/network dependency. This instance is the writer locally, so
-      // it creates the SpreadHistory table and captures into the local DB.
+    "Local (Postgres)": {
+      // Local dev against a LOCAL PostgreSQL instance (see appsettings.Local.json - matches
+      // `docker compose up db`) instead of the shared/deployed Postgres - no network dependency.
+      // This instance is the writer locally, so it creates the SpreadHistory table and captures
+      // into the local DB.
       "commandName": "Project",
       "launchBrowser": true,
       "launchUrl": "swagger",
@@ -41,6 +42,26 @@
         // deployed Dashboard URL - env vars always win over appsettings.{Environment}.json. Point
         // this at wherever the client actually runs locally.
         "Dashboard__BaseUrl": "https://localhost:63061"
+      },
+      "dotnetRunMessages": true,
+      "applicationUrl": "https://localhost:7105;http://localhost:5159"
+    },
+    "pradeep-1 (local)": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "pradeep-1",
+        // Overrides appsettings.pradeep-1.json's Dashboard:BaseUrl (the deployed Azure URL) so
+        // CORS allows a LOCAL frontend dev server instead of only the live P1 site - env vars
+        // always win over appsettings.{Environment}.json regardless of environment name. Point
+        // this at wherever the React client is actually running locally (its Vite/dev-server
+        // port), not the deployed Dashboard:BaseUrl above.
+        "Dashboard__BaseUrl": "https://localhost:63061",
+        // ASPNETCORE_ENVIRONMENT isn't literally "Development", so app.Environment.IsDevelopment()
+        // is false and Swagger would otherwise never register (see Program.cs) - this bypasses that
+        // gate for THIS local profile only; the real Azure Web App for pradeep-1 does not set this.
+        "Swagger__ForceEnabled": "true"
       },
       "dotnetRunMessages": true,
       "applicationUrl": "https://localhost:7105;http://localhost:5159"
@@ -56,7 +77,11 @@
         // always win over appsettings.{Environment}.json regardless of environment name. Point
         // this at wherever the React client is actually running locally (its Vite/dev-server
         // port), not the deployed Dashboard:BaseUrl above.
-        "Dashboard__BaseUrl": "https://localhost:63061"
+        "Dashboard__BaseUrl": "https://localhost:63061",
+        // ASPNETCORE_ENVIRONMENT isn't literally "Development", so app.Environment.IsDevelopment()
+        // is false and Swagger would otherwise never register (see Program.cs) - this bypasses that
+        // gate for THIS local profile only; the real Azure Web App for pradeep-2 does not set this.
+        "Swagger__ForceEnabled": "true"
       },
       "dotnetRunMessages": true,
       "applicationUrl": "https://localhost:7105;http://localhost:5159"

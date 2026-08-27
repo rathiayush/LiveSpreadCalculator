@@ -177,6 +177,42 @@ export default function SpreadGrid({ definitions, liveValues }) {
         return <FlashValue value={r.live.farPrice}>{`${r.live.farPrice.toFixed(2)} (${usesBid ? 'bid' : 'ask'})`}</FlashValue>
       },
     },
+    {
+      // The underlying's own live price (cash for a stock, index level for NIFTY/BANKNIFTY).
+      // A dash means no spot: either the underlying has no cash instrument this broker's master
+      // could be matched to, or its spot hasn't ticked yet - see SpreadSnapshot.SpotPrice.
+      title: (
+        <Tooltip title="Live price of the underlying itself - the cash equity, or the index level. A dash means no spot price is available for this underlying.">
+          Spot
+        </Tooltip>
+      ),
+      key: 'spotPrice',
+      sorter: (a, b) => (a.live?.spotPrice ?? 0) - (b.live?.spotPrice ?? 0),
+      render: (_, r) => r.live?.spotPrice
+        ? <FlashValue value={r.live.spotPrice}>{r.live.spotPrice.toFixed(2)}</FlashValue>
+        : '—',
+    },
+    {
+      // Deliberately not colored green/red by sign the way Spread %/Spread are: a future trading
+      // ABOVE cash is simply the normal state (cost of carry), not a good or bad thing, so
+      // coloring it would imply a signal that isn't there. Sign and label carry the meaning.
+      title: (
+        <Tooltip title="The near future's premium (+) or discount (-) to spot, as a percentage of spot: (near - spot) / spot. Positive is the normal state for a future (contango); negative means backwardation.">
+          Basis %
+        </Tooltip>
+      ),
+      key: 'basisPercent',
+      sorter: (a, b) => (a.live?.basisPercent ?? 0) - (b.live?.basisPercent ?? 0),
+      render: (_, r) => {
+        if (!r.live?.spotPrice) return '—'
+        const basis = r.live.basisPercent
+        return (
+          <FlashValue value={basis}>
+            <span style={{ fontWeight: 600 }}>{`${basis >= 0 ? '+' : ''}${basis.toFixed(2)}%`}</span>
+          </FlashValue>
+        )
+      },
+    },
     { title: 'Direction', key: 'direction', render: (_, r) => r.live ? <DirectionTag direction={r.live.direction} /> : '—' },
     // Near/Far leg (the raw tradingsymbols) are supporting detail, not the headline - pushed to
     // the end, right before Updated, rather than up near Underlying/Spread %/Spread.
