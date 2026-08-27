@@ -16,8 +16,12 @@ using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Brokers;
 using SpreadTrader.Core.Realtime;
 using SpreadTrader.Core.Store;
+using SpreadTrader.Core.OptionsFlow;
+using SpreadTrader.DhanIntegration;
+using SpreadTrader.DhanIntegration.OptionsFlow;
 using SpreadTrader.Engine;
 using SpreadTrader.Engine.Services;
+using SpreadTrader.OptionsFlow;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -234,6 +238,48 @@ builder.Services.AddSingleton<BulkTriggerTemplateService>();
 // operator never has to click "Build universe" by hand just to get back to a streaming state -
 // see AutoUniverseBuilderHostedService's doc comment.
 builder.Services.AddHostedService<AutoUniverseBuilderHostedService>();
+
+// ---- Options Flow add-on (index option CDV/OBV page) -----------------------------------------
+// Entirely gated behind OptionsFlow:Enabled, which defaults to false. While it is off NOTHING
+// below is registered: no hosted service, no option chain parsed, no extra feed subscriptions, and
+// IEnumerable<IExtraTickSubscriber> resolves empty so TickIngestionHostedService's reconciliation
+// behaves exactly as it always has. See OptionsFlowOptions.
+//
+// DHAN ONLY by design - the chain and the intraday history it backfills from are both
+// Dhan-specific (see OptionsFlowHostedService). The services are registered regardless of which
+// platform is currently active, because the platform can be switched at runtime; the hosted
+// service itself stands down while anything other than Dhan is live.
+builder.Services.Configure<OptionsFlowOptions>(builder.Configuration.GetSection(OptionsFlowOptions.SectionName));
+var optionsFlowOptions = builder.Configuration.GetSection(OptionsFlowOptions.SectionName).Get<OptionsFlowOptions>()
+    ?? new OptionsFlowOptions();
+
+if (optionsFlowOptions.Enabled)
+{
+    // Builds the chain from the scrip master DhanInstrumentMasterService already keeps on disk, so
+    // enabling this costs no extra download in a running deployment.
+    builder.Services.AddSingleton<IOptionsInstrumentSource>(sp => new DhanOptionsInstrumentSource(
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(DhanOptionsInstrumentSource)),
+        sp.GetRequiredService<IOptions<DhanOptions>>(),
+        sp.GetRequiredService<IOptions<OptionsFlowOptions>>(),
+        dhanScripMasterCachePath,
+        sp.GetRequiredService<ILogger<DhanOptionsInstrumentSource>>()));
+
+    // Its own RateLimiter instance, constructed here rather than resolved: the broker gateways each
+    // hold their own with different rates, so a bare RateLimiter registration would be ambiguous
+    // (see the note in BrokerRegistration.AddKite). Backfill is a burst of one call per newly
+    // tracked strike, paced under Dhan's per-second data limit.
+    builder.Services.AddSingleton<IOptionHistoryProvider>(sp => new DhanOptionHistoryProvider(
+        sp.GetRequiredService<DhanApiClient>(),
+        new RateLimiter(maxOperationsPerSecond: 5),
+        sp.GetRequiredService<ILogger<DhanOptionHistoryProvider>>()));
+
+    builder.Services.AddSingleton<OptionsFlowEngine>();
+    // Keeps the option chain's subscriptions alive through tick reconciliation - see
+    // IExtraTickSubscriber. Registered as the same singleton instance the engine itself is.
+    builder.Services.AddSingleton<IExtraTickSubscriber>(sp => sp.GetRequiredService<OptionsFlowEngine>());
+    builder.Services.AddSingleton<IOptionsFlowPublisher, SignalROptionsFlowPublisher>();
+    builder.Services.AddHostedService<OptionsFlowHostedService>();
+}
 
 // ---- Authentication (JWT) -------------------------------------------------------------------
 // Locks the entire API + SignalR hub behind a Bearer token. Only users listed in

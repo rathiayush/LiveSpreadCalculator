@@ -35,6 +35,11 @@ public sealed class TickIngestionHostedService : BackgroundService
     private readonly IMarketDataFeed _tickerClient;
     private readonly ITickStore _tickStore;
     private readonly PositionsCache _positionsCache;
+    /// <summary>Features outside the trading path that subscribe their own instruments and need
+    /// them kept alive across reconciliation - see IExtraTickSubscriber. Empty unless an add-on
+    /// (currently only the Options Flow page) is enabled, in which case reconciliation behaves
+    /// exactly as it always has.</summary>
+    private readonly IReadOnlyList<IExtraTickSubscriber> _extraSubscribers;
     private readonly ILogger<TickIngestionHostedService> _logger;
 
     public TickIngestionHostedService(
@@ -43,6 +48,7 @@ public sealed class TickIngestionHostedService : BackgroundService
         IMarketDataFeed tickerClient,
         ITickStore tickStore,
         PositionsCache positionsCache,
+        IEnumerable<IExtraTickSubscriber> extraSubscribers,
         ILogger<TickIngestionHostedService> logger)
     {
         _spreadStore = spreadStore;
@@ -50,6 +56,7 @@ public sealed class TickIngestionHostedService : BackgroundService
         _tickerClient = tickerClient;
         _tickStore = tickStore;
         _positionsCache = positionsCache;
+        _extraSubscribers = extraSubscribers.ToArray();
         _logger = logger;
     }
 
@@ -126,6 +133,14 @@ public sealed class TickIngestionHostedService : BackgroundService
             if (spread.SpotLeg is { InstrumentToken: not 0 } spot) needed.Add(spot.InstrumentToken);
         }
         foreach (var token in _positionsCache.GetAnchoredTokens()) needed.Add(token);
+
+        // Anything an enabled add-on says it still needs. Without this, a feature that subscribes
+        // its own instruments (the Options Flow page's option chain) would have them unsubscribed
+        // here within minutes and its chart would silently flatline - see IExtraTickSubscriber.
+        foreach (var subscriber in _extraSubscribers)
+        {
+            foreach (var token in subscriber.GetRequiredTokens()) needed.Add(token);
+        }
 
         var stale = _tickerClient.GetSubscribedTokens().Where(t => !needed.Contains(t)).ToArray();
         if (stale.Length == 0) return;
