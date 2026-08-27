@@ -319,7 +319,9 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
         var call = BuildSide(state, OptionRight.Call, sessionStart, sessionEnd);
         var put = BuildSide(state, OptionRight.Put, sessionStart, sessionEnd);
 
-        if (call.Count == 0 && put.Count == 0) return null;
+        if (call.Points.Count == 0 && put.Points.Count == 0) return null;
+
+        var signals = BuildSignals(call, put);
 
         return new OptionsFlowSnapshot(
             Index: state.Index,
@@ -330,14 +332,97 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
             WindowSetAtUtc: state.WindowSetAtUtc,
             DeltaWeighted: _options.UseDeltaWeighting,
             Backfilled: state.Backfilled,
-            Call: call,
-            Put: put);
+            Call: call.Points,
+            Put: put.Points,
+            Signals: signals);
     }
 
-    private IReadOnlyList<OptionFlowPoint> BuildSide(IndexFlowState state, OptionRight right, long sessionStart, long sessionEnd)
+    /// <summary>
+    /// Detects the crossovers the dashboard's signal table reports: a fast/slow EMA cross on each
+    /// side independently, and the CE-vs-PE cross, for both CDV and OBV.
+    ///
+    /// The EMAs are taken over the RAW cumulative series rather than the smoothed line that gets
+    /// plotted - see OptionsFlowOptions.SignalFastEmaLength for why (an EMA of an EMA would report
+    /// every cross materially late).
+    /// </summary>
+    private IReadOnlyList<OptionFlowSignal> BuildSignals(SideSeries call, SideSeries put)
+    {
+        var signals = new List<OptionFlowSignal>(6);
+
+        AddEmaCross(signals, "CDV", "CE", call.Stamps, call.RawCdv);
+        AddEmaCross(signals, "CDV", "PE", put.Stamps, put.RawCdv);
+        AddEmaCross(signals, "OBV", "CE", call.Stamps, call.RawObv);
+        AddEmaCross(signals, "OBV", "PE", put.Stamps, put.RawObv);
+
+        AddSeriesCross(signals, "CDV", call, put, c => c.RawCdv);
+        AddSeriesCross(signals, "OBV", call, put, c => c.RawObv);
+
+        return signals;
+    }
+
+    private void AddEmaCross(List<OptionFlowSignal> signals, string metric, string scope,
+        IReadOnlyList<DateTimeOffset> stamps, IReadOnlyList<decimal> raw)
+    {
+        if (raw.Count == 0) return;
+
+        var fast = OptionFlowMath.Ema(raw, _options.SignalFastEmaLength);
+        var slow = OptionFlowMath.Ema(raw, _options.SignalSlowEmaLength);
+
+        var signal = DetectCross("EmaCross", metric, scope, stamps, fast, slow);
+        if (signal is not null) signals.Add(signal);
+    }
+
+    private static void AddSeriesCross(List<OptionFlowSignal> signals, string metric,
+        SideSeries call, SideSeries put, Func<SideSeries, IReadOnlyList<decimal>> select)
+    {
+        var callSeries = select(call);
+        var putSeries = select(put);
+
+        // The two sides can have different bar counts when one side's strikes have traded and the
+        // other's haven't. Comparing them index-by-index would then align different minutes against
+        // each other and invent crossings, so only the overlapping tail is compared.
+        var count = Math.Min(callSeries.Count, putSeries.Count);
+        if (count == 0) return;
+
+        var stamps = call.Stamps.Skip(call.Stamps.Count - count).ToArray();
+        var ce = callSeries.Skip(callSeries.Count - count).ToArray();
+        var pe = putSeries.Skip(putSeries.Count - count).ToArray();
+
+        var signal = DetectCross("CePeCross", metric, "CE/PE", stamps, ce, pe);
+        if (signal is not null) signals.Add(signal);
+    }
+
+    /// <summary>
+    /// Finds the most recent point at which <paramref name="fast"/> crossed <paramref name="slow"/>,
+    /// and reports the CURRENT standing of the two either way. A series that has never crossed
+    /// within the day still yields a signal with AtUtc null and BarsAgo -1, so the table can show
+    /// "CE above PE, no cross today" rather than an empty row.
+    /// </summary>
+    private static OptionFlowSignal? DetectCross(string kind, string metric, string scope,
+        IReadOnlyList<DateTimeOffset> stamps, IReadOnlyList<decimal> fast, IReadOnlyList<decimal> slow)
+    {
+        var count = Math.Min(Math.Min(fast.Count, slow.Count), stamps.Count);
+        if (count == 0) return null;
+
+        var last = count - 1;
+        var bullish = fast[last] >= slow[last];
+
+        for (var i = last; i > 0; i--)
+        {
+            var nowAbove = fast[i] >= slow[i];
+            var thenAbove = fast[i - 1] >= slow[i - 1];
+            if (nowAbove == thenAbove) continue;
+
+            return new OptionFlowSignal(kind, metric, scope, nowAbove, stamps[i], last - i, fast[last], slow[last]);
+        }
+
+        return new OptionFlowSignal(kind, metric, scope, bullish, null, -1, fast[last], slow[last]);
+    }
+
+    private SideSeries BuildSide(IndexFlowState state, OptionRight right, long sessionStart, long sessionEnd)
     {
         var contracts = state.Window.Where(c => c.Right == right).ToArray();
-        if (contracts.Length == 0) return Array.Empty<OptionFlowPoint>();
+        if (contracts.Length == 0) return SideSeries.Empty;
 
         // Every minute any tracked contract has a bar for, in order.
         var minutes = new SortedSet<long>();
@@ -348,7 +433,7 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
                 if (minute >= sessionStart && minute <= sessionEnd) minutes.Add(minute);
         }
 
-        if (minutes.Count == 0) return Array.Empty<OptionFlowPoint>();
+        if (minutes.Count == 0) return SideSeries.Empty;
 
         // Delta weight is a function of strike and the CURRENT spot, matching the reference script,
         // which recomputes it live rather than per historical bar.
@@ -396,7 +481,20 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
         for (var i = 0; i < stamps.Count; i++)
             points[i] = new OptionFlowPoint(stamps[i], cdv[i], obv[i]);
 
-        return points;
+        return new SideSeries(points, stamps, cdvRaw, obvRaw);
+    }
+
+    /// <summary>One side's computed series: the smoothed points that get plotted, alongside the raw
+    /// cumulative values the crossover signals are derived from - see BuildSignals.</summary>
+    private sealed record SideSeries(
+        IReadOnlyList<OptionFlowPoint> Points,
+        IReadOnlyList<DateTimeOffset> Stamps,
+        IReadOnlyList<decimal> RawCdv,
+        IReadOnlyList<decimal> RawObv)
+    {
+        public static readonly SideSeries Empty = new(
+            Array.Empty<OptionFlowPoint>(), Array.Empty<DateTimeOffset>(),
+            Array.Empty<decimal>(), Array.Empty<decimal>());
     }
 
     // ---- Helpers ---------------------------------------------------------------------------------

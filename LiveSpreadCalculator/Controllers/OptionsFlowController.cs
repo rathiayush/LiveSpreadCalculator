@@ -39,6 +39,10 @@ public sealed class OptionsFlowController : ControllerBase
         atmShiftIntervalMinutes = _options.AtmShiftIntervalMinutes,
         strikesBelowAtm = _options.StrikesBelowAtm,
         strikesAboveAtm = _options.StrikesAboveAtm,
+        // The signal table labels its EMA rows with these, so they come from the same config the
+        // engine computed the crossovers with rather than being hardcoded in the client.
+        signalFast = _options.SignalFastEmaLength,
+        signalSlow = _options.SignalSlowEmaLength,
     });
 
     /// <summary>Every tracked index's latest series.</summary>

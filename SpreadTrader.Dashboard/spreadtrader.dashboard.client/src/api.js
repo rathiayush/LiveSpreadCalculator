@@ -145,6 +145,13 @@ export const api = {
   getAllFutures: (exchange) =>
     authFetch(`/api/instruments/futures/all${exchange ? `?exchange=${encodeURIComponent(exchange)}` : ''}`).then(handle),
 
+  // Options Flow add-on (index-option CDV/OBV). status tells the dashboard whether the feature is
+  // enabled at all, so the nav entry can be hidden entirely when it isn't - see OptionsFlowController.
+  getOptionsFlowStatus: () => authFetch('/api/options-flow/status').then(handle),
+  // Every tracked index's latest CE/PE series, for seeding the page on load before the first
+  // SignalR push arrives.
+  getOptionsFlowSnapshots: () => authFetch('/api/options-flow/snapshot').then(handle),
+
   getAuthStatus: () => authFetch('/api/auth/status').then(handle),
   getLoginUrl: () => authFetch('/api/auth/login-url').then(handle),
   // Which broker this deployment is wired to (see Broker:Platform) and whether it has a browser

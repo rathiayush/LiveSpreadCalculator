@@ -30,6 +30,7 @@ import ConfiguredSpreadsPage from './pages/ConfiguredSpreadsPage'
 import TriggersPage from './pages/TriggersPage'
 import TriggerActivityPage from './pages/TriggerActivityPage'
 import PositionsPage from './pages/PositionsPage'
+import OptionsFlowPage from './pages/OptionsFlowPage'
 import BrokerPlatformPage from './pages/BrokerPlatformPage'
 import ProfileModal from './components/ProfileModal'
 
@@ -67,6 +68,7 @@ const NAV_ITEMS = [
   { key: '/triggers', label: 'Triggers', icon: <ThunderboltOutlined />, subtitle: 'Rules that fire baskets automatically' },
   { key: '/trigger-activity', label: 'Trigger Activity', icon: <HistoryOutlined />, subtitle: 'Live feed of trigger fires' },
   { key: '/positions', label: 'Positions & PNL', icon: <ScissorOutlined />, subtitle: 'Open positions, live PNL, and manual square-off' },
+  { key: '/options-flow', label: 'Options Flow', icon: <RiseOutlined />, subtitle: 'Index-option CE/PE volume delta and OBV, with crossover signals' },
   { key: '/symbols', label: 'Symbols', icon: <CloudSyncOutlined />, subtitle: 'Sync the F&O symbol list and build the tradeable universe', group: 'admin' },
   { key: '/configured-spreads', label: 'Configured Spreads', icon: <UnorderedListOutlined />, subtitle: 'Every spread definition currently streaming', group: 'admin' },
   // Broker Platform is deliberately NOT listed here. Each deployment is pinned to one broker
@@ -559,6 +561,10 @@ function AppShell({ mode, onToggleMode, userEmail, onLogout }) {
             <Route
               path="/trigger-activity"
               element={<TriggerActivityPage />}
+            />
+            <Route
+              path="/options-flow"
+              element={<OptionsFlowPage />}
             />
             <Route
               path="/positions"

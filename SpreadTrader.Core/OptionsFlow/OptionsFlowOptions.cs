@@ -66,6 +66,18 @@ public sealed class OptionsFlowOptions
     /// script's "CDV EMA Length".</summary>
     public int SmoothingLength { get; set; } = 9;
 
+    /// <summary>Fast and slow EMA lengths for the crossover signals shown in the dashboard's
+    /// signal table (9 and 21 by default, the conventional pair).
+    ///
+    /// These are applied to the RAW cumulative series, not to the already-smoothed line that gets
+    /// plotted. Running them over the plotted line would be an EMA of an EMA - with the default
+    /// SmoothingLength of 9 that roughly doubles the lag, so every cross would be reported
+    /// noticeably later than the same 9/21 pair on a normal chart. Plotting stays smoothed;
+    /// signals stay responsive.</summary>
+    public int SignalFastEmaLength { get; set; } = 9;
+
+    public int SignalSlowEmaLength { get; set; } = 21;
+
     /// <summary>Indian market open, IST. Every series starts here each day - both the historical
     /// backfill's fromDate and the point at which the previous day's data is dropped.</summary>
     public string SessionStartIst { get; set; } = "09:15";
