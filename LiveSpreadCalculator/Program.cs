@@ -262,6 +262,10 @@ if (optionsFlowOptions.Enabled)
         sp.GetRequiredService<IOptions<DhanOptions>>(),
         sp.GetRequiredService<IOptions<OptionsFlowOptions>>(),
         dhanScripMasterCachePath,
+        // Same registry DhanMarketFeedClient/DhanPositionsService already share - see
+        // DhanOptionsInstrumentSource's _segmentRegistry doc comment for why an option token
+        // cannot be subscribed at all without this.
+        sp.GetRequiredService<DhanSegmentRegistry>(),
         sp.GetRequiredService<ILogger<DhanOptionsInstrumentSource>>()));
 
     // Its own RateLimiter instance, constructed here rather than resolved: the broker gateways each
