@@ -248,6 +248,11 @@ public sealed class PositionsCache : BackgroundService
     {
         if (Interlocked.CompareExchange(ref _orderUpdatePending, 1, 0) == 0)
         {
+            // Says WHY the positions fetch that follows is happening. Without it those REST calls
+            // appear in the log with no explanation at all - which reads like a stray poll, when in
+            // fact this cache has no timer and only ever fetches in response to a broker event.
+            _logger.LogInformation("Broker reported an order change - refreshing positions.");
+
             try { _resyncSignal.Release(); }
             catch (SemaphoreFullException) { /* already armed - coalesced */ }
         }
