@@ -34,6 +34,8 @@ COPY ["LiveSpreadCalculator/LiveSpreadCalculator.csproj", "LiveSpreadCalculator/
 COPY ["SpreadTrader.Core/SpreadTrader.Core.csproj", "SpreadTrader.Core/"]
 COPY ["SpreadTrader.KiteIntegration/SpreadTrader.KiteIntegration.csproj", "SpreadTrader.KiteIntegration/"]
 COPY ["SpreadTrader.DhanIntegration/SpreadTrader.DhanIntegration.csproj", "SpreadTrader.DhanIntegration/"]
+COPY ["SpreadTrader.KotakIntegration/SpreadTrader.KotakIntegration.csproj", "SpreadTrader.KotakIntegration/"]
+COPY ["SpreadTrader.OptionsFlow/SpreadTrader.OptionsFlow.csproj", "SpreadTrader.OptionsFlow/"]
 COPY ["SpreadTrader.Engine/SpreadTrader.Engine.csproj", "SpreadTrader.Engine/"]
 RUN dotnet restore "./LiveSpreadCalculator/LiveSpreadCalculator.csproj"
 COPY . .
