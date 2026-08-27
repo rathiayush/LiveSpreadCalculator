@@ -93,4 +93,30 @@ public static class OptionFlowMath
 
         return result;
     }
+
+    /// <summary>
+    /// % change from <paramref name="lookback"/> bars ago to the latest value in
+    /// <paramref name="raw"/>, for the "N-bar % change" alert (the reference Pine scripts surface
+    /// this as a 5/10/15-bar readout on the raw cumulative CDV/OBV series).
+    ///
+    /// The denominator is ABS(base) rather than base itself, so a series that swings through zero
+    /// (a real possibility for CDV/OBV, unlike price) doesn't flip the sign of the result.
+    ///
+    /// Returns null - not a huge or infinite number - when there isn't enough history for the
+    /// requested lookback yet, or the base value is exactly zero: a % change from a zero baseline
+    /// is undefined, and reporting it as some enormous swing would be misleading rather than
+    /// informative.
+    /// </summary>
+    public static decimal? LookbackChangePercent(IReadOnlyList<decimal> raw, int lookback)
+    {
+        if (lookback <= 0 || raw.Count == 0) return null;
+
+        var last = raw.Count - 1;
+        if (last - lookback < 0) return null;
+
+        var baseValue = raw[last - lookback];
+        if (baseValue == 0) return null;
+
+        return (raw[last] - baseValue) / Math.Abs(baseValue) * 100m;
+    }
 }

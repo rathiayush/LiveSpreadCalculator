@@ -40,6 +40,10 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
     private readonly IBrokerInstrumentMaster _brokerInstruments;
     private readonly IMarketDataFeed _feed;
     private readonly ITickStore _tickStore;
+    /// <summary>Same Telegram-backed "send this text somewhere" abstraction PnlAlertHostedService
+    /// uses (see IPnlAlertNotifier's doc comment) - reused rather than inventing a second alert
+    /// channel, so an option-flow alert shows up exactly where a PNL alert already does.</summary>
+    private readonly IPnlAlertNotifier _notifier;
     private readonly ILogger<OptionsFlowEngine> _logger;
 
     private readonly ConcurrentDictionary<string, IndexFlowState> _states = new(StringComparer.OrdinalIgnoreCase);
@@ -56,6 +60,7 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
         IBrokerInstrumentMaster brokerInstruments,
         IMarketDataFeed feed,
         ITickStore tickStore,
+        IPnlAlertNotifier notifier,
         ILogger<OptionsFlowEngine> logger)
     {
         _options = options.Value;
@@ -64,6 +69,7 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
         _brokerInstruments = brokerInstruments;
         _feed = feed;
         _tickStore = tickStore;
+        _notifier = notifier;
         _logger = logger;
     }
 
@@ -107,12 +113,22 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
                 var state = _states.GetOrAdd(index, i => new IndexFlowState(i));
                 await EnsureWindowAsync(state, cancellationToken);
 
+                // Tracked independently of the option chain window below - the spot chart itself
+                // is what the "9/21 EMA crossover, not CDV/OBV" alert watches, so it needs to start
+                // accumulating the moment a spot tick is available, even before the strike window
+                // (and therefore the CE/PE series) has resolved.
+                UpdateSpotLiveBar(state);
+
                 if (state.Window.Count == 0) continue;
 
                 UpdateLiveBars(state);
 
                 var snapshot = BuildSnapshot(state);
-                if (snapshot is not null) snapshots[index] = snapshot;
+                if (snapshot is not null)
+                {
+                    snapshots[index] = snapshot;
+                    await DispatchAlertsAsync(state, snapshot, cancellationToken);
+                }
             }
             catch (Exception ex)
             {
@@ -302,6 +318,83 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
         }
     }
 
+    /// <summary>
+    /// Folds the index's current spot tick into its own open minute bar, exactly like
+    /// UpdateLiveBars does per option contract - just a single series instead of one per strike.
+    /// This is what AddSpotEmaCross's 9/21 EMA crossover is computed over.
+    ///
+    /// Unlike the option contracts, there is no backfill here (IOptionHistoryProvider serves option
+    /// contract history, not index history), so this series - and therefore the spot EMA crossover
+    /// alert - only ever covers "since the feature started accumulating", same degraded behaviour
+    /// the option series falls back to when backfill is unavailable. Volume is meaningless for an
+    /// index (nothing trades it directly) so it is always recorded as 0 - only Close is used.
+    /// </summary>
+    private static void UpdateSpotLiveBar(IndexFlowState state)
+    {
+        if (state.Spot <= 0) return;
+
+        var minute = FloorToMinute(DateTimeOffset.UtcNow);
+        var key = minute.ToUnixTimeSeconds();
+
+        var bar = state.SpotBars.TryGetValue(key, out var existing)
+            ? existing
+            : new OptionBar(minute, state.Spot, state.Spot, state.Spot, state.Spot, 0);
+
+        state.SpotBars[key] = bar with
+        {
+            High = Math.Max(bar.High, state.Spot),
+            Low = bar.Low <= 0 ? state.Spot : Math.Min(bar.Low, state.Spot),
+            Close = state.Spot,
+        };
+    }
+
+    /// <summary>
+    /// Sends a Telegram notification for every signal OptionsFlowAlertGate reports as newly
+    /// alert-worthy this cycle. One index's send failure (Telegram down, etc.) is logged and does
+    /// not stop the others - the gate has already recorded the signal as alerted either way, so a
+    /// failed send is dropped rather than retried next cycle (the same "log and move on" choice
+    /// PnlAlertHostedService makes for its own sends).
+    /// </summary>
+    private async Task DispatchAlertsAsync(IndexFlowState state, OptionsFlowSnapshot snapshot, CancellationToken cancellationToken)
+    {
+        var alerts = state.AlertGate.SelectNewAlerts(snapshot.Signals);
+
+        foreach (var signal in alerts)
+        {
+            try
+            {
+                await _notifier.SendAsync(FormatAlertText(state.Index, signal), cancellationToken);
+                _logger.LogInformation(
+                    "Options Flow: alert fired for {Index} - {Kind} {Metric} {Scope}.",
+                    state.Index, signal.Kind, signal.Metric, signal.Scope);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Options Flow: failed to send alert for {Index} - {Kind} {Metric} {Scope}.",
+                    state.Index, signal.Kind, signal.Metric, signal.Scope);
+            }
+        }
+    }
+
+    private string FormatAlertText(string index, OptionFlowSignal signal) => signal.Kind switch
+    {
+        "LookbackChange" =>
+            $"\U0001F4C8 <b>Options Flow - {index}</b>\n" +
+            $"{signal.Scope} {signal.Metric} moved {signal.ChangePercent:+0.#;-0.#}% over the last {signal.LookbackBars} bars.",
+
+        "CePeCross" =>
+            $"\U0001F501 <b>Options Flow - {index}</b>\n" +
+            $"{signal.Metric}: {(signal.Bullish ? "CE crossed above PE" : "PE crossed above CE")}.",
+
+        "PriceEmaCross" =>
+            $"\U0001F4C9 <b>Options Flow - {index}</b>\n" +
+            $"Spot chart EMA {_options.SignalFastEmaLength}/{_options.SignalSlowEmaLength} crossed " +
+            $"{(signal.Bullish ? "bullish (fast above slow)" : "bearish (fast below slow)")}.",
+
+        _ => $"Options Flow - {index}: {signal.Kind} {signal.Metric} {signal.Scope}.",
+    };
+
     // ---- Aggregation -----------------------------------------------------------------------------
 
     /// <summary>
@@ -321,7 +414,7 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
 
         if (call.Points.Count == 0 && put.Points.Count == 0) return null;
 
-        var signals = BuildSignals(call, put);
+        var signals = BuildSignals(state, call, put, sessionStart, sessionEnd);
 
         return new OptionsFlowSnapshot(
             Index: state.Index,
@@ -338,16 +431,21 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
     }
 
     /// <summary>
-    /// Detects the crossovers the dashboard's signal table reports: a fast/slow EMA cross on each
-    /// side independently, and the CE-vs-PE cross, for both CDV and OBV.
+    /// Builds every signal the dashboard's signal table reports, and that OptionsFlowAlertGate then
+    /// filters for alert-worthiness (see DispatchAlertsAsync):
+    ///  - a fast/slow EMA cross on each side's CDV/OBV independently (display-only - not alerted)
+    ///  - the CE-vs-PE cross on CDV and OBV ("CePeCross" - alerted)
+    ///  - the 5/10/15-bar % change on CDV/OBV past threshold ("LookbackChange" - alerted)
+    ///  - the 9/21 EMA crossover on the index's own spot PRICE chart ("PriceEmaCross" - alerted;
+    ///    deliberately NOT computed from CDV/OBV, see AddSpotEmaCross)
     ///
-    /// The EMAs are taken over the RAW cumulative series rather than the smoothed line that gets
-    /// plotted - see OptionsFlowOptions.SignalFastEmaLength for why (an EMA of an EMA would report
-    /// every cross materially late).
+    /// The EMAs on CDV/OBV are taken over the RAW cumulative series rather than the smoothed line
+    /// that gets plotted - see OptionsFlowOptions.SignalFastEmaLength for why (an EMA of an EMA
+    /// would report every cross materially late).
     /// </summary>
-    private IReadOnlyList<OptionFlowSignal> BuildSignals(SideSeries call, SideSeries put)
+    private IReadOnlyList<OptionFlowSignal> BuildSignals(IndexFlowState state, SideSeries call, SideSeries put, long sessionStart, long sessionEnd)
     {
-        var signals = new List<OptionFlowSignal>(6);
+        var signals = new List<OptionFlowSignal>(12);
 
         AddEmaCross(signals, "CDV", "CE", call.Stamps, call.RawCdv);
         AddEmaCross(signals, "CDV", "PE", put.Stamps, put.RawCdv);
@@ -357,7 +455,78 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
         AddSeriesCross(signals, "CDV", call, put, c => c.RawCdv);
         AddSeriesCross(signals, "OBV", call, put, c => c.RawObv);
 
+        AddLookbackAlerts(signals, "CDV", "CE", call.Stamps, call.RawCdv);
+        AddLookbackAlerts(signals, "CDV", "PE", put.Stamps, put.RawCdv);
+        AddLookbackAlerts(signals, "OBV", "CE", call.Stamps, call.RawObv);
+        AddLookbackAlerts(signals, "OBV", "PE", put.Stamps, put.RawObv);
+
+        AddSpotEmaCross(signals, state, sessionStart, sessionEnd);
+
         return signals;
+    }
+
+    /// <summary>
+    /// The "N-bar % change" alert: for each configured lookback (5/10/15 by default), how much the
+    /// raw cumulative CDV/OBV has moved since that many bars ago - see
+    /// OptionFlowMath.LookbackChangePercent. Every lookback that clears
+    /// OptionsFlowOptions.LookbackAlertThresholdPercent gets its own signal (a metric can be
+    /// simultaneously past the 5-bar AND 10-bar threshold, and both are reported).
+    /// </summary>
+    private void AddLookbackAlerts(List<OptionFlowSignal> signals, string metric, string scope,
+        IReadOnlyList<DateTimeOffset> stamps, IReadOnlyList<decimal> raw)
+    {
+        if (raw.Count == 0 || stamps.Count == 0) return;
+
+        var last = raw.Count - 1;
+
+        foreach (var lookback in _options.LookbackAlertBars)
+        {
+            var pct = OptionFlowMath.LookbackChangePercent(raw, lookback);
+            if (pct is not { } percent) continue;
+            if (Math.Abs(percent) < _options.LookbackAlertThresholdPercent) continue;
+
+            signals.Add(new OptionFlowSignal(
+                Kind: "LookbackChange",
+                Metric: metric,
+                Scope: scope,
+                Bullish: percent >= 0,
+                AtUtc: stamps[last],
+                BarsAgo: lookback,
+                Fast: raw[last],
+                Slow: raw[last - lookback],
+                LookbackBars: lookback,
+                ChangePercent: percent));
+        }
+    }
+
+    /// <summary>
+    /// The "9/21 EMA crossover, not CDV/OBV" alert: a plain fast/slow EMA cross computed on the
+    /// index's own spot PRICE series (see UpdateSpotLiveBar), independent of the option chain
+    /// entirely - deliberately reusing the same DetectCross machinery as the CDV/OBV signals, just
+    /// fed price instead of flow. One signal per index (Scope "Index" - there is only one spot
+    /// line, unlike CE/PE which are two).
+    /// </summary>
+    private void AddSpotEmaCross(List<OptionFlowSignal> signals, IndexFlowState state, long sessionStart, long sessionEnd)
+    {
+        if (state.SpotBars.Count == 0) return;
+
+        var stamps = new List<DateTimeOffset>(state.SpotBars.Count);
+        var closes = new List<decimal>(state.SpotBars.Count);
+
+        foreach (var (minute, bar) in state.SpotBars)
+        {
+            if (minute < sessionStart || minute > sessionEnd) continue;
+            stamps.Add(DateTimeOffset.FromUnixTimeSeconds(minute));
+            closes.Add(bar.Close);
+        }
+
+        if (closes.Count == 0) return;
+
+        var fast = OptionFlowMath.Ema(closes, _options.SignalFastEmaLength);
+        var slow = OptionFlowMath.Ema(closes, _options.SignalSlowEmaLength);
+
+        var signal = DetectCross("PriceEmaCross", "Price", "Index", stamps, fast, slow);
+        if (signal is not null) signals.Add(signal);
     }
 
     private void AddEmaCross(List<OptionFlowSignal> signals, string metric, string scope,
@@ -594,6 +763,15 @@ public sealed class OptionsFlowEngine : IExtraTickSubscriber
         public Dictionary<uint, SortedDictionary<long, OptionBar>> Bars { get; } = new();
 
         public Dictionary<uint, LiveBar> LiveBars { get; } = new();
+
+        /// <summary>The index's own spot price, one minute bar at a time - see UpdateSpotLiveBar
+        /// and AddSpotEmaCross. Kept separate from Bars (which is keyed by option contract token)
+        /// since the spot line is a single series, not one per strike.</summary>
+        public Dictionary<long, OptionBar> SpotBars { get; } = new();
+
+        /// <summary>Tracks which of this index's alert-worthy signals have already fired, so the
+        /// same crossing/threshold-breach never sends twice - see OptionsFlowAlertGate.</summary>
+        public OptionsFlowAlertGate AlertGate { get; } = new();
     }
 
     private sealed class LiveBar

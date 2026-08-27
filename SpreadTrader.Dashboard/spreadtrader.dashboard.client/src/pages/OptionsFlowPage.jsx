@@ -147,8 +147,11 @@ export default function OptionsFlowPage() {
 
   const signalRows = useMemo(() => {
     if (!snapshot?.signals) return []
+    // PriceEmaCross is computed on the spot chart, not CDV/OBV (see OptionsFlowEngine.AddSpotEmaCross)
+    // so it has no "metric" the CDV/OBV toggle above applies to - always show it, on either toggle,
+    // rather than have it disappear because its metric is "Price" and never matches the selection.
     return snapshot.signals
-      .filter((s) => s.metric === metric)
+      .filter((s) => s.metric === metric || s.kind === 'PriceEmaCross')
       .map((s, i) => ({ key: `${s.kind}-${s.scope}-${i}`, ...s }))
   }, [snapshot, metric])
 
@@ -156,19 +159,25 @@ export default function OptionsFlowPage() {
     {
       title: 'Signal',
       dataIndex: 'kind',
-      render: (kind, row) => (kind === 'CePeCross' ? 'CE / PE cross' : `${row.scope} EMA ${status?.signalFast ?? 9}/${status?.signalSlow ?? 21}`),
+      render: (kind, row) => {
+        if (kind === 'CePeCross') return 'CE / PE cross'
+        if (kind === 'LookbackChange') return `${row.scope} ${row.lookbackBars}-bar change`
+        if (kind === 'PriceEmaCross') return `Spot chart EMA ${status?.signalFast ?? 9}/${status?.signalSlow ?? 21}`
+        return `${row.scope} EMA ${status?.signalFast ?? 9}/${status?.signalSlow ?? 21}`
+      },
     },
     { title: 'On', dataIndex: 'scope' },
     {
       title: 'State',
       dataIndex: 'bullish',
-      render: (bullish, row) => (
-        <Tag color={bullish ? 'green' : 'red'}>
-          {row.kind === 'CePeCross'
-            ? (bullish ? 'CE above PE' : 'PE above CE')
-            : (bullish ? 'Bullish' : 'Bearish')}
-        </Tag>
-      ),
+      render: (bullish, row) => {
+        if (row.kind === 'CePeCross') return <Tag color={bullish ? 'green' : 'red'}>{bullish ? 'CE above PE' : 'PE above CE'}</Tag>
+        if (row.kind === 'LookbackChange') {
+          const pct = row.changePercent
+          return <Tag color={bullish ? 'green' : 'red'}>{pct >= 0 ? '+' : ''}{pct?.toFixed(0)}%</Tag>
+        }
+        return <Tag color={bullish ? 'green' : 'red'}>{bullish ? 'Bullish' : 'Bearish'}</Tag>
+      },
     },
     {
       title: 'Crossed',

@@ -72,8 +72,16 @@ public readonly record struct OptionFlowPoint(DateTimeOffset MinuteUtc, decimal 
 /// the two lines - is meaningful.</param>
 /// <param name="BarsAgo">How many bars back the cross was, so the table can show recency without
 /// the client doing time maths. -1 when there has been no cross.</param>
-/// <param name="Fast">Current value of the faster line (or the CE line).</param>
-/// <param name="Slow">Current value of the slower line (or the PE line).</param>
+/// <param name="Fast">Current value of the faster line (or the CE line). For a "LookbackChange"
+/// alert, the current cumulative value.</param>
+/// <param name="Slow">Current value of the slower line (or the PE line). For a "LookbackChange"
+/// alert, the value <paramref name="LookbackBars"/> bars ago that <paramref name="ChangePercent"/>
+/// was measured from.</param>
+/// <param name="LookbackBars">Only set for a "LookbackChange" alert: how many bars back the
+/// comparison base was taken from (5, 10, or 15 by default - see
+/// OptionsFlowOptions.LookbackAlertBars). 0 for every other Kind.</param>
+/// <param name="ChangePercent">Only set for a "LookbackChange" alert: the % change from
+/// <paramref name="LookbackBars"/> bars ago to now. Null for every other Kind.</param>
 public sealed record OptionFlowSignal(
     string Kind,
     string Metric,
@@ -82,7 +90,9 @@ public sealed record OptionFlowSignal(
     DateTimeOffset? AtUtc,
     int BarsAgo,
     decimal Fast,
-    decimal Slow);
+    decimal Slow,
+    int LookbackBars = 0,
+    decimal? ChangePercent = null);
 
 /// <summary>
 /// Everything the dashboard needs to draw one index's Options Flow chart, as of one moment.

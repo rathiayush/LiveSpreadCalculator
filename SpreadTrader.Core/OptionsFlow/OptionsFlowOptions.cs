@@ -95,4 +95,14 @@ public sealed class OptionsFlowOptions
     /// (POST /v2/charts/intraday); Kite's historical API is a paid add-on, so on Kite this
     /// degrades to accumulating from whenever the service started. See IOptionHistoryProvider.</summary>
     public bool BackfillFromSessionStart { get; set; } = true;
+
+    /// <summary>Bar-count lookbacks for the "N-bar % change" alert - fires whenever CDV or OBV
+    /// (CE or PE) has moved by at least <see cref="LookbackAlertThresholdPercent"/> over one of
+    /// these windows. 5/10/15 matches what the reference Pine scripts surface as readouts.</summary>
+    public int[] LookbackAlertBars { get; set; } = { 5, 10, 15 };
+
+    /// <summary>How large an absolute % change over one of <see cref="LookbackAlertBars"/> must be
+    /// before it is alert-worthy - 100 means "the metric has roughly doubled (or halved through
+    /// zero) within just a handful of bars", the headline case the feature was asked to catch.</summary>
+    public decimal LookbackAlertThresholdPercent { get; set; } = 100m;
 }
