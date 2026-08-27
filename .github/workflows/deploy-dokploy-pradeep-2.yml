@@ -38,6 +38,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Resolve lowercase image names
+        # ${{ github.repository }} keeps the repo's original casing
+        # ("rathiayush/LiveSpreadCalculator"), but a Docker image reference must be entirely
+        # lowercase - so `docker compose build` rejected the tag outright with "repository name
+        # must be lowercase" before any layer was built. Lowercasing here (rather than hardcoding
+        # the owner/repo) keeps the tag correct if the repository is ever renamed or forked.
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"
+          echo "API_IMAGE=ghcr.io/${repo}/api:pradeep-2" >> "$GITHUB_ENV"
+          echo "API_IMAGE_SHA=ghcr.io/${repo}/api:pradeep-2-${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:

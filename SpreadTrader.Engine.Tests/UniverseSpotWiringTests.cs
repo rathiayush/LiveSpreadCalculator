@@ -36,7 +36,11 @@ public class UniverseSpotWiringTests
             new NoPositionsService(), feed, new FakeTickStore(), master, NullLogger<PositionsCache>.Instance);
 
         var ingestion = new TickIngestionHostedService(
-            spreads, master, feed, new FakeTickStore(), positions, NullLogger<TickIngestionHostedService>.Instance);
+            spreads, master, feed, new FakeTickStore(), positions,
+            // No add-ons in this rig - see IExtraTickSubscriber. Reconciliation then keeps exactly
+            // the spread/position behaviour these tests assert on.
+            Array.Empty<IExtraTickSubscriber>(),
+            NullLogger<TickIngestionHostedService>.Instance);
 
         var builder = new UniverseBuilderService(
             master, spreads, ingestion, NullLogger<UniverseBuilderService>.Instance,

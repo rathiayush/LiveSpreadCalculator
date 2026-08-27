@@ -39,6 +39,7 @@
     <ProjectReference Include="..\SpreadTrader.DhanIntegration\SpreadTrader.DhanIntegration.csproj" />
     <ProjectReference Include="..\SpreadTrader.KotakIntegration\SpreadTrader.KotakIntegration.csproj" />
     <ProjectReference Include="..\SpreadTrader.Engine\SpreadTrader.Engine.csproj" />
+    <ProjectReference Include="..\SpreadTrader.OptionsFlow\SpreadTrader.OptionsFlow.csproj" />
   </ItemGroup>
 
   <!-- App_Data (users.csv, triggers.csv, etc.) defaults to a plain "None" item under the SDK's

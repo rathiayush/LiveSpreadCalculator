@@ -13,4 +13,10 @@ namespace SpreadTrader.Core.Brokers;
 public interface IBrokerSwitchNotifier
 {
     event Action<BrokerPlatform>? Changed;
+
+    /// <summary>The platform currently active. Exposed alongside the event so a consumer that only
+    /// needs to know "which broker is live right now" - rather than to react to a change - doesn't
+    /// have to subscribe and cache it itself. Used by the Options Flow add-on, which is
+    /// Dhan-specific and must stand down while another platform is active.</summary>
+    BrokerPlatform Current { get; }
 }

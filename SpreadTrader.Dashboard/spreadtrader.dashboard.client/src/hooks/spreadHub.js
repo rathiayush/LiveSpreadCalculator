@@ -58,6 +58,11 @@ let brokerAuthInvalidReason = null
 // effect can tell "restored again" apart from "still the same restore it already reacted to"
 // using nothing but a plain useEffect dependency check.
 let brokerAuthRestoredCount = 0
+// Latest Options Flow series per index, keyed by index name - see OptionsFlowEngine on the backend,
+// which recomputes and pushes one entry per tracked index roughly once a second. The whole series
+// is replaced on every push rather than appended to: an ATM shift rebuilds the entire day from the
+// session open, so there is no stable "just append the newest point" contract to rely on.
+let optionsFlowMap = {}
 
 const spreadsListeners = new Set()
 const rankingListeners = new Set()
@@ -67,6 +72,7 @@ const brokerAuthListeners = new Set()
 const brokerAuthRestoredListeners = new Set()
 const positionsListeners = new Set()
 const positionsErrorListeners = new Set()
+const optionsFlowListeners = new Set()
 
 function notify(listeners) {
   for (const listener of listeners) listener()
@@ -92,12 +98,14 @@ const subscribeBrokerAuth = subscribe(brokerAuthListeners)
 const subscribeBrokerAuthRestored = subscribe(brokerAuthRestoredListeners)
 const subscribePositions = subscribe(positionsListeners)
 const subscribePositionsError = subscribe(positionsErrorListeners)
+const subscribeOptionsFlow = subscribe(optionsFlowListeners)
 
 const getSpreadsSnapshot = () => spreadsMap
 const getRankingSnapshot = () => rankingList
 const getTriggersSnapshot = () => triggerEventsList
 const getConnectionSnapshot = () => connectionState
 const getBrokerAuthSnapshot = () => brokerAuthInvalidReason
+const getOptionsFlowSnapshot = () => optionsFlowMap
 const getBrokerAuthRestoredSnapshot = () => brokerAuthRestoredCount
 const getPositionsSnapshot = () => positionsList
 const getPositionsErrorSnapshot = () => positionsError
@@ -250,6 +258,16 @@ function ensureConnection() {
     positionsError = null
     notify(positionsListeners)
     notify(positionsErrorListeners)
+  })
+
+  // One index's whole CE/PE series per push, roughly once a second while the Options Flow add-on
+  // is enabled (see OptionsFlowEngine). Keyed by index rather than replacing the whole map, so
+  // NIFTY and BANKNIFTY arriving in separate pushes don't clobber each other. A new object is
+  // assigned each time because useSyncExternalStore compares snapshots by reference.
+  connection.on('optionsFlowUpdate', (snapshot) => {
+    if (!snapshot?.index) return
+    optionsFlowMap = { ...optionsFlowMap, [snapshot.index]: snapshot }
+    notify(optionsFlowListeners)
   })
 
   // Pushed the instant the broker's auth-failure handler sees a dead token on any real API call
@@ -452,4 +470,24 @@ export function joinPositionsView() {
 export function leavePositionsView() {
   positionsViewerWanted = false
   invokeIfConnected('LeavePositions')
+}
+
+// Latest Options Flow series keyed by index name. Only components that actually mount the Options
+// Flow page subscribe, so while you're anywhere else in the app these pushes cost a single object
+// write and cause no React work at all - the same reasoning as the other slices in this file.
+export function useOptionsFlow() {
+  return useSyncExternalStore(subscribeOptionsFlow, getOptionsFlowSnapshot)
+}
+
+// Seeds the store from the REST snapshot so the page has a chart immediately on load/refresh
+// instead of waiting up to a second for the next push - the same seed-then-stream pattern the
+// spreads and positions slices already use.
+export function seedOptionsFlow(snapshots) {
+  if (!Array.isArray(snapshots) || snapshots.length === 0) return
+  const next = { ...optionsFlowMap }
+  for (const snapshot of snapshots) {
+    if (snapshot?.index) next[snapshot.index] = snapshot
+  }
+  optionsFlowMap = next
+  notify(optionsFlowListeners)
 }
