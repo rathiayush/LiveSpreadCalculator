@@ -36,6 +36,17 @@ public sealed class DhanOptionsInstrumentSource : IOptionsInstrumentSource
     private readonly ILogger<DhanOptionsInstrumentSource> _logger;
     private readonly SemaphoreSlim _loadLock = new(1, 1);
 
+    /// <summary>Dhan's securityId is only unique WITHIN a segment (see the class doc comment on
+    /// DhanSegmentRegistry), so DhanMarketFeedClient cannot subscribe an option token unless
+    /// something has told it which segment that token lives in. The futures/spot instrument
+    /// master obviously has no entry for an option contract, so without this every option token
+    /// this source resolves would be silently dropped as "unknown segment" by the feed - the
+    /// option chain would load, EnsureLoadedAsync would report contracts, GetRequiredTokens would
+    /// ask for them, and not one tick would ever arrive. Same fix DhanPositionsService already
+    /// applies for a manually-placed option position; this is the same registry, just fed from
+    /// the chain instead of from positions.</summary>
+    private readonly DhanSegmentRegistry _segmentRegistry;
+
     /// <summary>Chain keyed by "UNDERLYING|yyyy-MM-dd", each list holding both rights across every
     /// strike for that expiry.</summary>
     private Dictionary<string, List<OptionContract>> _chains = new(StringComparer.OrdinalIgnoreCase);
@@ -47,12 +58,14 @@ public sealed class DhanOptionsInstrumentSource : IOptionsInstrumentSource
         IOptions<DhanOptions> options,
         IOptions<OptionsFlowOptions> flowOptions,
         string scripMasterCachePath,
+        DhanSegmentRegistry segmentRegistry,
         ILogger<DhanOptionsInstrumentSource> logger)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _flowOptions = flowOptions.Value;
         _scripMasterCachePath = scripMasterCachePath;
+        _segmentRegistry = segmentRegistry;
         _logger = logger;
     }
 
@@ -76,6 +89,13 @@ public sealed class DhanOptionsInstrumentSource : IOptionsInstrumentSource
 
             _chains = parsed;
             _loadedAt = DateTimeOffset.UtcNow;
+
+            // Every option token this source will ever ask the feed to subscribe needs its
+            // segment known BEFORE that subscribe call happens - see _segmentRegistry's doc
+            // comment. Registering here, once per load, covers every contract regardless of
+            // whether it came from disk or a fresh download.
+            foreach (var contract in _chains.Values.SelectMany(c => c))
+                _segmentRegistry.Remember(contract.InstrumentToken, contract.Segment);
 
             foreach (var (key, contracts) in _chains.OrderBy(c => c.Key, StringComparer.Ordinal))
                 _logger.LogInformation("Options Flow: loaded {Count} contracts for {Key}", contracts.Count, key);
