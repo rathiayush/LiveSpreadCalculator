@@ -23,9 +23,11 @@ namespace SpreadTrader.Engine.Services;
 ///    see SignedDelta.
 ///
 ///  - STRIKE RESOLUTION: Pine hand-builds an expiry code and 32 option tickers from scratch every
-///    bar. Here the ATM±N strike chain is resolved once (and re-centred hourly) against Dhan's own
-///    scrip master via DhanInstrumentMasterService.FindOption/GetNearestOptionExpiry - the real
-///    contract list, always the nearest expiry, never a maintained date table that goes stale.
+///    bar. Here the ATM±N strike chain is resolved once, then both the ATM strike AND the nearest
+///    listed expiry are re-checked every CdvOptions.AtmRecenterIntervalMinutes (default 30) against
+///    Dhan's own scrip master via DhanInstrumentMasterService.FindOption/GetNearestOptionExpiry -
+///    the real contract list, always the nearest expiry, never a maintained date table that goes
+///    stale, and never stuck on an expiry that has since rolled to the next week.
 ///
 ///  - LIVE VALUES COME ONLY FROM THE EXISTING WEBSOCKET FEED (IMarketDataFeed.TickReceived, the
 ///    same live "hook" TickIngestionHostedService already uses for every other instrument this app

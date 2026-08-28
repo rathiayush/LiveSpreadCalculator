@@ -57,17 +57,19 @@ public sealed class CdvOptions
     public int DisplayStrikeRange { get; set; } = 8;
 
     /// <summary>How many strikes either side of ATM are actually subscribed and accumulated -
-    /// deliberately wider than DisplayStrikeRange so an hourly ATM re-centre (see
+    /// deliberately wider than DisplayStrikeRange so a periodic ATM re-centre (see
     /// AtmRecenterIntervalMinutes) can usually just change which already-running strikes are
     /// summed, with full same-day bar history already in hand for the newly-displayed strikes -
     /// see CdvHostedService's class doc comment on "recompute the chart from history, don't reset
     /// it".</summary>
     public int SubscribeStrikeRange { get; set; } = 15;
 
-    /// <summary>How often the ATM strike is recomputed from the live spot price and the display
-    /// window re-centred on it. The Pine script's ATM is a fixed manual input for the whole
-    /// session; this app has no such input (spot is live), so instead of updating on every tick -
-    /// which would make "the chart" mean something different bar to bar - it is refreshed on this
-    /// fixed cadence, matching how an operator would occasionally nudge the Pine input by hand.</summary>
-    public int AtmRecenterIntervalMinutes { get; set; } = 60;
+    /// <summary>How often (in minutes) EnsureChainAsync re-checks the chain: recomputes the ATM
+    /// strike from the live spot price AND re-resolves the nearest listed option expiry (in case a
+    /// weekly expiry rolled to the next one since the last check), re-centring the display window
+    /// on both. The Pine script's ATM is a fixed manual input for the whole session; this app has
+    /// no such input (spot is live), so instead of updating on every tick - which would make "the
+    /// chart" mean something different bar to bar - it is refreshed on this fixed cadence, matching
+    /// how an operator would occasionally nudge the Pine input by hand. Default 30 minutes.</summary>
+    public int AtmRecenterIntervalMinutes { get; set; } = 30;
 }
