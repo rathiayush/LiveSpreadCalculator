@@ -72,6 +72,7 @@ public sealed class CdvHostedService : BackgroundService
     private readonly CdvTokenRegistry _tokenRegistry;
     private readonly IInstrumentSegmentRegistry _segmentRegistry;
     private readonly ISpotPriceBootstrap _spotBootstrap;
+    private readonly IHistoricalCandleSource _historicalCandles;
     private readonly CdvOptions _options;
     private readonly ILogger<CdvHostedService> _logger;
 
@@ -104,6 +105,7 @@ public sealed class CdvHostedService : BackgroundService
         CdvTokenRegistry tokenRegistry,
         IInstrumentSegmentRegistry segmentRegistry,
         ISpotPriceBootstrap spotBootstrap,
+        IHistoricalCandleSource historicalCandles,
         IOptions<CdvOptions> options,
         ILogger<CdvHostedService> logger)
     {
@@ -114,6 +116,7 @@ public sealed class CdvHostedService : BackgroundService
         _tokenRegistry = tokenRegistry;
         _segmentRegistry = segmentRegistry;
         _spotBootstrap = spotBootstrap;
+        _historicalCandles = historicalCandles;
         _options = options.Value;
         _logger = logger;
     }
@@ -350,7 +353,113 @@ public sealed class CdvHostedService : BackgroundService
         if (toSubscribe.Count > 0)
             await _marketDataFeed.SubscribeAsync(toSubscribe, stoppingToken);
 
+        if (freshDay && !state.PreviousDayBackfillAttempted)
+        {
+            state.PreviousDayBackfillAttempted = true; // once per day regardless of outcome - never retried mid-day
+            await BackfillPreviousDayAsync(state, underlying, todayIst, stoppingToken);
+        }
+
         return state;
+    }
+
+    /// <summary>Reconstructs the previous trading day's CE/PE CDV curve from Dhan's historical
+    /// intraday candles, using the SAME contracts (strike + this same near expiry) CDV is about to
+    /// track today - a deliberate simplification over re-resolving yesterday's own ATM/expiry from
+    /// scratch, since any contract with today's expiry (the nearest one >= today) was necessarily
+    /// already listed and tradeable yesterday too. Only covers the DISPLAY window (±DisplayStrikeRange),
+    /// not the wider subscribe range - matches what's actually shown, and keeps the number of REST
+    /// calls (one per contract, no batching on this Dhan endpoint) bounded.
+    ///
+    /// Historical candles carry no real trade-by-trade buy/sell tagging, so this falls back to the
+    /// Pine Script's OWN bar-proxy formula (close-in-range) for delta classification - the same
+    /// approximation Pine itself is built on, applied here only to a day that has already closed,
+    /// never to live data (see SignedDelta for the real tick-rule classification live ticks use).
+    /// Delta-weighting uses TODAY's spot/ATM as a fixed reference for the whole backfilled day, not a
+    /// per-minute historical spot series (not available) - another accepted approximation.</summary>
+    private async Task BackfillPreviousDayAsync(UnderlyingState state, string underlying, DateOnly todayIst, CancellationToken cancellationToken)
+    {
+        var previousDay = PreviousWeekday(todayIst);
+        var intervalMinutes = Math.Max(1, _options.TimeframeSeconds / 60);
+
+        var windowLo = state.Atm - _options.DisplayStrikeRange * state.StrikeStep;
+        var windowHi = state.Atm + _options.DisplayStrikeRange * state.StrikeStep;
+        var strikesToBackfill = state.Strikes.Values
+            .Where(s => s.Strike >= windowLo && s.Strike <= windowHi)
+            .ToArray();
+
+        if (strikesToBackfill.Length == 0) return;
+
+        decimal[]? ceSeries = null;
+        decimal[]? peSeries = null;
+        var fetchedCount = 0;
+
+        foreach (var s in strikesToBackfill)
+        {
+            IReadOnlyList<HistoricalCandle> candles;
+            try
+            {
+                // CDV only ever deals in NFO index options (see CdvOptions.Underlyings) - always the
+                // same Dhan segment, so this is a constant rather than something read off the
+                // resolved contract (StrikeRuntime doesn't carry it - only the token is needed for
+                // the live feed, which resolves segment via IInstrumentSegmentRegistry instead).
+                candles = await _historicalCandles.GetIntradayCandlesAsync(s.Token, "NSE_FNO", previousDay, intervalMinutes, cancellationToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogDebug(ex, "CDV backfill: request threw for {Underlying} strike {Strike}{Right} on {Day}", underlying, s.Strike, s.IsCall ? "CE" : "PE", previousDay);
+                continue;
+            }
+
+            if (candles.Count == 0) continue;
+            fetchedCount++;
+
+            var weight = _options.UseDeltaWeighting ? (decimal)DeltaWeight(s.Strike, s.IsCall, state.LastSpot) : 1m;
+            var series = s.IsCall ? (ceSeries ??= new decimal[candles.Count]) : (peSeries ??= new decimal[candles.Count]);
+            if (series.Length < candles.Count)
+            {
+                // A different contract returned more candles than the first one did (shouldn't
+                // normally happen - same session, same day) - grow rather than drop data.
+                var grown = new decimal[candles.Count];
+                Array.Copy(series, grown, series.Length);
+                series = grown;
+                if (s.IsCall) ceSeries = grown; else peSeries = grown;
+            }
+
+            var running = 0m;
+            for (var i = 0; i < candles.Count; i++)
+            {
+                running += BarProxyDelta(candles[i]) * weight;
+                series[i] += running;
+            }
+        }
+
+        if (ceSeries is not null) state.PreviousDayCe.AddRange(ceSeries);
+        if (peSeries is not null) state.PreviousDayPe.AddRange(peSeries);
+
+        _logger.LogInformation(
+            "CDV: backfilled {Underlying} previous day ({Day}) from {Fetched}/{Total} contracts - {CeBars} CE bars, {PeBars} PE bars.",
+            underlying, previousDay, fetchedCount, strikesToBackfill.Length, state.PreviousDayCe.Count, state.PreviousDayPe.Count);
+    }
+
+    /// <summary>Pine's f_bar_delta_with_delta/f_bar_delta_standard, applied to a historical candle
+    /// instead of a live bar - the only buy/sell classification possible from OHLCV data alone, no
+    /// different from what Pine itself is limited to.</summary>
+    private static decimal BarProxyDelta(HistoricalCandle candle)
+    {
+        var hl = candle.High - candle.Low;
+        if (hl <= 0.0001m) return 0m;
+
+        var buyVol = (candle.Close - candle.Low) / hl * candle.Volume;
+        var sellVol = (candle.High - candle.Close) / hl * candle.Volume;
+        return buyVol - sellVol;
+    }
+
+    private static DateOnly PreviousWeekday(DateOnly day)
+    {
+        var previous = day.AddDays(-1);
+        while (previous.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+            previous = previous.AddDays(-1);
+        return previous;
     }
 
     private static decimal SpotPrice(Tick tick) =>
@@ -489,12 +598,18 @@ public sealed class CdvHostedService : BackgroundService
                     pe is { } p && Math.Abs(p) >= _options.LookbackPctThreshold);
             }).ToArray();
 
+            decimal? cePrevDayClose = state.PreviousDayCe.Count > 0 ? state.PreviousDayCe[^1] : null;
+            decimal? pePrevDayClose = state.PreviousDayPe.Count > 0 ? state.PreviousDayPe[^1] : null;
+            decimal? ceDayChangePct = cePrevDayClose is { } cpd && Math.Abs(cpd) > 0 ? (ceEma - cpd) / Math.Abs(cpd) * 100m : null;
+            decimal? peDayChangePct = pePrevDayClose is { } ppd && Math.Abs(ppd) > 0 ? (peEma - ppd) / Math.Abs(ppd) * 100m : null;
+
             var snapshot = new CdvSnapshot(
                 state.Underlying, nowUtc, state.Atm, state.StrikeStep, state.Expiry, state.LastSpot,
                 ceSeries[lastIndex], peSeries[lastIndex], ceEma, peEma, barCount,
                 ceLbPct, peLbPct, ceLbHit, peLbHit,
                 state.CeFrozenValue, state.PeFrozenValue, ceFrozenPct, peFrozenPct, ceFcHit, peFcHit,
-                multiLookback, crossUp, crossDown);
+                multiLookback, crossUp, crossDown,
+                cePrevDayClose, pePrevDayClose, ceDayChangePct, peDayChangePct);
 
             _ = _publisher.PublishAsync(snapshot, CancellationToken.None);
         }
@@ -566,6 +681,15 @@ public sealed class CdvHostedService : BackgroundService
         public decimal? CeFrozenValue;
         public decimal? PeFrozenValue;
         public bool FrozenCaptured;
+
+        // Previous trading day's reconstructed CDV curve (see BackfillPreviousDayAsync) - built once
+        // per trading day, from Dhan's historical intraday candles via Pine's own bar-proxy formula
+        // (historical candles carry no real buy/sell tagging, the same limitation Pine has). Empty
+        // until the backfill completes; PreviousDayBackfillAttempted guards against retrying it every
+        // cycle regardless of outcome.
+        public readonly List<decimal> PreviousDayCe = new();
+        public readonly List<decimal> PreviousDayPe = new();
+        public bool PreviousDayBackfillAttempted;
     }
 
     private sealed class StrikeRuntime(uint token, int strike, bool isCall)

@@ -209,6 +209,37 @@ export default function CdvPage() {
             )}
           </Card>
         </Col>
+        <Col xs={24}>
+          <Card size="small" title="Day vs Current (previous trading day close, reconstructed from historical candles)">
+            {snapshot?.cePreviousDayClose == null && snapshot?.pePreviousDayClose == null ? (
+              <Typography.Text type="secondary">Previous-day backfill not available yet (runs once per underlying at the start of each trading day).</Typography.Text>
+            ) : (
+              <Table
+                size="small"
+                pagination={false}
+                columns={[
+                  { title: '', dataIndex: 'label', key: 'label' },
+                  {
+                    title: 'CE',
+                    dataIndex: 'ce',
+                    key: 'ce',
+                    render: (v, row) => <span style={{ color: pctColor(v) }}>{row.format(v)}</span>,
+                  },
+                  {
+                    title: 'PE',
+                    dataIndex: 'pe',
+                    key: 'pe',
+                    render: (v, row) => <span style={{ color: pctColor(v) }}>{row.format(v)}</span>,
+                  },
+                ]}
+                dataSource={[
+                  { key: 'prevClose', label: 'Prev day close', ce: snapshot.cePreviousDayClose, pe: snapshot.pePreviousDayClose, format: fmtNum },
+                  { key: 'dayChange', label: '% change vs prev day', ce: snapshot.ceDayChangePercent, pe: snapshot.peDayChangePercent, format: fmtPct },
+                ]}
+              />
+            )}
+          </Card>
+        </Col>
       </Row>
     </Space>
   )

@@ -66,4 +66,15 @@ public sealed record CdvSnapshot(
     /// <summary>True on the bar CeEma crosses above/below PeEma - mirrors Pine's crossUp/crossDown
     /// (ta.crossover/ta.crossunder on ceActive vs peActive).</summary>
     bool CrossUp,
-    bool CrossDown);
+    bool CrossDown,
+    /// <summary>The previous trading day's closing (last-bar) CDV value, reconstructed from Dhan's
+    /// historical intraday candles via Pine's own bar-proxy formula - see CdvHostedService.
+    /// BackfillPreviousDayAsync. Null until that backfill completes (or if it found no data - a
+    /// market holiday, for instance). Mirrors Pine's cePrevDayClose/pePrevDayClose.</summary>
+    decimal? CePreviousDayClose,
+    decimal? PePreviousDayClose,
+    /// <summary>Today's CeEma/PeEma vs CePreviousDayClose/PePreviousDayClose - mirrors Pine's
+    /// ceDayChangePct/peDayChangePct in the "Day vs Current" table. Null whenever the corresponding
+    /// PreviousDayClose is null.</summary>
+    decimal? CeDayChangePercent,
+    decimal? PeDayChangePercent);

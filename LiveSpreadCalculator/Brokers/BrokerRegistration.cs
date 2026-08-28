@@ -253,6 +253,11 @@ public static class BrokerRegistration
         // feed has ticked yet.
         services.AddSingleton<ISpotPriceBootstrap, DhanQuoteService>();
 
+        // CdvHostedService's previous-trading-day CDV backfill (see IHistoricalCandleSource's doc
+        // comment) - reconstructs yesterday's curve from Dhan's intraday candles once per underlying
+        // per day, never polled continuously.
+        services.AddSingleton<IHistoricalCandleSource, DhanHistoricalDataService>();
+
         services.AddSingleton(sp => new DhanOrderGateway(
             sp.GetRequiredService<DhanApiClient>(),
             sp.GetRequiredService<DhanInstrumentMasterService>(),
