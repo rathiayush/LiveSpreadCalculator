@@ -91,6 +91,11 @@ public sealed class CdvHostedService : BackgroundService
     // concurrent with the timer loop, so this has to be thread-safe, unlike the two fields above.
     private readonly ConcurrentDictionary<uint, TokenTarget> _tokenIndex = new();
 
+    // Logged-once guard for the segment-mismatch warning in OnTick, also read/written from the
+    // feed's receive-loop thread - a plain HashSet isn't safe there, so this reuses the same
+    // ConcurrentDictionary-as-a-set trick as _tokenIndex.
+    private readonly ConcurrentDictionary<uint, byte> _warnedCollisions = new();
+
     public CdvHostedService(
         IOptionChainSource instrumentMaster,
         IMarketDataFeed marketDataFeed,
@@ -241,8 +246,15 @@ public sealed class CdvHostedService : BackgroundService
             return null;
         }
 
+        // Same collision risk as OnTick (see Tick.Segment's doc comment) - the shared ITickStore is
+        // keyed by bare token too, so a tick for a completely different Dhan instrument that happens
+        // to share this token's numeric id in another segment could otherwise be read as this
+        // underlying's spot price.
+        var validSpotTick = _tickStore.TryGet(spot.InstrumentToken, out var spotTick) &&
+            (spotTick.Segment is null || string.Equals(spotTick.Segment, spot.Exchange, StringComparison.OrdinalIgnoreCase));
+
         decimal spotPrice;
-        if (_tickStore.TryGet(spot.InstrumentToken, out var spotTick) && SpotPrice(spotTick) > 0)
+        if (validSpotTick && SpotPrice(spotTick) > 0)
         {
             spotPrice = SpotPrice(spotTick);
         }
@@ -298,7 +310,7 @@ public sealed class CdvHostedService : BackgroundService
         state.SpotToken = spot.InstrumentToken;
         lock (state) state.LastSpot = spotPrice; // OnTick's spot-tick branch also writes this under lock(state)
         state.LastAtmRecenterUtc = nowUtc;
-        _tokenIndex[spot.InstrumentToken] = new TokenTarget(state, null);
+        _tokenIndex[spot.InstrumentToken] = new TokenTarget(state, null, spot.Exchange);
 
         var toSubscribe = new List<uint> { spot.InstrumentToken };
         var barCount = state.Strikes.Values.Select(s => s.BarValues.Count).DefaultIfEmpty(0).Max();
@@ -330,7 +342,7 @@ public sealed class CdvHostedService : BackgroundService
                 for (var b = 0; b < barCount; b++) runtime.BarValues.Add(0m);
 
                 state.Strikes[key] = runtime;
-                _tokenIndex[contract.InstrumentToken] = new TokenTarget(state, runtime);
+                _tokenIndex[contract.InstrumentToken] = new TokenTarget(state, runtime, contract.Exchange);
                 toSubscribe.Add(contract.InstrumentToken);
             }
         }
@@ -347,6 +359,24 @@ public sealed class CdvHostedService : BackgroundService
     private void OnTick(Tick tick)
     {
         if (!_tokenIndex.TryGetValue(tick.InstrumentToken, out var target)) return;
+
+        // CRITICAL: Dhan's securityId is only unique WITHIN a segment (confirmed against a real
+        // scrip master download: securityId 13 is simultaneously ABB India's equity AND the NIFTY
+        // 50 index, in different segments) - InstrumentToken alone is not enough to know this tick
+        // actually belongs to the instrument this token was registered for. tick.Segment is null on
+        // feeds that don't need this distinction (Kite's token IS globally unique) - only reject
+        // when it's actually populated and disagrees.
+        if (tick.Segment is not null && !string.Equals(tick.Segment, target.ExpectedExchange, StringComparison.OrdinalIgnoreCase))
+        {
+            if (_warnedCollisions.TryAdd(tick.InstrumentToken, 0))
+            {
+                _logger.LogWarning(
+                    "CDV: ignoring a tick for token {Token} whose segment ({ActualSegment}) doesn't match what CDV resolved it as ({ExpectedSegment}) - " +
+                    "this token means a different instrument in another Dhan segment.",
+                    tick.InstrumentToken, tick.Segment, target.ExpectedExchange);
+            }
+            return;
+        }
 
         if (target.Strike is not { } strike)
         {
@@ -547,5 +577,9 @@ public sealed class CdvHostedService : BackgroundService
         public readonly List<decimal> BarValues = new();
     }
 
-    private sealed record TokenTarget(UnderlyingState State, StrikeRuntime? Strike);
+    /// <summary>ExpectedExchange is the canonical exchange (BrokerInstrument.Exchange - "IDX",
+    /// "NFO", ...) this token was resolved under, checked against Tick.Segment in OnTick before the
+    /// tick is trusted - see Tick.Segment's doc comment for why a bare token isn't safe to trust on
+    /// its own on Dhan.</summary>
+    private sealed record TokenTarget(UnderlyingState State, StrikeRuntime? Strike, string ExpectedExchange);
 }

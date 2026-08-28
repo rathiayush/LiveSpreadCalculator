@@ -665,7 +665,11 @@ public sealed class DhanMarketFeedClient : IMarketDataFeed
             // Depth only ever arrives on Full and Depth packets; carry the previous values forward
             // on every other kind rather than resetting to zero.
             BestBidPrice: packet.BestBidPrice > 0 ? packet.BestBidPrice : previous.BestBidPrice,
-            BestAskPrice: packet.BestAskPrice > 0 ? packet.BestAskPrice : previous.BestAskPrice);
+            BestAskPrice: packet.BestAskPrice > 0 ? packet.BestAskPrice : previous.BestAskPrice,
+            // See Tick.Segment's doc comment - Dhan's securityId is only unique within this segment,
+            // so a consumer that cares needs this to defend against a numeric collision with a
+            // completely different instrument in another segment.
+            Segment: DhanSymbology.FeedSegmentToExchange(packet.ExchangeSegment));
     }
 
     private void LogDisconnect(int code) =>
