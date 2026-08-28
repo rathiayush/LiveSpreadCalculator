@@ -67,7 +67,6 @@ public sealed class CdvHostedService : BackgroundService
 
     private readonly IOptionChainSource _instrumentMaster;
     private readonly IMarketDataFeed _marketDataFeed;
-    private readonly ITickStore _tickStore;
     private readonly ICdvPublisher _publisher;
     private readonly CdvTokenRegistry _tokenRegistry;
     private readonly IInstrumentSegmentRegistry _segmentRegistry;
@@ -100,7 +99,6 @@ public sealed class CdvHostedService : BackgroundService
     public CdvHostedService(
         IOptionChainSource instrumentMaster,
         IMarketDataFeed marketDataFeed,
-        ITickStore tickStore,
         ICdvPublisher publisher,
         CdvTokenRegistry tokenRegistry,
         IInstrumentSegmentRegistry segmentRegistry,
@@ -111,7 +109,6 @@ public sealed class CdvHostedService : BackgroundService
     {
         _instrumentMaster = instrumentMaster;
         _marketDataFeed = marketDataFeed;
-        _tickStore = tickStore;
         _publisher = publisher;
         _tokenRegistry = tokenRegistry;
         _segmentRegistry = segmentRegistry;
@@ -249,29 +246,52 @@ public sealed class CdvHostedService : BackgroundService
             return null;
         }
 
-        // Same collision risk as OnTick (see Tick.Segment's doc comment) - the shared ITickStore is
-        // keyed by bare token too, so a tick for a completely different Dhan instrument that happens
-        // to share this token's numeric id in another segment could otherwise be read as this
-        // underlying's spot price.
-        var validSpotTick = _tickStore.TryGet(spot.InstrumentToken, out var spotTick) &&
-            (spotTick.Segment is null || string.Equals(spotTick.Segment, spot.Exchange, StringComparison.OrdinalIgnoreCase));
+        var freshDay = isNewDay || state is null || state.Expiry != expiry.Value;
+        if (freshDay)
+        {
+            // New trading day (or the nearest expiry just rolled) - the whole per-strike history is
+            // no longer meaningful (yesterday's flow, or a different contract's), so start clean.
+            foreach (var token in state?.Strikes.Values.Select(s => s.Token) ?? Enumerable.Empty<uint>())
+                _tokenIndex.TryRemove(token, out _);
+            if (state is not null) _tokenIndex.TryRemove(state.SpotToken, out _);
+
+            state = new UnderlyingState(underlying, strikeStep, expiry.Value, todayIst);
+        }
+
+        // state! is non-null from here on: freshDay's own definition ("... || state is null || ...")
+        // guarantees it, and this dereference updates the compiler's null-state for state for the
+        // rest of the method, same as the rest of this file's "state!.X" -> plain "state.Y" pattern.
+        state!.SpotToken = spot.InstrumentToken;
+        // Registered EARLY - before we even know whether spot has ticked yet - specifically so
+        // OnTick (which filters by segment; see Tick.Segment's doc comment) can start reliably
+        // capturing this underlying's own spot price the instant a genuine tick arrives, instead of
+        // CDV being stuck reading the SHARED ITickStore slot for this token, which a completely
+        // different, more active Dhan instrument sharing the same numeric id in another segment
+        // (confirmed: securityId 13 is both ABB's equity and the NIFTY 50 index) can starve
+        // indefinitely - registering late here was exactly what left CDV with no valid tick to read
+        // at all once the segment-mismatch defense started correctly rejecting the shared slot's
+        // wrong-instrument data.
+        _tokenIndex[spot.InstrumentToken] = new TokenTarget(state, null, spot.Exchange);
+        await _marketDataFeed.SubscribeAsync(new[] { spot.InstrumentToken }, stoppingToken);
 
         decimal spotPrice;
-        if (validSpotTick && SpotPrice(spotTick) > 0)
+        if (state.LastSpot > 0)
         {
-            spotPrice = SpotPrice(spotTick);
+            // Populated by OnTick's own segment-filtered capture (see above) - this is now the ONLY
+            // path that reads a live tick for spot; the shared, collision-prone ITickStore is no
+            // longer consulted here at all.
+            spotPrice = state.LastSpot;
         }
         else
         {
-            // Spot hasn't ticked yet this process lifetime - subscribe it now (harmless if already
-            // subscribed). This used to just return and wait for next cycle's live tick; now it
-            // also tries a ONE-TIME REST bootstrap (see ISpotPriceBootstrap) so ATM resolution isn't
-            // blocked for however long the live feed takes to start streaming this instrument -
-            // every price after this single call still comes from the live feed exactly as before.
+            // Spot hasn't ticked yet this process lifetime. This used to just return and wait for
+            // next cycle's live tick; now it also tries a ONE-TIME REST bootstrap (see
+            // ISpotPriceBootstrap) so ATM resolution isn't blocked for however long the live feed
+            // takes to start streaming this instrument - every price after this single call still
+            // comes from the live feed exactly as before.
             _logger.LogWarning(
-                "CDV: {Underlying} spot (token {Token}) has not ticked yet - (re)subscribing.",
+                "CDV: {Underlying} spot (token {Token}) has not ticked yet - trying a one-time REST bootstrap.",
                 underlying, spot.InstrumentToken);
-            await _marketDataFeed.SubscribeAsync(new[] { spot.InstrumentToken }, stoppingToken);
 
             decimal? bootstrapPrice = null;
             if (!_bootstrapAttemptedDay.TryGetValue(underlying, out var attemptedDay) || attemptedDay != todayIst)
@@ -286,36 +306,19 @@ public sealed class CdvHostedService : BackgroundService
                     _logger.LogInformation(
                         "CDV: bootstrapped {Underlying} spot via REST LTP ({Price}) while waiting for the live feed to start ticking.",
                         underlying, bootstrapPrice);
+                    lock (state) state.LastSpot = bootstrapPrice.Value;
                 }
             }
 
             if (bootstrapPrice is not > 0) return state; // still nothing to work with - retry next cycle
             spotPrice = bootstrapPrice.Value;
         }
+
         var atm = (int)(Math.Round(spotPrice / strikeStep, MidpointRounding.AwayFromZero) * strikeStep);
-
-        var freshDay = isNewDay || state is null || state.Expiry != expiry.Value;
-        if (freshDay)
-        {
-            // New trading day (or the nearest expiry just rolled) - the whole per-strike history is
-            // no longer meaningful (yesterday's flow, or a different contract's), so start clean.
-            foreach (var token in state?.Strikes.Values.Select(s => s.Token) ?? Enumerable.Empty<uint>())
-                _tokenIndex.TryRemove(token, out _);
-            if (state is not null) _tokenIndex.TryRemove(state.SpotToken, out _);
-
-            state = new UnderlyingState(underlying, strikeStep, expiry.Value, todayIst);
-        }
-
-        // freshDay is false here only when state was already non-null going in (freshDay's own
-        // definition includes "state is null"), so this is always non-null - the compiler just
-        // can't follow that cross-variable proof through the `if` above.
-        state!.Atm = atm;
-        state.SpotToken = spot.InstrumentToken;
-        lock (state) state.LastSpot = spotPrice; // OnTick's spot-tick branch also writes this under lock(state)
+        state.Atm = atm;
         state.LastAtmRecenterUtc = nowUtc;
-        _tokenIndex[spot.InstrumentToken] = new TokenTarget(state, null, spot.Exchange);
 
-        var toSubscribe = new List<uint> { spot.InstrumentToken };
+        var toSubscribe = new List<uint>();
         var barCount = state.Strikes.Values.Select(s => s.BarValues.Count).DefaultIfEmpty(0).Max();
 
         for (var i = -_options.SubscribeStrikeRange; i <= _options.SubscribeStrikeRange; i++)
