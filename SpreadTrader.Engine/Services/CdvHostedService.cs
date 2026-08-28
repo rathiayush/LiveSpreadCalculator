@@ -112,6 +112,24 @@ public sealed class CdvHostedService : BackgroundService
             return;
         }
 
+        // Explicit, unconditional confirmation that this service is actually running and what it
+        // thinks it's configured to do - deliberately Information (not just the failure-path
+        // warnings below), so "is CdvHostedService even executing" is answerable from a single grep
+        // instead of inferring it from the absence of later log lines. An empty Underlyings list
+        // here (misconfigured Cdv:Underlyings, or a config-binding problem) is the single most
+        // likely reason EnsureChainAsync would never be called at all - this line makes that
+        // impossible to miss.
+        _logger.LogInformation(
+            "CDV feed starting: underlyings=[{Underlyings}], bar size={TimeframeSeconds}s, " +
+            "re-centre every={AtmRecenterIntervalMinutes}min, smoothLen={SmoothLen}, lookbackBars={LookbackBars}.",
+            string.Join(", ", _options.Underlyings), _options.TimeframeSeconds,
+            _options.AtmRecenterIntervalMinutes, _options.SmoothLen, _options.LookbackBars);
+
+        if (_options.Underlyings.Count == 0)
+        {
+            _logger.LogWarning("Cdv:Underlyings is empty - CDV will run its timer loop but never resolve or publish anything for any underlying.");
+        }
+
         if (_options.TimeframeSeconds < 5)
         {
             _logger.LogWarning("Cdv:TimeframeSeconds ({Value}) is too low - clamping to 5s.", _options.TimeframeSeconds);
@@ -120,7 +138,20 @@ public sealed class CdvHostedService : BackgroundService
         _marketDataFeed.TickReceived += OnTick;
         try
         {
-            await _instrumentMaster.EnsureLoadedAsync(stoppingToken);
+            try
+            {
+                await _instrumentMaster.EnsureLoadedAsync(stoppingToken);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // An unhandled exception here would otherwise propagate out of ExecuteAsync - and a
+                // BackgroundService's default BackgroundServiceExceptionBehavior is Ignore, so the
+                // host would silently let this entire hosted service die with NOTHING further ever
+                // logged again, forever, rather than crashing loudly. Log it explicitly and give up
+                // for this run rather than let that happen invisibly.
+                _logger.LogError(ex, "CDV feed could not load the instrument master and will not start this run.");
+                return;
+            }
 
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(Math.Max(5, _options.TimeframeSeconds)));
             do
@@ -204,7 +235,12 @@ public sealed class CdvHostedService : BackgroundService
         if (!_tickStore.TryGet(spot.InstrumentToken, out var spotTick) || SpotPrice(spotTick) <= 0)
         {
             // Spot hasn't ticked yet this process lifetime - subscribe it now (harmless if already
-            // subscribed) and try again next cycle once a tick has actually arrived.
+            // subscribed) and try again next cycle once a tick has actually arrived. This used to be
+            // silent, which made it indistinguishable from every other "still resolving" state from
+            // the logs alone - now explicit every cycle it's hit, same as the two checks above.
+            _logger.LogWarning(
+                "CDV: {Underlying} spot (token {Token}) has not ticked yet - (re)subscribing and retrying next cycle.",
+                underlying, spot.InstrumentToken);
             await _marketDataFeed.SubscribeAsync(new[] { spot.InstrumentToken }, stoppingToken);
             return state;
         }
