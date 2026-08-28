@@ -96,6 +96,10 @@ public sealed class CdvHostedService : BackgroundService
     // ConcurrentDictionary-as-a-set trick as _tokenIndex.
     private readonly ConcurrentDictionary<uint, byte> _warnedCollisions = new();
 
+    // Logged-once guard for the "first accepted spot tick" confirmation in OnTick - same
+    // ConcurrentDictionary-as-a-set pattern, same cross-thread reason.
+    private readonly ConcurrentDictionary<uint, byte> _loggedFirstSpotTick = new();
+
     public CdvHostedService(
         IOptionChainSource instrumentMaster,
         IMarketDataFeed marketDataFeed,
@@ -494,7 +498,19 @@ public sealed class CdvHostedService : BackgroundService
         {
             // Spot tick - just keep the last known price fresh for delta-weighting; ATM itself is
             // only recomputed on the fixed re-centre cadence (see EnsureChainAsync).
-            lock (target.State) target.State.LastSpot = SpotPrice(tick);
+            var price = SpotPrice(tick);
+            lock (target.State) target.State.LastSpot = price;
+
+            // Logged once per token, the FIRST time a spot tick actually validates - the missing
+            // half of the picture the collision-rejection warning alone can't give: without this,
+            // "no accepted tick ever arrived" and "a tick arrived but something else broke" are
+            // indistinguishable from the logs.
+            if (price > 0 && _loggedFirstSpotTick.TryAdd(tick.InstrumentToken, 0))
+            {
+                _logger.LogInformation(
+                    "CDV: first accepted spot tick for token {Token} - segment={Segment}, price={Price}.",
+                    tick.InstrumentToken, tick.Segment ?? "(none)", price);
+            }
             return;
         }
 
