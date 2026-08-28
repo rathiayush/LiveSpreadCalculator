@@ -248,6 +248,11 @@ public static class BrokerRegistration
         // to (see IInstrumentSegmentRegistry's doc comment for why that's needed at all).
         services.AddSingleton<IInstrumentSegmentRegistry>(sp => sp.GetRequiredService<DhanSegmentRegistry>());
 
+        // CdvHostedService's one-shot REST spot-price bootstrap (see ISpotPriceBootstrap's doc
+        // comment) - never an ongoing polling source, only unblocks ATM resolution before the live
+        // feed has ticked yet.
+        services.AddSingleton<ISpotPriceBootstrap, DhanQuoteService>();
+
         services.AddSingleton(sp => new DhanOrderGateway(
             sp.GetRequiredService<DhanApiClient>(),
             sp.GetRequiredService<DhanInstrumentMasterService>(),

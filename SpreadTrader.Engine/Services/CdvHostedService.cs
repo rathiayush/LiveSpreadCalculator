@@ -71,6 +71,7 @@ public sealed class CdvHostedService : BackgroundService
     private readonly ICdvPublisher _publisher;
     private readonly CdvTokenRegistry _tokenRegistry;
     private readonly IInstrumentSegmentRegistry _segmentRegistry;
+    private readonly ISpotPriceBootstrap _spotBootstrap;
     private readonly CdvOptions _options;
     private readonly ILogger<CdvHostedService> _logger;
 
@@ -78,6 +79,12 @@ public sealed class CdvHostedService : BackgroundService
     // plain Dictionary is safe.
     private readonly Dictionary<string, UnderlyingState> _states = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _warnedUnderlyings = new(StringComparer.OrdinalIgnoreCase);
+
+    // Tracks the last trading day the one-shot REST bootstrap (see ISpotPriceBootstrap) was
+    // attempted for each underlying, so it fires at most once per underlying per day regardless of
+    // outcome - a stale/mismatched entry here (including "never attempted") is what triggers the
+    // next attempt, so this self-resets on a new day with no explicit clearing needed.
+    private readonly Dictionary<string, DateOnly> _bootstrapAttemptedDay = new(StringComparer.OrdinalIgnoreCase);
 
     // Written from the ExecuteAsync loop (EnsureChainAsync) but READ from OnTick, which runs on the
     // feed's own receive-loop thread (see IMarketDataFeed.TickReceived's doc comment) - genuinely
@@ -91,6 +98,7 @@ public sealed class CdvHostedService : BackgroundService
         ICdvPublisher publisher,
         CdvTokenRegistry tokenRegistry,
         IInstrumentSegmentRegistry segmentRegistry,
+        ISpotPriceBootstrap spotBootstrap,
         IOptions<CdvOptions> options,
         ILogger<CdvHostedService> logger)
     {
@@ -100,6 +108,7 @@ public sealed class CdvHostedService : BackgroundService
         _publisher = publisher;
         _tokenRegistry = tokenRegistry;
         _segmentRegistry = segmentRegistry;
+        _spotBootstrap = spotBootstrap;
         _options = options.Value;
         _logger = logger;
     }
@@ -232,20 +241,42 @@ public sealed class CdvHostedService : BackgroundService
             return null;
         }
 
-        if (!_tickStore.TryGet(spot.InstrumentToken, out var spotTick) || SpotPrice(spotTick) <= 0)
+        decimal spotPrice;
+        if (_tickStore.TryGet(spot.InstrumentToken, out var spotTick) && SpotPrice(spotTick) > 0)
+        {
+            spotPrice = SpotPrice(spotTick);
+        }
+        else
         {
             // Spot hasn't ticked yet this process lifetime - subscribe it now (harmless if already
-            // subscribed) and try again next cycle once a tick has actually arrived. This used to be
-            // silent, which made it indistinguishable from every other "still resolving" state from
-            // the logs alone - now explicit every cycle it's hit, same as the two checks above.
+            // subscribed). This used to just return and wait for next cycle's live tick; now it
+            // also tries a ONE-TIME REST bootstrap (see ISpotPriceBootstrap) so ATM resolution isn't
+            // blocked for however long the live feed takes to start streaming this instrument -
+            // every price after this single call still comes from the live feed exactly as before.
             _logger.LogWarning(
-                "CDV: {Underlying} spot (token {Token}) has not ticked yet - (re)subscribing and retrying next cycle.",
+                "CDV: {Underlying} spot (token {Token}) has not ticked yet - (re)subscribing.",
                 underlying, spot.InstrumentToken);
             await _marketDataFeed.SubscribeAsync(new[] { spot.InstrumentToken }, stoppingToken);
-            return state;
-        }
 
-        var spotPrice = SpotPrice(spotTick);
+            decimal? bootstrapPrice = null;
+            if (!_bootstrapAttemptedDay.TryGetValue(underlying, out var attemptedDay) || attemptedDay != todayIst)
+            {
+                // Marked BEFORE the call, and regardless of outcome - a failed attempt (not
+                // authenticated, network error) must not retry every single cycle for the rest of
+                // the day; the live feed is still the fallback either way.
+                _bootstrapAttemptedDay[underlying] = todayIst;
+                bootstrapPrice = await _spotBootstrap.GetLastTradedPriceAsync(spot.InstrumentToken, spot.Segment, stoppingToken);
+                if (bootstrapPrice is > 0)
+                {
+                    _logger.LogInformation(
+                        "CDV: bootstrapped {Underlying} spot via REST LTP ({Price}) while waiting for the live feed to start ticking.",
+                        underlying, bootstrapPrice);
+                }
+            }
+
+            if (bootstrapPrice is not > 0) return state; // still nothing to work with - retry next cycle
+            spotPrice = bootstrapPrice.Value;
+        }
         var atm = (int)(Math.Round(spotPrice / strikeStep, MidpointRounding.AwayFromZero) * strikeStep);
 
         var freshDay = isNewDay || state is null || state.Expiry != expiry.Value;
