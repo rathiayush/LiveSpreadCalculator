@@ -322,6 +322,10 @@ public sealed class CdvHostedService : BackgroundService
         state.Atm = atm;
         state.LastAtmRecenterUtc = nowUtc;
 
+        _logger.LogInformation(
+            "CDV: {Underlying} spot={Spot}, strikeStep={StrikeStep} -> ATM={Atm}, expiry={Expiry}.",
+            underlying, spotPrice, strikeStep, atm, expiry.Value);
+
         var toSubscribe = new List<uint>();
         var barCount = state.Strikes.Values.Select(s => s.BarValues.Count).DefaultIfEmpty(0).Max();
 
@@ -359,6 +363,12 @@ public sealed class CdvHostedService : BackgroundService
 
         if (toSubscribe.Count > 0)
             await _marketDataFeed.SubscribeAsync(toSubscribe, stoppingToken);
+
+        var ceStrikeList = string.Join(", ", state.Strikes.Values.Where(s => s.IsCall).Select(s => s.Strike).OrderBy(v => v));
+        var peStrikeList = string.Join(", ", state.Strikes.Values.Where(s => !s.IsCall).Select(s => s.Strike).OrderBy(v => v));
+        _logger.LogInformation(
+            "CDV: {Underlying} tracking CE strikes [{CeStrikes}] and PE strikes [{PeStrikes}] (subscribe window {SubscribeRange}x{StrikeStep} around ATM {Atm}).",
+            underlying, ceStrikeList, peStrikeList, _options.SubscribeStrikeRange, state.StrikeStep, atm);
 
         if (freshDay && !state.PreviousDayBackfillAttempted)
         {
