@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using SpreadTrader.Core.Brokers;
 
 namespace SpreadTrader.DhanIntegration;
 
@@ -28,9 +29,12 @@ namespace SpreadTrader.DhanIntegration;
 /// happens to share the id in another segment.
 ///
 /// Bounded by the number of distinct instruments the account has actually held while this process
-/// has been running, which is the same order as the position count - so it needs no eviction.
+/// has been running, which is the same order as the position count - so it needs no eviction. CDV
+/// (see CdvHostedService) is the second caller of Remember, for the same underlying reason: its
+/// option contracts are resolved via IOptionChainSource, not the futures-only instrument master
+/// either, so without this their tokens would be silently unresolvable here too.
 /// </summary>
-public sealed class DhanSegmentRegistry
+public sealed class DhanSegmentRegistry : IInstrumentSegmentRegistry
 {
     private readonly ConcurrentDictionary<uint, string> _segments = new();
 

@@ -243,6 +243,11 @@ public static class BrokerRegistration
         // the switching layer.
         services.AddSingleton<IOptionChainSource>(sp => sp.GetRequiredService<DhanInstrumentMasterService>());
 
+        // Same "always Dhan, regardless of which platform is active" reasoning as IOptionChainSource
+        // above - lets CdvHostedService teach the live feed which segment its option tokens belong
+        // to (see IInstrumentSegmentRegistry's doc comment for why that's needed at all).
+        services.AddSingleton<IInstrumentSegmentRegistry>(sp => sp.GetRequiredService<DhanSegmentRegistry>());
+
         services.AddSingleton(sp => new DhanOrderGateway(
             sp.GetRequiredService<DhanApiClient>(),
             sp.GetRequiredService<DhanInstrumentMasterService>(),

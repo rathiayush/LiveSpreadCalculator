@@ -70,6 +70,7 @@ public sealed class CdvHostedService : BackgroundService
     private readonly ITickStore _tickStore;
     private readonly ICdvPublisher _publisher;
     private readonly CdvTokenRegistry _tokenRegistry;
+    private readonly IInstrumentSegmentRegistry _segmentRegistry;
     private readonly CdvOptions _options;
     private readonly ILogger<CdvHostedService> _logger;
 
@@ -89,6 +90,7 @@ public sealed class CdvHostedService : BackgroundService
         ITickStore tickStore,
         ICdvPublisher publisher,
         CdvTokenRegistry tokenRegistry,
+        IInstrumentSegmentRegistry segmentRegistry,
         IOptions<CdvOptions> options,
         ILogger<CdvHostedService> logger)
     {
@@ -97,6 +99,7 @@ public sealed class CdvHostedService : BackgroundService
         _tickStore = tickStore;
         _publisher = publisher;
         _tokenRegistry = tokenRegistry;
+        _segmentRegistry = segmentRegistry;
         _options = options.Value;
         _logger = logger;
     }
@@ -189,6 +192,7 @@ public sealed class CdvHostedService : BackgroundService
             _logger.LogWarning("CDV: no spot instrument resolved for {Underlying} - skipping.", underlying);
             return null;
         }
+        _segmentRegistry.Remember(spot.InstrumentToken, spot.Segment);
 
         var expiry = _instrumentMaster.GetNearestOptionExpiry(underlying, todayIst);
         if (expiry is null)
@@ -220,7 +224,10 @@ public sealed class CdvHostedService : BackgroundService
             state = new UnderlyingState(underlying, strikeStep, expiry.Value, todayIst);
         }
 
-        state.Atm = atm;
+        // freshDay is false here only when state was already non-null going in (freshDay's own
+        // definition includes "state is null"), so this is always non-null - the compiler just
+        // can't follow that cross-variable proof through the `if` above.
+        state!.Atm = atm;
         state.SpotToken = spot.InstrumentToken;
         lock (state) state.LastSpot = spotPrice; // OnTick's spot-tick branch also writes this under lock(state)
         state.LastAtmRecenterUtc = nowUtc;
@@ -241,6 +248,13 @@ public sealed class CdvHostedService : BackgroundService
 
                 var contract = _instrumentMaster.FindOption(underlying, expiry.Value, strike, isCall);
                 if (contract is null) continue; // strike not listed for this expiry - skip, like Pine's nz()
+
+                // CRITICAL: an option contract is never in IBrokerInstrumentMaster's futures-only
+                // lookups, which is all DhanMarketFeedClient's segment lookup otherwise consults -
+                // without this, SubscribeAsync below would silently drop every one of these tokens
+                // (logged only as "no entry in the Dhan scrip master, so their exchange segment is
+                // unknown") and no option tick would ever arrive. See IInstrumentSegmentRegistry.
+                _segmentRegistry.Remember(contract.InstrumentToken, contract.Segment);
 
                 var runtime = new StrikeRuntime(contract.InstrumentToken, strike, isCall);
                 // Backfill zeros so every strike's BarValues stays index-aligned with the rest of
