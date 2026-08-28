@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Models;
 using SpreadTrader.Core.Brokers;
+using SpreadTrader.Core.Store;
 
 namespace SpreadTrader.Engine.Services;
 
@@ -35,6 +36,7 @@ public sealed class TickIngestionHostedService : BackgroundService
     private readonly IMarketDataFeed _tickerClient;
     private readonly ITickStore _tickStore;
     private readonly PositionsCache _positionsCache;
+    private readonly CdvTokenRegistry _cdvTokenRegistry;
     private readonly ILogger<TickIngestionHostedService> _logger;
 
     public TickIngestionHostedService(
@@ -43,6 +45,7 @@ public sealed class TickIngestionHostedService : BackgroundService
         IMarketDataFeed tickerClient,
         ITickStore tickStore,
         PositionsCache positionsCache,
+        CdvTokenRegistry cdvTokenRegistry,
         ILogger<TickIngestionHostedService> logger)
     {
         _spreadStore = spreadStore;
@@ -50,6 +53,7 @@ public sealed class TickIngestionHostedService : BackgroundService
         _tickerClient = tickerClient;
         _tickStore = tickStore;
         _positionsCache = positionsCache;
+        _cdvTokenRegistry = cdvTokenRegistry;
         _logger = logger;
     }
 
@@ -126,6 +130,10 @@ public sealed class TickIngestionHostedService : BackgroundService
             if (spread.SpotLeg is { InstrumentToken: not 0 } spot) needed.Add(spot.InstrumentToken);
         }
         foreach (var token in _positionsCache.GetAnchoredTokens()) needed.Add(token);
+        // CdvHostedService subscribes its own strike-chain tokens directly against the same feed
+        // (see its class doc comment) - without this, this loop would see them as "used by no
+        // spread and no position" and unsubscribe the whole CDV chain within one reconcile cycle.
+        foreach (var token in _cdvTokenRegistry.GetTokens()) needed.Add(token);
 
         var stale = _tickerClient.GetSubscribedTokens().Where(t => !needed.Contains(t)).ToArray();
         if (stale.Length == 0) return;

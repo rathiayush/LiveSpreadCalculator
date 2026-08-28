@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using SpreadTrader.Core.Abstractions;
 using SpreadTrader.Core.Brokers;
 using SpreadTrader.Core.Models;
+using SpreadTrader.Core.Store;
 using SpreadTrader.Engine;
 using SpreadTrader.Engine.Services;
 
@@ -36,7 +37,7 @@ public class UniverseSpotWiringTests
             new NoPositionsService(), feed, new FakeTickStore(), master, NullLogger<PositionsCache>.Instance);
 
         var ingestion = new TickIngestionHostedService(
-            spreads, master, feed, new FakeTickStore(), positions, NullLogger<TickIngestionHostedService>.Instance);
+            spreads, master, feed, new FakeTickStore(), positions, new CdvTokenRegistry(), NullLogger<TickIngestionHostedService>.Instance);
 
         var builder = new UniverseBuilderService(
             master, spreads, ingestion, NullLogger<UniverseBuilderService>.Instance,

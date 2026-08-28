@@ -222,4 +222,8 @@ export const api = {
   createPnlAlert: (alert) =>
     authFetch('/api/pnl-alerts', { method: 'POST', headers: jsonHeaders, body: JSON.stringify(alert) }).then(handle),
   deletePnlAlert: (id) => authFetch(`/api/pnl-alerts/${encodeURIComponent(id)}`, { method: 'DELETE' }).then(handle),
+
+  // Latest CDV (delta-weighted Cumulative Delta Volume) snapshot per underlying - seeds the CDV
+  // page before the first "cdvUpdate" SignalR push. See CdvController/CdvHostedService.
+  getCdvSnapshot: () => authFetch('/api/cdv/snapshot').then(handle),
 }

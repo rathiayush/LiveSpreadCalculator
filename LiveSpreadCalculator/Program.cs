@@ -24,6 +24,7 @@ var builder = WebApplication.CreateBuilder(args);
 const string DashboardCorsPolicy = "Dashboard";
 
 builder.Services.Configure<EngineOptions>(builder.Configuration.GetSection(EngineOptions.SectionName));
+builder.Services.Configure<CdvOptions>(builder.Configuration.GetSection(CdvOptions.SectionName));
 
 // MCX commodity arbitrage add-on (silver/gold/crude/natgas calendar + cross-contract spreads).
 // The whole feature is gated behind Mcx:Enabled (default false) - see McxOptions. Bound once here
@@ -97,6 +98,12 @@ var spreadHistoryConnectionString = builder.Configuration["Storage:SpreadHistory
 var spreadHistoryWriter = builder.Configuration.GetValue<bool>("Engine:SpreadHistoryWriter");
 
 builder.Services.AddSingleton<ITickStore, InMemoryTickStore>();
+// CDV feature (see CdvHostedService) - the set of tokens it needs live ticks for, consulted by
+// TickIngestionHostedService's reconciliation loop so it never unsubscribes them - see
+// CdvTokenRegistry's doc comment. Registered here (Core, no broker dependency) so both services
+// can share it regardless of registration order.
+builder.Services.AddSingleton<CdvTokenRegistry>();
+builder.Services.AddSingleton<ICdvSnapshotCache, InMemoryCdvSnapshotCache>();
 builder.Services.AddSingleton<ITriggerRuleStore>(sp =>
     new CsvTriggerRuleStore(triggersCsvPath, sp.GetRequiredService<ILogger<CsvTriggerRuleStore>>()));
 builder.Services.AddSingleton<IExitTriggerRuleStore>(sp =>
@@ -169,6 +176,14 @@ builder.Services.AddHostedService<DailyMaintenanceHostedService>();
 
 builder.Services.AddSingleton<ISpreadPublisher, SignalRSpreadPublisher>();
 builder.Services.AddSingleton<ITriggerEventSink, SignalRTriggerEventSink>();
+
+// CDV feed (delta-weighted Cumulative Delta Volume for an index option chain's CE/PE order flow -
+// see CdvHostedService's class doc comment). Dhan-only: it depends on DhanInstrumentMasterService
+// directly (already registered as a concrete singleton by AddDhan above) rather than the
+// broker-switching IBrokerInstrumentMaster, since option-chain resolution isn't part of that
+// interface's futures-only contract - see DhanInstrumentMasterService's option-chain doc comment.
+builder.Services.AddSingleton<ICdvPublisher, SignalRCdvPublisher>();
+builder.Services.AddHostedService<CdvHostedService>();
 
 // The single Kite positions poller for the whole process - see PositionsCache's doc comment for
 // why this was extracted out of LivePositionsHostedService (so PnlAlertHostedService below doesn't

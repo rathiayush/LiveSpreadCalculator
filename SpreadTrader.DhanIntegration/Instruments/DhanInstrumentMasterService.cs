@@ -42,7 +42,7 @@ namespace SpreadTrader.DhanIntegration.Instruments;
 /// memory only and trigger rules are cleared daily, so the migration path is simply to rebuild the
 /// universe (POST /api/universe/build) once after switching Broker:Platform and restarting.
 /// </summary>
-public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
+public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster, IOptionChainSource
 {
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromHours(12);
 
@@ -60,6 +60,36 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
     /// but held separately so the futures lookups keep their futures-only meaning. Read only
     /// through FindSpot - see the IBrokerInstrumentMaster doc comment.</summary>
     private List<BrokerInstrument> _spotInstruments = new();
+
+    /// <summary>Index option (OPTIDX) contracts for the CDV feature's underlyings - see
+    /// FindOption/GetOptionExpiries. NOT part of IBrokerInstrumentMaster (that interface stays
+    /// futures-only by design, see its doc comment); these are extra methods on this concrete
+    /// class only, consumed directly by CdvHostedService the same way DhanOrderGateway etc.
+    /// already depend on this class concretely rather than through the interface.
+    ///
+    /// Narrowed to <see cref="_optionUnderlyings"/> while parsing - the option chain is the bulk
+    /// of Dhan's ~200k-row scrip master (every strike x every weekly/monthly expiry x every
+    /// underlying), so keeping only the couple of index underlyings this app actually streams CDV
+    /// for avoids holding tens of thousands of irrelevant OPTSTK/OPTFUT rows in memory.</summary>
+    private List<BrokerInstrument> _optionInstruments = new();
+
+    /// <summary>Underlying names to keep OPTIDX rows for - everything else is discarded during
+    /// parse, same treatment as the futures-only filter above. Defaults to the two index chains
+    /// the CDV feature ships with (see CdvOptions.Chains); a deployment that wires up CdvOptions
+    /// with other underlyings should pass those names in here via the constructor.</summary>
+    private readonly HashSet<string> _optionUnderlyings;
+
+    /// <summary>"UNDERLYING|yyyy-MM-dd|STRIKE|CE-or-PE" -> the resolved contract. Keyed once at
+    /// parse time (BuildOptionIndex) rather than filtered with LINQ on every lookup - FindOption is
+    /// called once per strike per underlying every time CdvHostedService (re)resolves its strike
+    /// chain, which is cheap either way, but this keeps it O(1) regardless of how large the option
+    /// list grows.</summary>
+    private Dictionary<string, BrokerInstrument> _optionsByKey = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Every distinct expiry date available per underlying, ascending - see
+    /// GetNearestOptionExpiry, which is what "only fetch near expiry" (CDV only ever subscribes
+    /// the nearest one) is built on.</summary>
+    private Dictionary<string, List<DateOnly>> _optionExpiriesByUnderlying = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Both of Dhan's symbol spellings for each contract point at the same instrument, so
     /// a lookup by either resolves. Dhan's own positions/orders responses report the trading
@@ -81,7 +111,8 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         ILogger<DhanInstrumentMasterService> logger,
         string futuresCsvPath,
         IReadOnlyList<string>? exchanges = null,
-        string? scripMasterCachePath = null)
+        string? scripMasterCachePath = null,
+        IReadOnlyList<string>? optionUnderlyings = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
@@ -91,6 +122,9 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             Path.GetDirectoryName(futuresCsvPath) ?? ".", "dhan_scrip_master_cache.csv");
         _exchanges = new HashSet<string>(
             exchanges is { Count: > 0 } ? exchanges : new[] { "NFO" },
+            StringComparer.OrdinalIgnoreCase);
+        _optionUnderlyings = new HashSet<string>(
+            optionUnderlyings is { Count: > 0 } ? optionUnderlyings : new[] { "NIFTY", "BANKNIFTY" },
             StringComparer.OrdinalIgnoreCase);
     }
 
@@ -178,6 +212,7 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             _instruments = parsed.Futures.Select(p => p.Instrument).ToList();
             _spotInstruments = parsed.Spot;
             _bySymbol = BuildSymbolIndex(parsed.Futures);
+            BuildOptionIndex(parsed.Options);
 
             var age = DateTimeOffset.UtcNow - File.GetLastWriteTimeUtc(_scripMasterCachePath);
             _logger.LogInformation(
@@ -215,11 +250,14 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         _instruments = parsed.Futures.Select(p => p.Instrument).ToList();
         _spotInstruments = parsed.Spot;
         _bySymbol = BuildSymbolIndex(parsed.Futures);
+        BuildOptionIndex(parsed.Options);
         _loadedAt = DateTimeOffset.UtcNow;
 
         _logger.LogInformation(
-            "Instrument master ready: {Count} futures across [{Exchanges}], plus {SpotCount} cash/index instruments for spot pricing (options and other exchanges discarded during parse)",
-            _instruments.Count, string.Join(", ", _exchanges), _spotInstruments.Count);
+            "Instrument master ready: {Count} futures across [{Exchanges}], plus {SpotCount} cash/index instruments for spot pricing " +
+            "and {OptionCount} index option contracts for [{OptionUnderlyings}] (other options/exchanges discarded during parse)",
+            _instruments.Count, string.Join(", ", _exchanges), _spotInstruments.Count,
+            _optionInstruments.Count, string.Join(", ", _optionUnderlyings));
 
         if (_instruments.Count == 0)
         {
@@ -290,6 +328,60 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
     }
 
     private static string Key(string symbol, string exchange) => $"{symbol}|{exchange}";
+
+    /// <summary>Indexes the parsed option rows by underlying/expiry/strike/right for FindOption,
+    /// and collects each underlying's distinct expiries ascending for GetOptionExpiries/
+    /// GetNearestOptionExpiry. Rebuilt wholesale on every load, same as _bySymbol - options expire
+    /// and new weekly contracts appear constantly, so there is no per-row diffing, just replace
+    /// the whole index from the latest parse.</summary>
+    private void BuildOptionIndex(IReadOnlyList<BrokerInstrument> options)
+    {
+        _optionInstruments = options.ToList();
+
+        var byKey = new Dictionary<string, BrokerInstrument>(StringComparer.OrdinalIgnoreCase);
+        var expiries = new Dictionary<string, SortedSet<DateOnly>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var option in options)
+        {
+            if (option.Expiry is not { } expiry || option.Strike is not { } strike || string.IsNullOrEmpty(option.OptionType))
+                continue;
+
+            byKey[OptionKey(option.Name, expiry, strike, option.OptionType)] = option;
+
+            if (!expiries.TryGetValue(option.Name, out var set))
+                expiries[option.Name] = set = new SortedSet<DateOnly>();
+            set.Add(expiry);
+        }
+
+        _optionsByKey = byKey;
+        _optionExpiriesByUnderlying = expiries.ToDictionary(
+            kv => kv.Key, kv => kv.Value.ToList(), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string OptionKey(string underlying, DateOnly expiry, decimal strike, string optionType) =>
+        $"{underlying}|{expiry:yyyy-MM-dd}|{strike:0.####}|{optionType.ToUpperInvariant()}";
+
+    /// <summary>Every expiry currently listed for this underlying's index options, ascending -
+    /// empty if the underlying isn't in the configured option allow-list or nothing has loaded
+    /// yet. Call EnsureLoadedAsync first.</summary>
+    public IReadOnlyList<DateOnly> GetOptionExpiries(string underlying) =>
+        _optionExpiriesByUnderlying.TryGetValue(underlying, out var list) ? list : Array.Empty<DateOnly>();
+
+    /// <summary>The nearest (soonest) expiry that hasn't already passed <paramref name="asOf"/>,
+    /// or null if none is listed. This is the ONLY expiry CdvHostedService ever subscribes -
+    /// deliberately not the whole chain, since the far-dated monthly contracts add strikes nobody
+    /// is trading without adding any useful order-flow signal.</summary>
+    public DateOnly? GetNearestOptionExpiry(string underlying, DateOnly asOf) =>
+        GetOptionExpiries(underlying).Where(e => e >= asOf).Cast<DateOnly?>().FirstOrDefault();
+
+    /// <summary>Resolves one CE/PE contract by underlying + expiry + strike. Returns null rather
+    /// than throwing - a strike that doesn't exist for this expiry (e.g. the chain doesn't extend
+    /// that far OTM yet) is routine, not an error; callers skip it the same way
+    /// TickIngestionHostedService skips an unresolvable spread leg.</summary>
+    public BrokerInstrument? FindOption(string underlying, DateOnly expiry, decimal strike, bool isCall) =>
+        _optionsByKey.TryGetValue(OptionKey(underlying, expiry, strike, isCall ? "CE" : "PE"), out var match)
+            ? match
+            : null;
 
     public BrokerInstrument? Find(string tradingSymbol, string exchange)
     {
@@ -398,6 +490,12 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         public static readonly string[] Expiry = { "SEM_EXPIRY_DATE", "SM_EXPIRY_DATE", "EXPIRY_DATE" };
         public static readonly string[] LotSize = { "SEM_LOT_UNITS", "LOT_SIZE" };
         public static readonly string[] TickSize = { "SEM_TICK_SIZE", "TICK_SIZE" };
+
+        /// <summary>Option contracts only - confirmed present in Dhan's compact scrip master as
+        /// SEM_STRIKE_PRICE (a plain rupee decimal, unlike tick size this is NOT in paise) and
+        /// SEM_OPTION_TYPE ("CE"/"PE"; non-option rows carry "XX").</summary>
+        public static readonly string[] Strike = { "SEM_STRIKE_PRICE", "STRIKE_PRICE" };
+        public static readonly string[] OptionType = { "SEM_OPTION_TYPE", "OPTION_TYPE" };
     }
 
     /// <summary>Streams the CSV, keeping only futures on the configured exchanges. Returns each
@@ -407,13 +505,14 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
     {
         var result = new List<(BrokerInstrument Instrument, string? Alias)>();
         var spot = new List<BrokerInstrument>();
+        var options = new List<BrokerInstrument>();
         using var reader = new StreamReader(stream);
 
         var headerLine = reader.ReadLine();
         if (headerLine is null)
         {
             _logger.LogError("Dhan scrip master was empty - no header row.");
-            return new ParsedMaster(result, spot);
+            return new ParsedMaster(result, spot, options);
         }
 
         var header = BuildHeaderMap(SplitCsvLine(headerLine));
@@ -428,6 +527,8 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
         var expiryIndex = Resolve(header, Columns.Expiry);
         var lotSizeIndex = Resolve(header, Columns.LotSize);
         var tickSizeIndex = Resolve(header, Columns.TickSize);
+        var strikeIndex = Resolve(header, Columns.Strike);
+        var optionTypeIndex = Resolve(header, Columns.OptionType);
 
         // Without these four there is nothing usable to build - fail loudly rather than silently
         // returning an empty universe that looks like "the market has no futures today".
@@ -443,7 +544,7 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
                 "The detailed scrip master (api-scrip-master-detailed.csv) is NOT supported: it has no per-contract trading symbol column. " +
                 "Set Dhan:ScripMasterUrl to the compact list, https://images.dhan.co/api-data/api-scrip-master.csv. Header was: {Header}",
                 _options.ScripMasterUrl, headerLine);
-            return new ParsedMaster(result, spot);
+            return new ParsedMaster(result, spot, options);
         }
 
         string? line;
@@ -455,6 +556,19 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             var instrumentName = Get(fields, instrumentNameIndex);
             if (!DhanSymbology.IsFuture(instrumentName))
             {
+                // Index options (OPTIDX) for the CDV feature's configured underlyings are kept too
+                // - OPTSTK/OPTFUT/OPTCUR and every other underlying are still discarded, which is
+                // what keeps this from pulling in the ~150k-row bulk of the file (every strike x
+                // every expiry x every stock). See _optionUnderlyings/BuildOptionIndex.
+                if (string.Equals(instrumentName?.Trim(), "OPTIDX", StringComparison.OrdinalIgnoreCase) &&
+                    TryReadOptionRow(fields, securityIdIndex, exchangeIndex, segmentIndex, tradingSymbolIndex,
+                        underlyingIndex, expiryIndex, lotSizeIndex, tickSizeIndex, strikeIndex, optionTypeIndex,
+                        out var optionInstrument))
+                {
+                    options.Add(optionInstrument);
+                    continue;
+                }
+
                 // Options are still discarded here (the bulk of the file), but cash equities and
                 // index levels are kept - this same download already contains them, so spot pricing
                 // costs no extra request. They go into their own list, never into the futures one.
@@ -501,7 +615,60 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
             result.Add((instrument, alias));
         }
 
-        return new ParsedMaster(result, spot);
+        return new ParsedMaster(result, spot, options);
+    }
+
+    /// <summary>Parses one OPTIDX row into a BrokerInstrument carrying Strike/OptionType, narrowed
+    /// to <see cref="_optionUnderlyings"/> - everything else (wrong underlying, unparsable strike/
+    /// right/expiry) returns false so the caller falls through to the spot-row check instead.
+    /// TickSize/LotSize reuse the exact same paise/decimal parsing as futures rows - Dhan's option
+    /// rows use the identical encoding (confirmed: NSE option ticks are "5.0000" for Rs 0.05, same
+    /// as futures' ParseTickSize doc comment already notes).</summary>
+    private bool TryReadOptionRow(
+        string[] fields,
+        int securityIdIndex, int exchangeIndex, int segmentIndex, int tradingSymbolIndex,
+        int underlyingIndex, int expiryIndex, int lotSizeIndex, int tickSizeIndex,
+        int strikeIndex, int optionTypeIndex,
+        out BrokerInstrument instrument)
+    {
+        instrument = null!;
+
+        var underlying = Get(fields, underlyingIndex);
+        if (string.IsNullOrWhiteSpace(underlying) || !_optionUnderlyings.Contains(underlying)) return false;
+
+        var exchangeId = Get(fields, exchangeIndex);
+        var canonicalExchange = ToCanonicalExchange(exchangeId, Get(fields, segmentIndex));
+        if (canonicalExchange is null) return false;
+
+        if (!uint.TryParse(Get(fields, securityIdIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var securityId))
+            return false;
+
+        var tradingSymbol = Get(fields, tradingSymbolIndex);
+        if (string.IsNullOrWhiteSpace(tradingSymbol)) return false;
+
+        var expiry = ParseExpiry(Get(fields, expiryIndex));
+        if (expiry is null) return false;
+
+        var optionType = Get(fields, optionTypeIndex)?.Trim().ToUpperInvariant();
+        if (optionType is not ("CE" or "PE")) return false;
+
+        var strike = ParseDecimal(Get(fields, strikeIndex));
+        if (strike <= 0) return false;
+
+        instrument = new BrokerInstrument(
+            InstrumentToken: securityId,
+            TradingSymbol: tradingSymbol,
+            Name: underlying,
+            Exchange: canonicalExchange,
+            Segment: DhanSymbology.ToDhanSegment(canonicalExchange),
+            InstrumentType: "OPT",
+            Expiry: expiry,
+            LotSize: ParseLotSize(Get(fields, lotSizeIndex)),
+            TickSize: ParseTickSize(Get(fields, tickSizeIndex)),
+            Strike: strike,
+            OptionType: optionType);
+
+        return true;
     }
 
     /// <summary>What one pass over the scrip master yields: the futures universe this app trades,
@@ -509,7 +676,8 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster
     /// only to price spot. Kept apart so every futures lookup stays futures-only.</summary>
     private sealed record ParsedMaster(
         List<(BrokerInstrument Instrument, string? Alias)> Futures,
-        List<BrokerInstrument> Spot);
+        List<BrokerInstrument> Spot,
+        List<BrokerInstrument> Options);
 
     /// <summary>
     /// Recognises the two non-futures row types worth keeping: NSE cash equities (EQUITY) and NSE

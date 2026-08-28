@@ -32,4 +32,9 @@ public sealed record BrokerInstrument(
     // or the broker rejects the order outright. Mostly 0.05 for NSE F&O but genuinely varies by
     // instrument, hence tracked per-contract rather than assumed - see
     // OrderDispatchHostedService.ApplyMarketProtection.
-    decimal TickSize = 0);
+    decimal TickSize = 0,
+    // Option contracts only (InstrumentType "OPT") - the strike price and "CE"/"PE" right. Null
+    // for every other instrument type (futures, equity, index). See
+    // DhanInstrumentMasterService's option-chain parsing, the only current producer of these.
+    decimal? Strike = null,
+    string? OptionType = null);

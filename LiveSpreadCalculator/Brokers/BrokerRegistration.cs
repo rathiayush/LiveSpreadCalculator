@@ -236,6 +236,13 @@ public static class BrokerRegistration
             mcxOptions.ResolveExchanges(),
             scripMasterCachePath));
 
+        // CDV feature (see CdvHostedService) - always points at Dhan's own instrument index,
+        // independent of which platform BrokerSwitchState currently has active for trading, since
+        // Dhan is always constructed regardless (see this method's class doc comment) - see
+        // IOptionChainSource's doc comment for why this is Dhan-only rather than routed through
+        // the switching layer.
+        services.AddSingleton<IOptionChainSource>(sp => sp.GetRequiredService<DhanInstrumentMasterService>());
+
         services.AddSingleton(sp => new DhanOrderGateway(
             sp.GetRequiredService<DhanApiClient>(),
             sp.GetRequiredService<DhanInstrumentMasterService>(),

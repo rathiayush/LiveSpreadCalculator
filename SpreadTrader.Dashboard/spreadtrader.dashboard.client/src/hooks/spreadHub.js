@@ -41,6 +41,35 @@ let connectionState = 'connecting'
 // pushes this roughly every 750ms while any position is open (reacting instantly to order
 // postbacks in between). [] means "none open" just as much as "not loaded yet" - same as
 // spreadsMap/rankingList, there's no separate loading flag for this slice either.
+// CDV: underlying -> latest CdvSnapshot (from "cdvUpdate" pushes / GET /api/cdv/snapshot), and
+// underlying -> a bounded rolling array of {time, ce, pe} points for the live chart - built up
+// client-side from successive snapshots since the backend only ever pushes the latest bar, not a
+// history endpoint (CdvHostedService is in-memory/intraday-only, same "no data storage" philosophy
+// as everything else in this app - see ITickStore's doc comment).
+let cdvMap = {}
+let cdvSeriesMap = {}
+const CDV_SERIES_MAX_POINTS = 500 // a full trading day at the default 60s bar size, with headroom
+
+const cdvListeners = new Set()
+const subscribeCdv = subscribe(cdvListeners)
+const getCdvSnapshot_ = () => cdvMap
+
+function applyCdvSnapshot(snapshot) {
+  if (!snapshot?.underlying) return
+  cdvMap = { ...cdvMap, [snapshot.underlying]: snapshot }
+
+  const time = Math.floor(new Date(snapshot.timestampUtc).getTime() / 1000)
+  const existing = cdvSeriesMap[snapshot.underlying] || []
+  // Same bar re-published (e.g. a duplicate push) replaces the last point instead of appending -
+  // keeps the series strictly time-ascending, which lightweight-charts requires.
+  const last = existing[existing.length - 1]
+  const point = { time, ce: snapshot.ceEma, pe: snapshot.peEma }
+  const next = last && last.time === time ? [...existing.slice(0, -1), point] : [...existing, point]
+  cdvSeriesMap = { ...cdvSeriesMap, [snapshot.underlying]: next.slice(-CDV_SERIES_MAX_POINTS) }
+
+  notify(cdvListeners)
+}
+
 let positionsList = []
 // Last known error fetching positions (seed or an explicit refreshPositions() call) - null once
 // a fetch/push succeeds. Kept separate from positionsList so a transient fetch failure doesn't
@@ -178,6 +207,15 @@ function ensureConnection() {
     })
     .catch((err) => console.error('[spreadHub] failed to seed trigger activity:', err))
 
+  // Seeds the CDV page from the latest snapshot per underlying so it isn't empty while waiting
+  // for the first "cdvUpdate" push (see CdvHostedService on the backend).
+  api.getCdvSnapshot()
+    .then((initial) => {
+      if (!Array.isArray(initial)) return
+      for (const snapshot of initial) applyCdvSnapshot(snapshot)
+    })
+    .catch((err) => console.error('[spreadHub] failed to seed cdv snapshot:', err))
+
   // Seeds Positions & PNL from a plain REST call so the page isn't empty while waiting for the
   // first "positionsUpdate" push (see LivePositionsHostedService on the backend).
   api.getPositions()
@@ -202,6 +240,10 @@ function ensureConnection() {
     spreadsMap = next
     notify(spreadsListeners)
   })
+
+  // One push per bar (see Cdv:TimeframeSeconds, default 60s) - much lower frequency than
+  // spreadUpdate, so no batching/throttling needed here either.
+  connection.on('cdvUpdate', (snapshot) => applyCdvSnapshot(snapshot))
 
   // Refreshed roughly every Engine:RankingIntervalMinutes (see SpreadRankingHostedService).
   connection.on('rankingUpdate', (rankedList) => {
@@ -328,6 +370,8 @@ export function stopConnection() {
   brokerAuthInvalidReason = null
   positionsList = []
   positionsError = null
+  cdvMap = {}
+  cdvSeriesMap = {}
   // Not carried over to the next login - if Positions & PNL happens to still be mounted across a
   // logout/login, its own effect re-runs joinPositionsView() on the fresh connection anyway.
   positionsViewerWanted = false
@@ -338,6 +382,21 @@ export function stopConnection() {
   notify(connectionListeners)
   notify(positionsListeners)
   notify(positionsErrorListeners)
+  notify(cdvListeners)
+}
+
+const EMPTY_CDV_SERIES = []
+
+// underlying -> latest CdvSnapshot (see CdvSnapshot.cs) for every underlying CdvHostedService is
+// running, e.g. { NIFTY: {...}, BANKNIFTY: {...} }.
+export function useCdvSnapshots() {
+  return useSyncExternalStore(subscribeCdv, getCdvSnapshot_)
+}
+
+// The rolling {time, ce, pe}[] series for one underlying's live chart - empty until the first
+// snapshot for it arrives.
+export function useCdvSeries(underlying) {
+  return useSyncExternalStore(subscribeCdv, () => (underlying ? cdvSeriesMap[underlying] : null) || EMPTY_CDV_SERIES)
 }
 
 // spreadId -> latest SpreadSnapshot. High frequency - only call this from a component that's
