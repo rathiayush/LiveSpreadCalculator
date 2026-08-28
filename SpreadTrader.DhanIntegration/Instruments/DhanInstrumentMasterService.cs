@@ -633,7 +633,18 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster, IOpti
     {
         instrument = null!;
 
+        var tradingSymbol = Get(fields, tradingSymbolIndex);
+        if (string.IsNullOrWhiteSpace(tradingSymbol)) return false;
+
+        // Confirmed against a real download: Dhan leaves SM_SYMBOL_NAME BLANK on every NSE index
+        // option (OPTIDX) row - unlike futures rows, which do populate it - so this column alone
+        // silently dropped every NIFTY/BANKNIFTY option ever parsed. Same fallback the futures
+        // parser already uses: Dhan's option trading symbols are "UNDERLYING-MonYYYY-STRIKE-CE/PE"
+        // ("BANKNIFTY-Sep2026-72600-CE"), so the leading segment before the first dash is the
+        // underlying either way.
         var underlying = Get(fields, underlyingIndex);
+        if (string.IsNullOrWhiteSpace(underlying))
+            underlying = DeriveUnderlying(tradingSymbol);
         if (string.IsNullOrWhiteSpace(underlying) || !_optionUnderlyings.Contains(underlying)) return false;
 
         var exchangeId = Get(fields, exchangeIndex);
@@ -642,9 +653,6 @@ public sealed class DhanInstrumentMasterService : IBrokerInstrumentMaster, IOpti
 
         if (!uint.TryParse(Get(fields, securityIdIndex), NumberStyles.Integer, CultureInfo.InvariantCulture, out var securityId))
             return false;
-
-        var tradingSymbol = Get(fields, tradingSymbolIndex);
-        if (string.IsNullOrWhiteSpace(tradingSymbol)) return false;
 
         var expiry = ParseExpiry(Get(fields, expiryIndex));
         if (expiry is null) return false;
